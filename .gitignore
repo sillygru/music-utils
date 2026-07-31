@@ -1,0 +1,12 @@
+#environment variables
+.env*
+!.env.example
+
+#compiled binaries
+cmd/server/server
+
+#md stuff
+*.md
+!README.md
+!AGENTS.md
+!API.md

@@ -1,0 +1,117 @@
+package lrclib
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+	"time"
+)
+
+var ErrNotFound = errors.New("lrclib track not found")
+
+const (
+	maxResponseBytes = 2 << 20
+	maxIdleConns     = 100
+)
+
+// RemoteResult is the response shape returned by LRCLIB's exact lookup.
+type RemoteResult struct {
+	TrackName    string  `json:"trackName"`
+	ArtistName   string  `json:"artistName"`
+	AlbumName    string  `json:"albumName"`
+	Duration     float64 `json:"duration"`
+	Instrumental bool    `json:"instrumental"`
+	PlainLyrics  string  `json:"plainLyrics"`
+	SyncedLyrics string  `json:"syncedLyrics"`
+}
+
+// Client retrieves exact lyrics from LRCLIB.
+type Client struct {
+	baseURL   string
+	userAgent string
+	http      *http.Client
+}
+
+// New creates a client for baseURL, which should point at LRCLIB's /api path.
+func New(baseURL, userAgent string, timeout time.Duration) (*Client, error) {
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	parsed, err := url.Parse(baseURL)
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return nil, fmt.Errorf("invalid LRCLIB base URL")
+	}
+	if strings.TrimSpace(userAgent) == "" {
+		return nil, fmt.Errorf("LRCLIB user agent is empty")
+	}
+	if timeout <= 0 {
+		return nil, fmt.Errorf("LRCLIB timeout must be positive")
+	}
+	var transport http.RoundTripper = http.DefaultTransport
+	if defaultTransport, ok := http.DefaultTransport.(*http.Transport); ok {
+		optimizedTransport := defaultTransport.Clone()
+		optimizedTransport.MaxIdleConns = maxIdleConns
+		optimizedTransport.MaxIdleConnsPerHost = maxIdleConns
+		optimizedTransport.IdleConnTimeout = 90 * time.Second
+		transport = optimizedTransport
+	}
+
+	return &Client{
+		baseURL:   baseURL,
+		userAgent: userAgent,
+		http:      &http.Client{Timeout: timeout, Transport: transport},
+	}, nil
+}
+
+// GetExact performs one request and returns ErrNotFound for a remote 404.
+func (c *Client) GetExact(ctx context.Context, trackName, artistName, albumName string, duration float64) (*RemoteResult, error) {
+	if c == nil || c.http == nil {
+		return nil, errors.New("LRCLIB client is nil")
+	}
+	endpoint, err := url.Parse(c.baseURL + "/get")
+	if err != nil {
+		return nil, fmt.Errorf("build LRCLIB URL: %w", err)
+	}
+	query := endpoint.Query()
+	query.Set("track_name", trackName)
+	query.Set("artist_name", artistName)
+	if strings.TrimSpace(albumName) != "" {
+		query.Set("album_name", albumName)
+	}
+	if duration > 0 {
+		query.Set("duration", strconv.FormatFloat(duration, 'f', -1, 64))
+	}
+	endpoint.RawQuery = query.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("create LRCLIB request: %w", err)
+	}
+	req.Header.Set("User-Agent", c.userAgent)
+	req.Header.Set("Accept", "application/json")
+
+	response, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request LRCLIB: %w", err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode == http.StatusNotFound {
+		return nil, ErrNotFound
+	}
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		_, _ = io.CopyN(io.Discard, response.Body, maxResponseBytes)
+		return nil, fmt.Errorf("LRCLIB returned HTTP %d", response.StatusCode)
+	}
+
+	var result RemoteResult
+	decoder := json.NewDecoder(io.LimitReader(response.Body, maxResponseBytes))
+	if err := decoder.Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode LRCLIB response: %w", err)
+	}
+	return &result, nil
+}
