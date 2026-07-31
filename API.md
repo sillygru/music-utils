@@ -42,6 +42,15 @@ below are served on the configured port (`:8080` by default).
 
 Health check. Returns `{"status": "ok"}` with HTTP `200`. Not rate limited.
 
+## `GET /version`
+
+Returns the running application version. The current default is `v0.1.0`.
+Returns HTTP `200` and is not rate limited.
+
+```json
+{"version":"v0.1.0"}
+```
+
 ## `GET /api/get`
 
 Exact lyrics lookup. Checks the local SQLite database first; when configured

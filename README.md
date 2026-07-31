@@ -26,13 +26,14 @@ music metadata service:
 
 ## API
 
-The server exposes a small JSON-only HTTP interface with three endpoints.
+The server exposes a small JSON-only HTTP interface with four endpoints.
 Full reference — parameters, response shapes, errors, and examples — is in
 [`API.md`](API.md).
 
 | Endpoint | Description |
 | --- | --- |
 | `GET /healthz` | Health check. Not rate limited. |
+| `GET /version` | Running application version. Not rate limited. |
 | `GET /api/get` | Exact lyrics lookup by track and artist. |
 | `GET /api/search` | Free-text search over the local lyrics database. |
 
@@ -41,6 +42,9 @@ Basic usage:
 ```sh
 # Health check
 curl http://localhost:8080/healthz
+
+# Application version
+curl http://localhost:8080/version
 
 # Exact lookup
 curl 'http://localhost:8080/api/get?track_name=Example%20Song&artist_name=Example%20Artist&album_name=Example%20Album&duration=203.5'
@@ -56,6 +60,16 @@ limited per client IP; see [`API.md`](API.md) for details.
 
 The rest of this document covers running, configuring, and deploying the
 server.
+
+## Versioning
+
+The application currently reports version `v0.1.0` from `GET /version`. The
+same version is included in startup logs and the default LRCLIB user-agent.
+`internal/version/version.go` is the single source of truth; update its
+`Version` value (for example, to `v0.2.0`) and merge the change to `main`.
+The GitHub Actions release workflow then builds the binary, creates the matching
+`v...` tag, and publishes a GitHub release whose title and description come
+from the triggering commit.
 
 ## Quick start
 
@@ -109,7 +123,7 @@ operational diagnosis. `/api/search` never calls LRCLIB.
 | `TRUST_PROXY` | `false` | Trust the first `X-Forwarded-For` address. |
 | `LRCLIB_FALLBACK_ENABLED` | `true` | Enable request-triggered exact-lookup fallback. |
 | `LRCLIB_BASE_URL` | `https://lrclib.net/api` | LRCLIB API base URL; useful for tests. |
-| `LRCLIB_USER_AGENT` | `music-utils/0.1 (+https://gru0.dev)` | Descriptive upstream user agent. |
+| `LRCLIB_USER_AGENT` | `music-utils/v0.1.0 (+https://gru0.dev)` | Descriptive upstream user agent. |
 | `LRCLIB_TIMEOUT_MS` | `5000` | Upstream request timeout in milliseconds. |
 
 Invalid explicitly supplied settings fail startup with a clear error.
@@ -139,5 +153,6 @@ internal/config/       environment-based configuration with validation
 internal/db/           SQLite connection, embedded schema, migrations, queries
 internal/httpserver/   HTTP routes, handlers, middleware, rate limiting
 internal/lrclib/       LRCLIB upstream client (exact lookup)
+internal/version/      application version metadata
 API.md                 complete HTTP API reference
 ```

@@ -6,6 +6,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+
+	"github.com/sillygru/music-utils/internal/version"
 )
 
 const (
@@ -20,7 +22,6 @@ const (
 	defaultTrustProxy            = false
 	defaultLRCLIBFallbackEnabled = true
 	defaultLRCLIBBaseURL         = "https://lrclib.net/api"
-	defaultLRCLIBUserAgent       = "music-utils/0.1 (+https://gru0.dev)"
 	defaultLRCLIBTimeoutMS       = 5000
 )
 
@@ -56,7 +57,7 @@ func Load() Config {
 		TrustProxy:            boolOrDefault("TRUST_PROXY", defaultTrustProxy),
 		LRCLIBFallbackEnabled: boolOrDefault("LRCLIB_FALLBACK_ENABLED", defaultLRCLIBFallbackEnabled),
 		LRCLIBBaseURL:         valueOrDefault("LRCLIB_BASE_URL", defaultLRCLIBBaseURL),
-		LRCLIBUserAgent:       valueOrDefault("LRCLIB_USER_AGENT", defaultLRCLIBUserAgent),
+		LRCLIBUserAgent:       valueOrDefault("LRCLIB_USER_AGENT", defaultLRCLIBUserAgent()),
 		LRCLIBTimeoutMS:       intOrDefault("LRCLIB_TIMEOUT_MS", defaultLRCLIBTimeoutMS),
 	}
 }
@@ -106,6 +107,10 @@ func (c Config) Validate() error {
 		return fmt.Errorf("LRCLIB_BASE_URL must be an http or https URL")
 	}
 	return nil
+}
+
+func defaultLRCLIBUserAgent() string {
+	return "music-utils/" + version.Version + " (+https://gru0.dev)"
 }
 
 func validateEnvironment() error {

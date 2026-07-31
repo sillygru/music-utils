@@ -20,8 +20,8 @@ func TestLoadLRCLIBDefaults(t *testing.T) {
 	if !cfg.LRCLIBFallbackEnabled || cfg.LRCLIBBaseURL != "https://lrclib.net/api" || cfg.LRCLIBTimeoutMS != 5000 {
 		t.Fatalf("unexpected LRCLIB defaults: %+v", cfg)
 	}
-	if cfg.LRCLIBUserAgent == "" {
-		t.Fatal("expected default LRCLIB user agent")
+	if cfg.LRCLIBUserAgent != "music-utils/v0.1.0 (+https://gru0.dev)" {
+		t.Fatalf("unexpected default LRCLIB user agent: %q", cfg.LRCLIBUserAgent)
 	}
 }
 

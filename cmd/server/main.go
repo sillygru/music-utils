@@ -13,6 +13,7 @@ import (
 	"github.com/sillygru/music-utils/internal/config"
 	"github.com/sillygru/music-utils/internal/db"
 	"github.com/sillygru/music-utils/internal/httpserver"
+	"github.com/sillygru/music-utils/internal/version"
 )
 
 func main() {
@@ -23,6 +24,7 @@ func main() {
 	}
 	logger := newLogger(cfg.LogLevel)
 	logger.Info("configuration loaded",
+		"version", version.Version,
 		"port", cfg.Port,
 		"db_path", cfg.DBPath,
 		"db_max_open_conns", cfg.DBMaxOpenConns,

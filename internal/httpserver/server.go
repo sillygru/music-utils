@@ -13,6 +13,7 @@ import (
 
 	"github.com/sillygru/music-utils/internal/config"
 	"github.com/sillygru/music-utils/internal/lrclib"
+	"github.com/sillygru/music-utils/internal/version"
 )
 
 type requestStateKey struct{}
@@ -96,6 +97,7 @@ func NewWithLogger(cfg config.Config, database *sql.DB, logger *slog.Logger) *ht
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", healthz)
+	mux.HandleFunc("GET /version", versionHandler)
 	mux.HandleFunc("GET /api/get", getLyricsHandler(database, client, cfg.LRCLIBFallbackEnabled))
 	mux.HandleFunc("GET /api/search", searchLyricsHandler(database))
 
@@ -121,7 +123,7 @@ func newLRCLIBClient(cfg config.Config, logger *slog.Logger) *lrclib.Client {
 	}
 	userAgent := cfg.LRCLIBUserAgent
 	if strings.TrimSpace(userAgent) == "" {
-		userAgent = "music-utils/0.1 (+https://gru0.dev)"
+		userAgent = "music-utils/" + version.Version + " (+https://gru0.dev)"
 	}
 	timeout := time.Duration(cfg.LRCLIBTimeoutMS) * time.Millisecond
 	if timeout <= 0 {
@@ -182,6 +184,13 @@ func recoverMiddleware(next http.Handler, _ *slog.Logger) http.Handler {
 
 func contextWithRequestState(r *http.Request, state *requestState) context.Context {
 	return context.WithValue(r.Context(), requestStateKey{}, state)
+}
+
+func versionHandler(w http.ResponseWriter, r *http.Request) {
+	setOutcome(r, "local_hit")
+	writeJSON(w, http.StatusOK, struct {
+		Version string `json:"version"`
+	}{Version: version.Version})
 }
 
 func healthz(w http.ResponseWriter, r *http.Request) {

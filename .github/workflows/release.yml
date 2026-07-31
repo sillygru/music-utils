@@ -1,0 +1,114 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read application version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version_line="$(grep -E '^[[:space:]]*var[[:space:]]+Version[[:space:]]*=' internal/version/version.go | head -n 1 || true)"
+          version="$(sed -nE 's/^[[:space:]]*var[[:space:]]+Version[[:space:]]*=[[:space:]]*"([^"]+)".*$/\1/p' <<< "$version_line")"
+          version="${version#v}"
+
+          if [[ -z "$version" || "$version" == "$version_line" || ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "internal/version/version.go must define Version as a semantic version, for example: var Version = \"v0.1.0\"" >&2
+            exit 1
+          fi
+
+          tag="v$version"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Using release tag: $tag"
+
+      - name: Check whether version tag exists
+        id: tag
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Version tag $TAG already exists."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check whether GitHub release exists
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "GitHub release $TAG already exists; nothing to publish."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run tests
+        if: steps.release.outputs.exists != 'true'
+        run: go test ./...
+
+      - name: Build release binary
+        if: steps.release.outputs.exists != 'true'
+        run: ./build.sh
+
+      - name: Capture commit title and description
+        if: steps.release.outputs.exists != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git log -1 --format=%s > release-title.txt
+          git log -1 --format=%b > release-notes.txt
+
+      - name: Create and push version tag
+        if: steps.release.outputs.exists != 'true' && steps.tag.outputs.exists != 'true'
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+          COMMIT_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" "$COMMIT_SHA" -m "$(cat release-title.txt)"
+          git push origin "$TAG"
+
+      - name: Create GitHub release
+        if: steps.release.outputs.exists != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$(cat release-title.txt)" \
+            --notes-file release-notes.txt \
+            bin/music-utils
