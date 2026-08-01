@@ -13,6 +13,7 @@ import (
 
 	"github.com/sillygru/music-utils/internal/config"
 	"github.com/sillygru/music-utils/internal/lrclib"
+	"github.com/sillygru/music-utils/internal/musicbrainz"
 	"github.com/sillygru/music-utils/internal/version"
 )
 
@@ -78,28 +79,32 @@ func setRequestIssue(r *http.Request, level slog.Level, detail string) {
 // New creates the HTTP server with the default application configuration.
 // NewWithConfig should be used by the application when environment-based
 // configuration is available.
-func New(port string, database *sql.DB) *http.Server {
-	return NewWithConfig(config.Config{Port: port}, database)
+func New(port string, metadataDB, lyricsDB *sql.DB) *http.Server {
+	return NewWithConfig(config.Config{Port: port}, metadataDB, lyricsDB)
 }
 
 // NewWithConfig creates the HTTP server and registers all application routes.
-func NewWithConfig(cfg config.Config, database *sql.DB) *http.Server {
-	return NewWithLogger(cfg, database, slog.Default())
+func NewWithConfig(cfg config.Config, metadataDB, lyricsDB *sql.DB) *http.Server {
+	return NewWithLogger(cfg, metadataDB, lyricsDB, slog.Default())
 }
 
 // NewWithLogger is the injectable constructor used by the application and
 // tests that need deterministic logging or a custom LRCLIB endpoint.
-func NewWithLogger(cfg config.Config, database *sql.DB, logger *slog.Logger) *http.Server {
+func NewWithLogger(cfg config.Config, metadataDB, lyricsDB *sql.DB, logger *slog.Logger) *http.Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	client := newLRCLIBClient(cfg, logger)
+	metadataClient := newMusicBrainzClient(cfg, logger)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", healthz)
 	mux.HandleFunc("GET /version", versionHandler)
-	mux.HandleFunc("GET /api/get", getLyricsHandler(database, client, cfg.LRCLIBFallbackEnabled))
-	mux.HandleFunc("GET /api/search", searchLyricsHandler(database))
+	mux.HandleFunc("GET /api/lyrics/get", getLyricsHandler(metadataDB, lyricsDB, client, cfg.LRCLIBFallbackEnabled))
+	mux.HandleFunc("GET /api/lyrics/search", searchLyricsHandler(metadataDB, lyricsDB))
+	mux.HandleFunc("GET /api/metadata/get", getMetadataHandler(metadataDB, metadataClient, cfg.MetadataFallbackEnabled))
+	mux.HandleFunc("GET /api/metadata/search", searchMetadataHandler(metadataDB))
+	mux.HandleFunc("GET /api/cover/get", getCoverHandler(metadataDB))
 
 	limiter := newRateLimiter(cfg)
 	application := recoverMiddleware(limiter.Handler(mux), logger)
@@ -114,6 +119,22 @@ func NewWithLogger(cfg config.Config, database *sql.DB, logger *slog.Logger) *ht
 	}
 	server.RegisterOnShutdown(limiter.Stop)
 	return server
+}
+
+func newMusicBrainzClient(cfg config.Config, logger *slog.Logger) *musicbrainz.Client {
+	client, err := musicbrainz.NewWithRateLimits(
+		cfg.MusicBrainzBaseURL,
+		cfg.CoverArtArchiveBaseURL,
+		cfg.MusicBrainzUserAgent,
+		time.Duration(cfg.MusicBrainzTimeoutMS)*time.Millisecond,
+		cfg.RateLimitPerSec,
+		cfg.RateLimitPerMin,
+	)
+	if err != nil {
+		logger.Error("configure MusicBrainz client", "error", err)
+		return nil
+	}
+	return client
 }
 
 func newLRCLIBClient(cfg config.Config, logger *slog.Logger) *lrclib.Client {

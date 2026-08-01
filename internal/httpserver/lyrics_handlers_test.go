@@ -12,9 +12,9 @@ import (
 	"github.com/sillygru/music-utils/internal/db"
 )
 
-func testHTTPDatabase(t *testing.T) *sql.DB {
+func testHTTPDatabases(t *testing.T) (*sql.DB, *sql.DB) {
 	t.Helper()
-	database, err := db.Open(":memory:", db.Config{
+	metadataDB, err := db.Open(":memory:", db.Config{
 		MmapSize:     512 * 1024 * 1024,
 		CacheSizeKB:  -64000,
 		MaxOpenConns: 1,
@@ -22,16 +22,24 @@ func testHTTPDatabase(t *testing.T) *sql.DB {
 	if err != nil {
 		t.Fatalf("open test database: %v", err)
 	}
-	t.Cleanup(func() { _ = database.Close() })
-	if err := db.Migrate(context.Background(), database); err != nil {
-		t.Fatalf("migrate test database: %v", err)
+	t.Cleanup(func() { _ = metadataDB.Close() })
+	if err := db.MigrateMetadata(context.Background(), metadataDB); err != nil {
+		t.Fatalf("migrate metadata test database: %v", err)
 	}
-	return database
+	lyricsDB, err := db.Open(":memory:", db.Config{MmapSize: 512 * 1024 * 1024, CacheSizeKB: -64000, MaxOpenConns: 1})
+	if err != nil {
+		t.Fatalf("open lyrics test database: %v", err)
+	}
+	t.Cleanup(func() { _ = lyricsDB.Close() })
+	if err := db.MigrateLyrics(context.Background(), lyricsDB); err != nil {
+		t.Fatalf("migrate lyrics test database: %v", err)
+	}
+	return metadataDB, lyricsDB
 }
 
-func seedHTTPTrack(t *testing.T, database *sql.DB) {
+func seedHTTPTrack(t *testing.T, metadataDB, lyricsDB *sql.DB) {
 	t.Helper()
-	_, _, err := db.InsertTrackWithLyrics(context.Background(), database, db.Track{
+	_, _, err := db.InsertTrackWithLyrics(context.Background(), metadataDB, lyricsDB, db.Track{
 		Name:       "Example Song",
 		ArtistName: "Example Artist",
 		AlbumName:  "Example Album",
@@ -64,12 +72,12 @@ func performRequest(t *testing.T, handler http.Handler, target string) *httptest
 }
 
 func TestGetLyrics(t *testing.T) {
-	database := testHTTPDatabase(t)
-	seedHTTPTrack(t, database)
-	server := New("8080", database)
+	metadataDB, lyricsDB := testHTTPDatabases(t)
+	seedHTTPTrack(t, metadataDB, lyricsDB)
+	server := New("8080", metadataDB, lyricsDB)
 	cleanupHTTPServer(t, server)
 
-	response := performRequest(t, server.Handler, "/api/get?track_name=+EXAMPLE+SONG+&artist_name=example+artist")
+	response := performRequest(t, server.Handler, "/api/lyrics/get?track_name=+EXAMPLE+SONG+&artist_name=example+artist")
 	if response.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", response.Code, response.Body.String())
 	}
@@ -87,12 +95,12 @@ func TestGetLyrics(t *testing.T) {
 }
 
 func TestGetLyricsValidationAndMiss(t *testing.T) {
-	database := testHTTPDatabase(t)
-	seedHTTPTrack(t, database)
-	server := New("8080", database)
+	metadataDB, lyricsDB := testHTTPDatabases(t)
+	seedHTTPTrack(t, metadataDB, lyricsDB)
+	server := New("8080", metadataDB, lyricsDB)
 	cleanupHTTPServer(t, server)
 
-	missing := performRequest(t, server.Handler, "/api/get?artist_name=artist")
+	missing := performRequest(t, server.Handler, "/api/lyrics/get?artist_name=artist")
 	if missing.Code != http.StatusBadRequest {
 		t.Fatalf("expected missing track_name to return 400, got %d", missing.Code)
 	}
@@ -104,27 +112,27 @@ func TestGetLyricsValidationAndMiss(t *testing.T) {
 		t.Fatalf("unexpected validation error: %+v", missingError)
 	}
 
-	missing = performRequest(t, server.Handler, "/api/get?track_name=track")
+	missing = performRequest(t, server.Handler, "/api/lyrics/get?track_name=track")
 	if missing.Code != http.StatusBadRequest {
 		t.Fatalf("expected missing artist_name to return 400, got %d", missing.Code)
 	}
 
-	invalidDuration := performRequest(t, server.Handler, "/api/get?track_name=track&artist_name=artist&duration=not-a-number")
+	invalidDuration := performRequest(t, server.Handler, "/api/lyrics/get?track_name=track&artist_name=artist&duration=not-a-number")
 	if invalidDuration.Code != http.StatusBadRequest {
 		t.Fatalf("expected invalid duration to return 400, got %d", invalidDuration.Code)
 	}
 
-	withDuration := performRequest(t, server.Handler, "/api/get?track_name=example+song&artist_name=example+artist&duration=203.5")
+	withDuration := performRequest(t, server.Handler, "/api/lyrics/get?track_name=example+song&artist_name=example+artist&duration=203.5")
 	if withDuration.Code != http.StatusOK {
 		t.Fatalf("expected matching duration to return 200, got %d", withDuration.Code)
 	}
 
-	wrongDuration := performRequest(t, server.Handler, "/api/get?track_name=example+song&artist_name=example+artist&duration=204")
+	wrongDuration := performRequest(t, server.Handler, "/api/lyrics/get?track_name=example+song&artist_name=example+artist&duration=204")
 	if wrongDuration.Code != http.StatusNotFound {
 		t.Fatalf("expected mismatched duration to return 404, got %d", wrongDuration.Code)
 	}
 
-	miss := performRequest(t, server.Handler, "/api/get?track_name=unknown&artist_name=artist")
+	miss := performRequest(t, server.Handler, "/api/lyrics/get?track_name=unknown&artist_name=artist")
 	if miss.Code != http.StatusNotFound {
 		t.Fatalf("expected missing track to return 404, got %d", miss.Code)
 	}
@@ -138,21 +146,21 @@ func TestGetLyricsValidationAndMiss(t *testing.T) {
 }
 
 func TestSearchLyricsReturnsArrayAndHonorsLimit(t *testing.T) {
-	database := testHTTPDatabase(t)
+	metadataDB, lyricsDB := testHTTPDatabases(t)
 	for _, track := range []db.Track{
 		{Name: "Midnight City", ArtistName: "M83", Duration: 243},
 		{Name: "Midnight Train", ArtistName: "Other Artist", Duration: 200},
 	} {
-		if _, _, err := db.InsertTrackWithLyrics(context.Background(), database, track, db.Lyrics{
+		if _, _, err := db.InsertTrackWithLyrics(context.Background(), metadataDB, lyricsDB, track, db.Lyrics{
 			PlainLyrics: track.Name + " lyrics",
 		}); err != nil {
 			t.Fatalf("seed %q: %v", track.Name, err)
 		}
 	}
-	server := New("8080", database)
+	server := New("8080", metadataDB, lyricsDB)
 	cleanupHTTPServer(t, server)
 
-	response := performRequest(t, server.Handler, "/api/search?q=midnight&limit=1")
+	response := performRequest(t, server.Handler, "/api/lyrics/search?q=midnight&limit=1")
 	if response.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", response.Code, response.Body.String())
 	}
@@ -164,7 +172,7 @@ func TestSearchLyricsReturnsArrayAndHonorsLimit(t *testing.T) {
 		t.Fatalf("unexpected search results: %+v", got)
 	}
 
-	empty := performRequest(t, server.Handler, "/api/search?q=does-not-exist")
+	empty := performRequest(t, server.Handler, "/api/lyrics/search?q=does-not-exist")
 	if empty.Code != http.StatusOK {
 		t.Fatalf("expected empty search to return 200, got %d", empty.Code)
 	}
@@ -176,7 +184,7 @@ func TestSearchLyricsReturnsArrayAndHonorsLimit(t *testing.T) {
 		t.Fatalf("expected a JSON empty array, got %+v", emptyResults)
 	}
 
-	byFields := performRequest(t, server.Handler, "/api/search?track_name=midnight&artist_name=m83")
+	byFields := performRequest(t, server.Handler, "/api/lyrics/search?track_name=midnight&artist_name=m83")
 	if byFields.Code != http.StatusOK {
 		t.Fatalf("expected field search to return 200, got %d", byFields.Code)
 	}

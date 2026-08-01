@@ -66,10 +66,18 @@ func TestReopenPreservesFTSIndex(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open initial database: %v", err)
 	}
-	if err := Migrate(ctx, database); err != nil {
-		t.Fatalf("migrate initial database: %v", err)
+	if err := MigrateMetadata(ctx, database); err != nil {
+		t.Fatalf("migrate initial metadata database: %v", err)
 	}
-	if _, _, err := InsertTrackWithLyrics(ctx, database, Track{
+	lyricsDB, err := Open(":memory:", cfg)
+	if err != nil {
+		t.Fatalf("open initial lyrics database: %v", err)
+	}
+	defer lyricsDB.Close()
+	if err := MigrateLyrics(ctx, lyricsDB); err != nil {
+		t.Fatalf("migrate initial lyrics database: %v", err)
+	}
+	if _, _, err := InsertTrackWithLyrics(ctx, database, lyricsDB, Track{
 		Name: "Persistent Search Song", ArtistName: "Artist", Duration: 180,
 	}, Lyrics{PlainLyrics: "persistent lyrics"}); err != nil {
 		t.Fatalf("insert persistent track: %v", err)
@@ -83,11 +91,11 @@ func TestReopenPreservesFTSIndex(t *testing.T) {
 		t.Fatalf("reopen database: %v", err)
 	}
 	defer database.Close()
-	if err := Migrate(ctx, database); err != nil {
-		t.Fatalf("migrate reopened database: %v", err)
+	if err := MigrateMetadata(ctx, database); err != nil {
+		t.Fatalf("migrate reopened metadata database: %v", err)
 	}
 
-	tracks, err := SearchTracks(ctx, database, "persistent search", 10)
+	tracks, err := SearchTracks(ctx, database, lyricsDB, "persistent search", 10)
 	if err != nil {
 		t.Fatalf("search reopened database: %v", err)
 	}

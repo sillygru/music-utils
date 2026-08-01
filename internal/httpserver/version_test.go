@@ -9,8 +9,8 @@ import (
 )
 
 func TestVersionEndpoint(t *testing.T) {
-	database := testHTTPDatabase(t)
-	server := New("8080", database)
+	metadataDB, lyricsDB := testHTTPDatabases(t)
+	server := New("8080", metadataDB, lyricsDB)
 	cleanupHTTPServer(t, server)
 
 	response := performRequest(t, server.Handler, "/version")

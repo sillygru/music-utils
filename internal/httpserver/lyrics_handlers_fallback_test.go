@@ -36,11 +36,11 @@ func TestGetLyricsFallsBackAndCaches(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	database := testHTTPDatabase(t)
-	server := NewWithConfig(fallbackConfig(upstream.URL+"/api"), database)
+	metadataDB, lyricsDB := testHTTPDatabases(t)
+	server := NewWithConfig(fallbackConfig(upstream.URL+"/api"), metadataDB, lyricsDB)
 	cleanupHTTPServer(t, server)
 
-	first := performRequest(t, server.Handler, "/api/get?track_name=Remote+Song&artist_name=Remote+Artist")
+	first := performRequest(t, server.Handler, "/api/lyrics/get?track_name=Remote+Song&artist_name=Remote+Artist")
 	if first.Code != http.StatusOK {
 		t.Fatalf("expected fallback 200, got %d: %s", first.Code, first.Body.String())
 	}
@@ -52,7 +52,7 @@ func TestGetLyricsFallsBackAndCaches(t *testing.T) {
 		t.Fatalf("unexpected fallback response: %+v", response)
 	}
 
-	second := performRequest(t, server.Handler, "/api/get?track_name=Remote+Song&artist_name=Remote+Artist")
+	second := performRequest(t, server.Handler, "/api/lyrics/get?track_name=Remote+Song&artist_name=Remote+Artist")
 	if second.Code != http.StatusOK {
 		t.Fatalf("expected cached 200, got %d: %s", second.Code, second.Body.String())
 	}
@@ -61,7 +61,7 @@ func TestGetLyricsFallsBackAndCaches(t *testing.T) {
 	}
 
 	var source string
-	if err := database.QueryRowContext(context.Background(), `SELECT source FROM tracks WHERE name_lower = 'remote song'`).Scan(&source); err != nil {
+	if err := metadataDB.QueryRowContext(context.Background(), `SELECT source FROM tracks WHERE name_lower = 'remote song'`).Scan(&source); err != nil {
 		t.Fatalf("read cached source: %v", err)
 	}
 	if source != "lrclib_fallback" {
@@ -78,10 +78,11 @@ func TestGetLyricsFallbackDisabledDoesNotCallUpstream(t *testing.T) {
 
 	cfg := fallbackConfig(upstream.URL + "/api")
 	cfg.LRCLIBFallbackEnabled = false
-	server := NewWithConfig(cfg, testHTTPDatabase(t))
+	metadataDB, lyricsDB := testHTTPDatabases(t)
+	server := NewWithConfig(cfg, metadataDB, lyricsDB)
 	cleanupHTTPServer(t, server)
 
-	response := performRequest(t, server.Handler, "/api/get?track_name=Missing&artist_name=Artist")
+	response := performRequest(t, server.Handler, "/api/lyrics/get?track_name=Missing&artist_name=Artist")
 	if response.Code != http.StatusNotFound || calls.Load() != 0 {
 		t.Fatalf("fallback disabled behavior: status=%d calls=%d", response.Code, calls.Load())
 	}
@@ -96,11 +97,12 @@ func TestGetLyricsFallbackTimeoutReturnsNotFound(t *testing.T) {
 
 	cfg := fallbackConfig(upstream.URL + "/api")
 	cfg.LRCLIBTimeoutMS = 10
-	server := NewWithConfig(cfg, testHTTPDatabase(t))
+	metadataDB, lyricsDB := testHTTPDatabases(t)
+	server := NewWithConfig(cfg, metadataDB, lyricsDB)
 	cleanupHTTPServer(t, server)
 
 	started := time.Now()
-	response := performRequest(t, server.Handler, "/api/get?track_name=Slow&artist_name=Artist")
+	response := performRequest(t, server.Handler, "/api/lyrics/get?track_name=Slow&artist_name=Artist")
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("expected timeout to return 404, got %d", response.Code)
 	}
