@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"errors"
 	"log/slog"
-	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -34,7 +33,7 @@ type apiError struct {
 	Message string `json:"message"`
 }
 
-func getLyricsHandler(database *sql.DB, client *lrclib.Client, fallbackEnabled bool) http.HandlerFunc {
+func getLyricsHandler(metadataDB, lyricsDB *sql.DB, client *lrclib.Client, fallbackEnabled bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
 		trackName := strings.TrimSpace(query.Get("track_name"))
@@ -58,7 +57,7 @@ func getLyricsHandler(database *sql.DB, client *lrclib.Client, fallbackEnabled b
 		}
 
 		track, lyrics, err := db.FindTrackExact(
-			r.Context(), database, trackName, artistName, query.Get("album_name"), duration,
+			r.Context(), metadataDB, lyricsDB, trackName, artistName, query.Get("album_name"), duration,
 		)
 		if err == nil {
 			setOutcome(r, "local_hit")
@@ -97,7 +96,7 @@ func getLyricsHandler(database *sql.DB, client *lrclib.Client, fallbackEnabled b
 		if cachedTrack.Duration <= 0 {
 			cachedTrack.Duration = duration
 		}
-		trackID, _, err := db.InsertTrackWithLyrics(r.Context(), database, cachedTrack, db.Lyrics{
+		trackID, _, err := db.InsertTrackWithLyrics(r.Context(), metadataDB, lyricsDB, cachedTrack, db.Lyrics{
 			PlainLyrics:  remote.PlainLyrics,
 			SyncedLyrics: remote.SyncedLyrics,
 			Instrumental: remote.Instrumental,
@@ -122,7 +121,7 @@ func getLyricsHandler(database *sql.DB, client *lrclib.Client, fallbackEnabled b
 	}
 }
 
-func searchLyricsHandler(database *sql.DB) http.HandlerFunc {
+func searchLyricsHandler(metadataDB, lyricsDB *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
 		searchQuery := strings.TrimSpace(query.Get("q"))
@@ -144,7 +143,7 @@ func searchLyricsHandler(database *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		tracks, err := db.SearchTracks(r.Context(), database, searchQuery, limit)
+		tracks, err := db.SearchTracks(r.Context(), metadataDB, lyricsDB, searchQuery, limit)
 		if err != nil {
 			setOutcome(r, "error")
 			writeJSON(w, http.StatusInternalServerError, apiError{Code: http.StatusInternalServerError, Message: "Internal server error"})
@@ -175,18 +174,6 @@ func toLyricsResponse(track *db.Track, lyrics *db.Lyrics) lyricsResponse {
 		PlainLyrics:  lyrics.PlainLyrics,
 		SyncedLyrics: lyrics.SyncedLyrics,
 	}
-}
-
-func optionalDuration(value string) (float64, error) {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return 0, nil
-	}
-	duration, err := strconv.ParseFloat(value, 64)
-	if err != nil || duration < 0 || math.IsNaN(duration) || math.IsInf(duration, 0) {
-		return 0, errors.New("invalid duration")
-	}
-	return duration, nil
 }
 
 func searchLimit(value string) (int, error) {

@@ -2,10 +2,27 @@
 .env*
 !.env.example
 
-#compiled binaries
-cmd/server/server
+# compiled binaries
+/cmd/server/server
+/server
+/bin/
+*.exe
+*.test
 
-#md stuff
+# SQLite databases and runtime database artifacts
+*.db
+*.sqlite
+*.sqlite3
+file:*
+
+# Go test, coverage, and profiling artifacts
+coverage.out
+*.prof
+
+# macOS metadata
+.DS_Store
+
+# md stuff
 *.md
 !README.md
 !AGENTS.md

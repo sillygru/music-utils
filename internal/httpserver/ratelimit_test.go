@@ -118,8 +118,8 @@ func TestRateLimitTrustProxyFlag(t *testing.T) {
 }
 
 func TestHealthzIsExemptFromRateLimit(t *testing.T) {
-	database := testHTTPDatabase(t)
-	server := NewWithConfig(rateLimitTestConfig(), database)
+	metadataDB, lyricsDB := testHTTPDatabases(t)
+	server := NewWithConfig(rateLimitTestConfig(), metadataDB, lyricsDB)
 	t.Cleanup(func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
@@ -128,7 +128,7 @@ func TestHealthzIsExemptFromRateLimit(t *testing.T) {
 
 	rejected := 0
 	for i := 0; i < 20; i++ {
-		apiResponse := requestFromIP(t, server.Handler, http.MethodGet, "/api/search?q=load", "192.0.2.30:1234")
+		apiResponse := requestFromIP(t, server.Handler, http.MethodGet, "/api/lyrics/search?q=load", "192.0.2.30:1234")
 		if apiResponse.Code == http.StatusTooManyRequests {
 			rejected++
 		}

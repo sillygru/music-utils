@@ -1,29 +1,78 @@
 # music-utils API
 
-The `music-utils` server exposes a small, JSON-only HTTP API. All endpoints
-below are served on the configured port (`:8080` by default).
+All endpoints are served on `:8080` by default and return JSON.
 
-## Common conventions
+- Errors: `{"code": <http_status>, "message": "<description>"}`.
+- `/api/*` endpoints are rate limited per client IP.
+- Metadata and lyrics exact lookups are local-first, using separate SQLite databases.
+- The old `/api/get` and `/api/search` paths do not exist.
 
-- All responses are `application/json`.
-- Errors use `{"code": <http_status>, "message": "<description>"}`.
-- `/healthz` is never rate limited; `/api/*` requests are rate limited per
-  client IP (see [Rate limiting](#rate-limiting)).
-- Successful `GET /api/get` responses return a single **Track** object.
-  Successful `GET /api/search` responses return an array of **Track** objects.
+## Metadata object
 
-### Track object
+`GET /api/metadata/get` and `GET /api/metadata/search` return objects with:
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `id` | integer | Database ID of the track. |
-| `trackName` | string | Track title. |
+| `id` | integer | Local SQLite track ID. |
+| `trackName` | string | Song title. |
 | `artistName` | string | Artist name. |
-| `albumName` | string | Album name (may be empty). |
-| `duration` | number | Track duration in seconds (may be `0`). |
-| `instrumental` | boolean | `true` if the track has no lyrics. |
-| `plainLyrics` | string | Plain-text lyrics (may be empty). |
-| `syncedLyrics` | string | Timestamped lyrics, LRC format (may be empty). |
+| `albumName` | string | Album/release title. |
+| `duration` | number | Seconds. |
+| `genre` | string | Best available genre/tag. |
+| `year` | integer | Release year. |
+| `releaseDate` | string | Provider release date, when available. |
+| `isrc` | string | ISRC, when available. |
+| `musicbrainzRecordingId` | string | Canonical recording MBID. |
+| `musicbrainzReleaseId` | string | Selected release MBID. |
+| `musicbrainzReleaseGroupId` | string | Release-group MBID. |
+| `musicbrainzArtistId` | string | Primary artist MBID. |
+| `coverUrl` | string | Cached front-cover URL, when available. |
+| `metadataSource` | string | Metadata provenance, currently `musicbrainz`. |
+| `coverUrlSource` | string | Artwork provenance, currently `cover_art_archive`. |
+
+## `GET /api/metadata/get`
+
+Exact song lookup. Checks SQLite first. If missing or not enriched and
+`METADATA_FALLBACK_ENABLED=true`, searches MusicBrainz, resolves Cover Art
+Archive artwork, stores the result, and returns the cached record.
+
+Query parameters:
+
+- `track_name` — required.
+- `artist_name` — required.
+- `album_name` — optional narrowing hint.
+- `duration` — optional non-negative seconds hint.
+
+Example:
+
+```sh
+curl 'http://localhost:8080/api/metadata/get?track_name=Example%20Song&artist_name=Example%20Artist'
+```
+
+Responses: `200` metadata object, `400` invalid/missing input, `404` provider
+miss or disabled fallback, `429` rate limited, `500` internal error.
+
+## `GET /api/metadata/search`
+
+Searches only the local FTS5 catalog. It never calls an upstream API.
+
+Query parameters:
+
+- `q`, or one or more of `track_name`, `artist_name`, `album_name`, `genre`.
+- `limit`, default `20`, range `1–50`.
+
+```sh
+curl 'http://localhost:8080/api/metadata/search?q=example&limit=20'
+```
+
+## `GET /api/cover/get`
+
+Returns only cached artwork; it never calls upstream providers.
+
+Query parameters: required `track_name` and `artist_name`; optional
+`album_name`.
+
+Example response:
 
 ```json
 {
@@ -31,114 +80,67 @@ below are served on the configured port (`:8080` by default).
   "trackName": "Example Song",
   "artistName": "Example Artist",
   "albumName": "Example Album",
-  "duration": 203.5,
-  "instrumental": false,
-  "plainLyrics": "Example lyrics...",
-  "syncedLyrics": "[00:12.00] Example lyrics..."
+  "coverUrl": "https://coverartarchive.org/...",
+  "coverUrlSource": "cover_art_archive"
 }
 ```
 
-## `GET /healthz`
+Responses: `200` cached cover, `400` invalid input, `404` not cached/not found,
+`429` rate limited, `500` internal error.
 
-Health check. Returns `{"status": "ok"}` with HTTP `200`. Not rate limited.
+## `GET /api/lyrics/get`
 
-## `GET /version`
+Exact lyrics lookup. Checks SQLite first; on a miss and when
+`LRCLIB_FALLBACK_ENABLED=true`, fetches LRCLIB and caches the result.
 
-Returns the running application version. The current default is `v0.1.0`.
-Returns HTTP `200` and is not rate limited.
+Parameters: required `track_name` and `artist_name`; optional `album_name` and
+non-negative `duration`.
 
-```json
-{"version":"v0.1.0"}
-```
-
-## `GET /api/get`
-
-Exact lyrics lookup. Checks the local SQLite database first; when configured
-with the LRCLIB fallback, a local miss is fetched from `lrclib.net` and cached
-for future requests.
-
-### Query parameters
-
-| Parameter | Required | Description |
-| --- | --- | --- |
-| `track_name` | yes | Track title. |
-| `artist_name` | yes | Artist name. |
-| `album_name` | no | Album name; narrows the exact match when provided. |
-| `duration` | no | Track duration in seconds (non-negative number); matches exactly when provided. |
-
-### Responses
-
-| Status | Body | Notes |
-| --- | --- | --- |
-| `200` | Track object | Local hit or LRCLIB fallback hit. |
-| `400` | Error | Missing `track_name`/`artist_name` or invalid `duration`. |
-| `404` | Error | Not found locally, and no LRCLIB fallback hit. |
-| `429` | Error | Rate limited (includes `Retry-After` header). |
-| `500` | Error | Internal error. |
-
-### Example
+Returns the lyrics fields `instrumental`, `plainLyrics`, and `syncedLyrics`,
+plus the track title, artist, album, duration, and local ID.
 
 ```sh
-curl 'http://localhost:8080/api/get?track_name=Example%20Song&artist_name=Example%20Artist&album_name=Example%20Album&duration=203.5'
+curl 'http://localhost:8080/api/lyrics/get?track_name=Example%20Song&artist_name=Example%20Artist'
 ```
 
-## `GET /api/search`
+## `GET /api/lyrics/search`
 
-Free-text search over the local lyrics database. Never calls LRCLIB.
+Searches the local FTS5 catalog and never calls LRCLIB.
 
-### Query parameters
-
-| Parameter | Required | Description |
-| --- | --- | --- |
-| `q` | no | Free-text query (searches track, artist, and album names). |
-| `track_name` | no | Alternative to `q`; combined with the other fields when given. |
-| `artist_name` | no | Alternative to `q`; combined with the other fields when given. |
-| `album_name` | no | Alternative to `q`; combined with the other fields when given. |
-| `limit` | no | Maximum results. Default `20`, range `1–50`. |
-
-At least one of `q` or `track_name`/`artist_name`/`album_name` is required.
-
-### Responses
-
-| Status | Body | Notes |
-| --- | --- | --- |
-| `200` | Array of Track objects | May be an empty array. |
-| `400` | Error | No query terms, or invalid `limit`. |
-| `429` | Error | Rate limited (includes `Retry-After` header). |
-| `500` | Error | Internal error. |
-
-### Example
+Parameters: `q`, or one or more of `track_name`, `artist_name`, `album_name`;
+optional `limit` from `1–50`, default `20`.
 
 ```sh
-curl 'http://localhost:8080/api/search?q=example&limit=20'
+curl 'http://localhost:8080/api/lyrics/search?q=example&limit=20'
 ```
+
+## Health/version
+
+- `GET /healthz` → `{"status":"ok"}`; not rate limited.
+- `GET /version` → `{"version":"v0.2.0"}`; not rate limited.
+
+## Database layout
+
+`METADATA_DB_PATH` stores tracks, metadata, cover URLs, provenance, and metadata
+FTS5. `LYRICS_DB_PATH` stores lyrics bodies and their track associations. The
+service composes responses in Go; it does not use cross-database SQL joins.
+For an existing combined database, run the service once with that file as the
+metadata path and a new lyrics path to copy lyrics and remove the old combined
+lyrics tables safely.
+
+## Provider and cache behavior
+
+MusicBrainz and Cover Art Archive are queried with a descriptive User-Agent
+and the configured `RATE_LIMIT_PER_SEC` burst plus `RATE_LIMIT_PER_MIN` rolling
+window. Identical concurrent metadata lookups share one in-flight operation. Provider
+responses are bounded and cached transactionally in SQLite. Search endpoints
+are local-only to keep upstream traffic predictable.
+
+LRCLIB remains the lyrics provider and uses its existing bounded client,
+User-Agent, timeout, and cache behavior.
 
 ## Rate limiting
 
-`/api/*` requests are rate limited per client IP:
-
-- `RATE_LIMIT_PER_SEC` (default `10`) — token-bucket burst limit.
-- `RATE_LIMIT_PER_MIN` (default `180`) — rolling one-minute cap.
-
-When a limit is exceeded the server responds `429` with a `Retry-After`
-header. When running behind a trusted proxy, set `TRUST_PROXY=true` so the
-real client IP is read from `X-Forwarded-For`.
-
-## LRCLIB fallback
-
-`GET /api/get` serves local data first. When there is no local match and
-`LRCLIB_FALLBACK_ENABLED=true`, the server makes one bounded request to
-`LRCLIB_BASE_URL`, sends a descriptive user agent, and caches successful
-results locally (`source=lrclib_fallback`) so later lookups are served from
-SQLite. A remote miss, timeout, or upstream failure results in a normal `404`.
-
-## Errors
-
-All error bodies follow `{"code": <http_status>, "message": "<description>"}`:
-
-| Status | Message |
-| --- | --- |
-| `400` | `track_name is required`, `artist_name is required`, `duration must be a non-negative number`, `q or track_name, artist_name, or album_name is required`, `limit must be an integer between 1 and 50` |
-| `404` | `Track not found` |
-| `429` | `Rate limit exceeded` |
-| `500` | `Internal server error` |
+`RATE_LIMIT_PER_SEC` controls burst/token-bucket rate and
+`RATE_LIMIT_PER_MIN` controls the rolling-minute cap. Rate-limited responses
+include `Retry-After`.

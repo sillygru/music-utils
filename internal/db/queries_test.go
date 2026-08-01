@@ -6,33 +6,38 @@ import (
 	"testing"
 )
 
-func testDatabase(t *testing.T) *sql.DB {
+func testDatabases(t *testing.T) (*sql.DB, *sql.DB) {
 	t.Helper()
-	database, err := Open(":memory:", Config{
-		MmapSize:     512 * 1024 * 1024,
-		CacheSizeKB:  -64000,
-		MaxOpenConns: 1,
-	})
-	if err != nil {
-		t.Fatalf("open test database: %v", err)
+	open := func(label string) *sql.DB {
+		database, err := Open(":memory:", Config{MmapSize: 512 * 1024 * 1024, CacheSizeKB: -64000, MaxOpenConns: 1})
+		if err != nil {
+			t.Fatalf("open %s test database: %v", label, err)
+		}
+		return database
 	}
-	t.Cleanup(func() { _ = database.Close() })
-
+	metadataDB, lyricsDB := open("metadata"), open("lyrics")
+	t.Cleanup(func() { _ = metadataDB.Close(); _ = lyricsDB.Close() })
 	ctx := context.Background()
-	if err := Migrate(ctx, database); err != nil {
-		t.Fatalf("migrate test database: %v", err)
+	if err := MigrateMetadata(ctx, metadataDB); err != nil {
+		t.Fatalf("migrate metadata test database: %v", err)
 	}
-	if err := Migrate(ctx, database); err != nil {
-		t.Fatalf("run idempotent migration: %v", err)
+	if err := MigrateLyrics(ctx, lyricsDB); err != nil {
+		t.Fatalf("migrate lyrics test database: %v", err)
 	}
-	return database
+	if err := MigrateMetadata(ctx, metadataDB); err != nil {
+		t.Fatalf("run idempotent metadata migration: %v", err)
+	}
+	if err := MigrateLyrics(ctx, lyricsDB); err != nil {
+		t.Fatalf("run idempotent lyrics migration: %v", err)
+	}
+	return metadataDB, lyricsDB
 }
 
 func TestInsertAndFindTrackExact(t *testing.T) {
-	database := testDatabase(t)
+	metadataDB, lyricsDB := testDatabases(t)
 	ctx := context.Background()
 
-	trackID, lyricsID, err := InsertTrackWithLyrics(ctx, database, Track{
+	trackID, lyricsID, err := InsertTrackWithLyrics(ctx, metadataDB, lyricsDB, Track{
 		Name:       "Example Song",
 		ArtistName: "Example Artist",
 		AlbumName:  "Example Album",
@@ -49,7 +54,7 @@ func TestInsertAndFindTrackExact(t *testing.T) {
 		t.Fatalf("expected inserted IDs, got track=%d lyrics=%d", trackID, lyricsID)
 	}
 
-	track, lyrics, err := FindTrackExact(ctx, database, " example song ", "EXAMPLE ARTIST", "example album", 203.5)
+	track, lyrics, err := FindTrackExact(ctx, metadataDB, lyricsDB, " example song ", "EXAMPLE ARTIST", "example album", 203.5)
 	if err != nil {
 		t.Fatalf("find track: %v", err)
 	}
@@ -65,17 +70,17 @@ func TestInsertAndFindTrackExact(t *testing.T) {
 }
 
 func TestInsertDeduplicatesLyricsContent(t *testing.T) {
-	database := testDatabase(t)
+	metadataDB, lyricsDB := testDatabases(t)
 	ctx := context.Background()
 	lyrics := Lyrics{PlainLyrics: "same lyrics"}
 
-	_, firstLyricsID, err := InsertTrackWithLyrics(ctx, database, Track{
+	_, firstLyricsID, err := InsertTrackWithLyrics(ctx, metadataDB, lyricsDB, Track{
 		Name: "First Song", ArtistName: "Artist", Duration: 100,
 	}, lyrics)
 	if err != nil {
 		t.Fatalf("insert first track: %v", err)
 	}
-	_, secondLyricsID, err := InsertTrackWithLyrics(ctx, database, Track{
+	_, secondLyricsID, err := InsertTrackWithLyrics(ctx, metadataDB, lyricsDB, Track{
 		Name: "Second Song", ArtistName: "Artist", Duration: 101,
 	}, lyrics)
 	if err != nil {
@@ -86,7 +91,7 @@ func TestInsertDeduplicatesLyricsContent(t *testing.T) {
 	}
 
 	var associationCount int
-	if err := database.QueryRowContext(ctx, `SELECT count(*) FROM lyrics_tracks WHERE lyrics_id = ?`, firstLyricsID).Scan(&associationCount); err != nil {
+	if err := lyricsDB.QueryRowContext(ctx, `SELECT count(*) FROM lyrics_tracks WHERE lyrics_id = ?`, firstLyricsID).Scan(&associationCount); err != nil {
 		t.Fatalf("count shared lyrics associations: %v", err)
 	}
 	if associationCount != 2 {
@@ -95,21 +100,21 @@ func TestInsertDeduplicatesLyricsContent(t *testing.T) {
 }
 
 func TestSearchTracksUsesFTS(t *testing.T) {
-	database := testDatabase(t)
+	metadataDB, lyricsDB := testDatabases(t)
 	ctx := context.Background()
 	for _, track := range []Track{
 		{Name: "Midnight City", ArtistName: "M83", Duration: 243},
 		{Name: "Midnight Train", ArtistName: "Other Artist", Duration: 200},
 		{Name: "Daylight", ArtistName: "M83", Duration: 220},
 	} {
-		if _, _, err := InsertTrackWithLyrics(ctx, database, track, Lyrics{
+		if _, _, err := InsertTrackWithLyrics(ctx, metadataDB, lyricsDB, track, Lyrics{
 			PlainLyrics: track.Name + " lyrics",
 		}); err != nil {
 			t.Fatalf("insert %q: %v", track.Name, err)
 		}
 	}
 
-	tracks, err := SearchTracks(ctx, database, "midnight cit", 20)
+	tracks, err := SearchTracks(ctx, metadataDB, lyricsDB, "midnight cit", 20)
 	if err != nil {
 		t.Fatalf("search tracks: %v", err)
 	}
