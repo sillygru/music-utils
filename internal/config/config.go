@@ -15,6 +15,7 @@ const (
 	defaultLogLevel                = "info"
 	defaultMetadataDBPath          = "./data/metadata.db"
 	defaultLyricsDBPath            = "./data/lyrics.db"
+	defaultCoverDBPath             = "./data/cover.db"
 	defaultDBMmapSize              = int64(512 * 1024 * 1024)
 	defaultDBCacheSizeKB           = int64(-64000)
 	defaultDBMaxOpenConns          = 16
@@ -28,6 +29,9 @@ const (
 	defaultITunesBaseURL           = "https://itunes.apple.com"
 	defaultDeezerBaseURL           = "https://api.deezer.com"
 	defaultMetadataTimeoutMS       = 5000
+	defaultCoverFallbackEnabled    = true
+	defaultLastfmBaseURL           = "https://www.last.fm"
+	defaultCoverTimeoutMS          = 10000
 )
 
 // Config contains the settings needed to start the server.
@@ -51,6 +55,12 @@ type Config struct {
 	DeezerBaseURL           string
 	MetadataTimeoutMS       int
 	MetadataUserAgent       string
+
+	CoverDBPath          string
+	CoverFallbackEnabled bool
+	LastfmBaseURL        string
+	CoverTimeoutMS       int
+	CoverUserAgent       string
 }
 
 // Load reads configuration from the environment and applies defaults when a
@@ -76,6 +86,12 @@ func Load() Config {
 		DeezerBaseURL:           valueOrDefault("DEEZER_BASE_URL", defaultDeezerBaseURL),
 		MetadataTimeoutMS:       intOrDefault("METADATA_TIMEOUT_MS", defaultMetadataTimeoutMS),
 		MetadataUserAgent:       valueOrDefault("METADATA_USER_AGENT", defaultMetadataUserAgent()),
+
+		CoverDBPath:          valueOrDefault("COVER_DB_PATH", defaultCoverDBPath),
+		CoverFallbackEnabled: boolOrDefault("COVER_FALLBACK_ENABLED", defaultCoverFallbackEnabled),
+		LastfmBaseURL:        valueOrDefault("LASTFM_BASE_URL", defaultLastfmBaseURL),
+		CoverTimeoutMS:       intOrDefault("COVER_TIMEOUT_MS", defaultCoverTimeoutMS),
+		CoverUserAgent:       valueOrDefault("COVER_USER_AGENT", defaultCoverUserAgent()),
 	}
 }
 
@@ -107,8 +123,11 @@ func (c Config) Validate() error {
 	if strings.TrimSpace(c.LyricsDBPath) == "" {
 		return fmt.Errorf("LYRICS_DB_PATH must not be empty")
 	}
-	if c.MetadataDBPath == c.LyricsDBPath {
-		return fmt.Errorf("METADATA_DB_PATH and LYRICS_DB_PATH must be different")
+	if strings.TrimSpace(c.CoverDBPath) == "" {
+		return fmt.Errorf("COVER_DB_PATH must not be empty")
+	}
+	if c.MetadataDBPath == c.LyricsDBPath || c.MetadataDBPath == c.CoverDBPath || c.LyricsDBPath == c.CoverDBPath {
+		return fmt.Errorf("METADATA_DB_PATH, LYRICS_DB_PATH, and COVER_DB_PATH must be different")
 	}
 	if c.DBMmapSize <= 0 {
 		return fmt.Errorf("DB_MMAP_SIZE must be positive")
@@ -119,13 +138,13 @@ func (c Config) Validate() error {
 	if c.RateLimitPerSec < 1 || c.RateLimitPerMin < 1 {
 		return fmt.Errorf("rate limits must be positive")
 	}
-	if c.LRCLIBTimeoutMS < 1 || c.MetadataTimeoutMS < 1 {
+	if c.LRCLIBTimeoutMS < 1 || c.MetadataTimeoutMS < 1 || c.CoverTimeoutMS < 1 {
 		return fmt.Errorf("upstream timeouts must be positive")
 	}
 	if strings.TrimSpace(c.LRCLIBUserAgent) == "" {
 		return fmt.Errorf("LRCLIB_USER_AGENT must not be empty")
 	}
-	for name, value := range map[string]string{"LRCLIB_BASE_URL": c.LRCLIBBaseURL, "ITUNES_BASE_URL": c.ITunesBaseURL, "DEEZER_BASE_URL": c.DeezerBaseURL} {
+	for name, value := range map[string]string{"LRCLIB_BASE_URL": c.LRCLIBBaseURL, "ITUNES_BASE_URL": c.ITunesBaseURL, "DEEZER_BASE_URL": c.DeezerBaseURL, "LASTFM_BASE_URL": c.LastfmBaseURL} {
 		baseURL, err := url.Parse(strings.TrimSpace(value))
 		if err != nil || (baseURL.Scheme != "http" && baseURL.Scheme != "https") || baseURL.Host == "" {
 			return fmt.Errorf("%s must be an http or https URL", name)
@@ -133,6 +152,9 @@ func (c Config) Validate() error {
 	}
 	if strings.TrimSpace(c.MetadataUserAgent) == "" {
 		return fmt.Errorf("METADATA_USER_AGENT must not be empty")
+	}
+	if strings.TrimSpace(c.CoverUserAgent) == "" {
+		return fmt.Errorf("COVER_USER_AGENT must not be empty")
 	}
 	return nil
 }
@@ -145,6 +167,10 @@ func defaultLRCLIBUserAgent() string {
 	return "music-utils/" + version.Version + " (+https://gru0.dev)"
 }
 
+func defaultCoverUserAgent() string {
+	return "music-utils/" + version.Version + " (+https://gru0.dev)"
+}
+
 func validateEnvironment() error {
 	if err := validateIntEnv("DB_MMAP_SIZE"); err != nil {
 		return err
@@ -152,7 +178,7 @@ func validateEnvironment() error {
 	if err := validateIntEnv("DB_CACHE_SIZE_KB"); err != nil {
 		return err
 	}
-	for _, name := range []string{"DB_MAX_OPEN_CONNS", "RATE_LIMIT_PER_SEC", "RATE_LIMIT_PER_MIN", "LRCLIB_TIMEOUT_MS", "METADATA_TIMEOUT_MS"} {
+	for _, name := range []string{"DB_MAX_OPEN_CONNS", "RATE_LIMIT_PER_SEC", "RATE_LIMIT_PER_MIN", "LRCLIB_TIMEOUT_MS", "METADATA_TIMEOUT_MS", "COVER_TIMEOUT_MS"} {
 		if err := validatePositiveIntEnv(name); err != nil {
 			return err
 		}
@@ -160,7 +186,7 @@ func validateEnvironment() error {
 	if err := validatePortEnv(); err != nil {
 		return err
 	}
-	for _, name := range []string{"TRUST_PROXY", "LRCLIB_FALLBACK_ENABLED", "METADATA_FALLBACK_ENABLED"} {
+	for _, name := range []string{"TRUST_PROXY", "LRCLIB_FALLBACK_ENABLED", "METADATA_FALLBACK_ENABLED", "COVER_FALLBACK_ENABLED"} {
 		if value := strings.TrimSpace(os.Getenv(name)); value != "" {
 			if _, err := strconv.ParseBool(value); err != nil {
 				return fmt.Errorf("%s must be a boolean", name)

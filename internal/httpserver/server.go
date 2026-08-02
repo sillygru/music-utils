@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/sillygru/music-utils/internal/config"
+	"github.com/sillygru/music-utils/internal/cover"
+	"github.com/sillygru/music-utils/internal/db"
 	"github.com/sillygru/music-utils/internal/lrclib"
 	"github.com/sillygru/music-utils/internal/metadata"
 	"github.com/sillygru/music-utils/internal/version"
@@ -78,24 +80,34 @@ func setRequestIssue(r *http.Request, level slog.Level, detail string) {
 
 // New creates the HTTP server with the default application configuration.
 // NewWithConfig should be used by the application when environment-based
-// configuration is available.
+// configuration is available. Cover artwork uses an in-memory database.
 func New(port string, metadataDB, lyricsDB *sql.DB) *http.Server {
 	return NewWithConfig(config.Config{Port: port}, metadataDB, lyricsDB)
 }
 
 // NewWithConfig creates the HTTP server and registers all application routes.
+// Cover artwork uses an in-memory database absent an explicit cover DB.
 func NewWithConfig(cfg config.Config, metadataDB, lyricsDB *sql.DB) *http.Server {
-	return NewWithLogger(cfg, metadataDB, lyricsDB, slog.Default())
+	return NewWithLogger(cfg, metadataDB, lyricsDB, nil, slog.Default())
 }
 
 // NewWithLogger is the injectable constructor used by the application and
 // tests that need deterministic logging or a custom LRCLIB endpoint.
-func NewWithLogger(cfg config.Config, metadataDB, lyricsDB *sql.DB, logger *slog.Logger) *http.Server {
+func NewWithLogger(cfg config.Config, metadataDB, lyricsDB, coverDB *sql.DB, logger *slog.Logger) *http.Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	client := newLRCLIBClient(cfg, logger)
 	metadataResolver := newMetadataResolver(cfg, logger)
+	coverResolver := newCoverResolver(cfg, logger)
+	if coverDB == nil {
+		var err error
+		coverDB, err = coverDatabase()
+		if err != nil {
+			logger.Error("open in-memory cover database", "error", err)
+			coverDB = &sql.DB{}
+		}
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", healthz)
@@ -105,6 +117,8 @@ func NewWithLogger(cfg config.Config, metadataDB, lyricsDB *sql.DB, logger *slog
 	mux.HandleFunc("GET /api/metadata/get", getMetadataHandler(metadataDB, metadataResolver, cfg.MetadataFallbackEnabled))
 	mux.HandleFunc("GET /api/metadata/search", searchMetadataHandler(metadataDB))
 	mux.HandleFunc("GET /api/cover/get", getCoverHandler(metadataDB))
+	mux.HandleFunc("GET /api/cover/artist", getArtistCoverHandler(coverDB, coverResolver, cfg.CoverFallbackEnabled))
+	mux.HandleFunc("GET /api/cover/album", getAlbumCoverHandler(coverDB, coverResolver, cfg.CoverFallbackEnabled))
 
 	limiter := newRateLimiter(cfg)
 	application := recoverMiddleware(limiter.Handler(mux), logger)
@@ -119,6 +133,46 @@ func NewWithLogger(cfg config.Config, metadataDB, lyricsDB *sql.DB, logger *slog
 	}
 	server.RegisterOnShutdown(limiter.Stop)
 	return server
+}
+
+func newCoverResolver(cfg config.Config, logger *slog.Logger) *cover.Resolver {
+	timeout := time.Duration(cfg.CoverTimeoutMS) * time.Millisecond
+	userAgent := cfg.CoverUserAgent
+	var providers []cover.Provider
+
+	if lastfm, err := cover.NewLastfm(cfg.LastfmBaseURL, userAgent, timeout); err != nil {
+		logger.Error("configure Last.fm cover provider", "error", err)
+	} else {
+		providers = append(providers, lastfm)
+	}
+	if itunes, err := cover.NewITunes(cfg.ITunesBaseURL, userAgent, timeout); err != nil {
+		logger.Error("configure iTunes cover provider", "error", err)
+	} else {
+		providers = append(providers, itunes)
+	}
+	if deezer, err := cover.NewDeezer(cfg.DeezerBaseURL, userAgent, timeout); err != nil {
+		logger.Error("configure Deezer cover provider", "error", err)
+	} else {
+		providers = append(providers, deezer)
+	}
+	if len(providers) == 0 {
+		return nil
+	}
+	return cover.NewResolver(providers...)
+}
+
+// coverDatabase opens an in-memory cover schema for callers that pass no
+// explicit cover DB (tests, New/NewWithConfig).
+func coverDatabase() (*sql.DB, error) {
+	database, err := db.Open(":memory:", db.Config{MmapSize: 1024 * 1024, CacheSizeKB: -2, MaxOpenConns: 1})
+	if err != nil {
+		return nil, err
+	}
+	if err := db.MigrateCover(context.Background(), database); err != nil {
+		_ = database.Close()
+		return nil, err
+	}
+	return database, nil
 }
 
 func newMetadataResolver(cfg config.Config, logger *slog.Logger) *metadata.Resolver {

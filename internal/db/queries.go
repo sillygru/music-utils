@@ -195,6 +195,71 @@ func FindLyricsByID(ctx context.Context, database *sql.DB, lyricsID int64) (*Lyr
 	return lyrics, nil
 }
 
+// FindCoverArt loads one cached album or artist cover row from the cover
+// database. It returns sql.ErrNoRows when nothing has been checked yet.
+func FindCoverArt(ctx context.Context, database *sql.DB, entityType CoverEntity, artistName, albumName string) (*CoverArt, error) {
+	if database == nil {
+		return nil, errors.New("cover database is nil")
+	}
+	if entityType != CoverArtist && entityType != CoverAlbum {
+		return nil, fmt.Errorf("invalid cover entity type %q", entityType)
+	}
+	album := normalize(albumName)
+	if entityType == CoverArtist {
+		album = ""
+	}
+	cover := &CoverArt{}
+	err := database.QueryRowContext(ctx, "SELECT id,entity_type,COALESCE(artist_name_lower,''),COALESCE(album_name_lower,''),COALESCE(cover_url,''),COALESCE(cover_source,''),COALESCE(checked_at,'') FROM cover_urls WHERE entity_type=? AND artist_name_lower=? AND COALESCE(album_name_lower,'')=? LIMIT 1",
+		string(entityType), normalize(artistName), album).
+		Scan(&cover.ID, &cover.EntityType, &cover.ArtistNameLower, &cover.AlbumNameLower, &cover.CoverURL, &cover.CoverSource, &cover.CheckedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, sql.ErrNoRows
+	}
+	if err != nil {
+		return nil, fmt.Errorf("find cover art: %w", err)
+	}
+	return cover, nil
+}
+
+// UpsertCoverArt caches an album or artist cover URL. A hit stores the resolved
+// URL and its source; a miss stores a NULL URL with a set checked_at so the
+// negative result is memoized.
+func UpsertCoverArt(ctx context.Context, database *sql.DB, entityType CoverEntity, artistName, albumName, coverURL, coverSource string) error {
+	if database == nil {
+		return errors.New("cover database is nil")
+	}
+	if entityType != CoverArtist && entityType != CoverAlbum {
+		return fmt.Errorf("invalid cover entity type %q", entityType)
+	}
+	album := albumType(albumName)
+	var albumValue any
+	if album != "" {
+		albumValue = album
+	}
+	var urlValue any
+	if coverURL != "" {
+		urlValue = coverURL
+	}
+	var sourceValue any
+	if coverSource != "" {
+		sourceValue = coverSource
+	}
+	_, err := database.ExecContext(ctx, `INSERT INTO cover_urls (entity_type,artist_name_lower,album_name_lower,cover_url,cover_source,checked_at,updated_at)
+VALUES (?,?,?,?,?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)
+ON CONFLICT(entity_type,artist_name_lower,album_name_lower) DO UPDATE SET
+cover_url=CASE WHEN excluded.cover_url IS NOT NULL THEN excluded.cover_url ELSE cover_url END,
+cover_source=CASE WHEN excluded.cover_url IS NOT NULL THEN excluded.cover_source ELSE cover_source END,
+checked_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP`,
+		string(entityType), normalize(artistName), albumValue, urlValue, sourceValue)
+	if err != nil {
+		return fmt.Errorf("upsert cover art: %w", err)
+	}
+	return nil
+}
+
+// ExpireCoverArt step is intentionally omitted: negative-cache expiry is handled
+// by callers comparing CheckedAt against a TTL, not by row deletion.
+
 type TrackSearchResult struct {
 	Track
 	Lyrics
@@ -262,6 +327,10 @@ func normalizeTrack(track *Track) {
 	}
 }
 func normalize(value string) string { return strings.ToLower(strings.TrimSpace(value)) }
+
+// albumType normalizes an album name, returning "" for artist-entity rows so the
+// album column stays NULL there.
+func albumType(value string) string { return normalize(value) }
 func ftsQuery(value string) string {
 	parts := strings.Fields(normalize(value))
 	for i, part := range parts {

@@ -28,6 +28,7 @@ func main() {
 		"port", cfg.Port,
 		"metadata_db_path", cfg.MetadataDBPath,
 		"lyrics_db_path", cfg.LyricsDBPath,
+		"cover_db_path", cfg.CoverDBPath,
 		"db_max_open_conns", cfg.DBMaxOpenConns,
 		"rate_limit_per_sec", cfg.RateLimitPerSec,
 		"rate_limit_per_min", cfg.RateLimitPerMin,
@@ -36,8 +37,11 @@ func main() {
 		"lrclib_base_url", cfg.LRCLIBBaseURL,
 		"lrclib_timeout_ms", cfg.LRCLIBTimeoutMS,
 		"metadata_fallback_enabled", cfg.MetadataFallbackEnabled,
+		"cover_fallback_enabled", cfg.CoverFallbackEnabled,
 		"itunes_base_url", cfg.ITunesBaseURL,
 		"deezer_base_url", cfg.DeezerBaseURL,
+		"lastfm_base_url", cfg.LastfmBaseURL,
+		"cover_timeout_ms", cfg.CoverTimeoutMS,
 		"metadata_timeout_ms", cfg.MetadataTimeoutMS,
 	)
 
@@ -63,6 +67,17 @@ func main() {
 	}
 	defer lyricsDB.Close()
 
+	coverDB, err := db.Open(cfg.CoverDBPath, db.Config{
+		MmapSize:     cfg.DBMmapSize,
+		CacheSizeKB:  cfg.DBCacheSizeKB,
+		MaxOpenConns: cfg.DBMaxOpenConns,
+	})
+	if err != nil {
+		logger.Error("open cover database", "error", err)
+		os.Exit(1)
+	}
+	defer coverDB.Close()
+
 	ctx := context.Background()
 	if err := db.MigrateMetadata(ctx, metadataDB); err != nil {
 		logger.Error("migrate metadata database", "error", err)
@@ -72,12 +87,16 @@ func main() {
 		logger.Error("migrate lyrics database", "error", err)
 		os.Exit(1)
 	}
+	if err := db.MigrateCover(ctx, coverDB); err != nil {
+		logger.Error("migrate cover database", "error", err)
+		os.Exit(1)
+	}
 	if err := db.MigrateLegacyLyrics(ctx, metadataDB, lyricsDB); err != nil {
 		logger.Error("migrate legacy lyrics data", "error", err)
 		os.Exit(1)
 	}
 
-	server := httpserver.NewWithLogger(cfg, metadataDB, lyricsDB, logger)
+	server := httpserver.NewWithLogger(cfg, metadataDB, lyricsDB, coverDB, logger)
 	serverErrors := make(chan error, 1)
 	go func() {
 		logger.Info("server listening", "address", server.Addr)

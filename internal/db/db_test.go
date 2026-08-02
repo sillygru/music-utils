@@ -2,6 +2,8 @@ package db
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"path/filepath"
 	"testing"
 )
@@ -50,6 +52,56 @@ func TestOpenCreatesDatabaseDirectory(t *testing.T) {
 	var count int
 	if err := database.QueryRow("SELECT count(*) FROM sqlite_master").Scan(&count); err != nil {
 		t.Fatalf("query newly opened database: %v", err)
+	}
+}
+
+func TestCoverArtUpsertAndFind(t *testing.T) {
+	ctx := context.Background()
+	database, err := Open(":memory:", Config{MmapSize: 512 * 1024 * 1024, CacheSizeKB: -64000, MaxOpenConns: 1})
+	if err != nil {
+		t.Fatalf("open cover database: %v", err)
+	}
+	defer database.Close()
+	if err := MigrateCover(ctx, database); err != nil {
+		t.Fatalf("migrate cover database: %v", err)
+	}
+
+	if _, err := FindCoverArt(ctx, database, CoverArtist, "Radiohead", ""); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("expected no rows before write, got %v", err)
+	}
+
+	if err := UpsertCoverArt(ctx, database, CoverArtist, "Radiohead", "", "http://img/a.jpg", "itunes"); err != nil {
+		t.Fatalf("upsert artist cover: %v", err)
+	}
+	if err := UpsertCoverArt(ctx, database, CoverAlbum, "Radiohead", "OK Computer", "http://img/b.jpg", "deezer"); err != nil {
+		t.Fatalf("upsert album cover: %v", err)
+	}
+
+	artist, err := FindCoverArt(ctx, database, CoverArtist, "radiohead", "")
+	if err != nil {
+		t.Fatalf("find artist cover: %v", err)
+	}
+	if artist.CoverURL != "http://img/a.jpg" || artist.CoverSource != "itunes" {
+		t.Fatalf("unexpected artist cover: %+v", artist)
+	}
+
+	album, err := FindCoverArt(ctx, database, CoverAlbum, "Radiohead", "OK Computer")
+	if err != nil {
+		t.Fatalf("find album cover: %v", err)
+	}
+	if album.CoverURL != "http://img/b.jpg" || album.CoverSource != "deezer" {
+		t.Fatalf("unexpected album cover: %+v", album)
+	}
+
+	if err := UpsertCoverArt(ctx, database, CoverArtist, "Lost Artist", "", "", ""); err != nil {
+		t.Fatalf("upsert artist negative: %v", err)
+	}
+	negative, err := FindCoverArt(ctx, database, CoverArtist, "Lost Artist", "")
+	if err != nil {
+		t.Fatalf("find negative artist cover: %v", err)
+	}
+	if negative.CoverURL != "" {
+		t.Fatalf("expected empty cover URL, got %q", negative.CoverURL)
 	}
 }
 

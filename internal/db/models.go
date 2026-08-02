@@ -28,6 +28,25 @@ type Track struct {
 	Source                    string
 }
 
+// CoverEntity distinguishes album art from artist art in the cover_urls table.
+type CoverEntity string
+
+const (
+	CoverArtist CoverEntity = "artist"
+	CoverAlbum  CoverEntity = "album"
+)
+
+// CoverArt is the database representation of a cached album or artist cover URL.
+type CoverArt struct {
+	ID              int64
+	EntityType      CoverEntity
+	ArtistNameLower string
+	AlbumNameLower  string
+	CoverURL        string
+	CoverSource     string
+	CheckedAt       string
+}
+
 // Lyrics is the database representation of a track's lyrics. TrackID records
 // the original owning track; lyrics_tracks contains every track association
 // when content deduplication shares this row.

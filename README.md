@@ -14,24 +14,27 @@ server process with minimal dependencies and a JSON-only HTTP interface.
   release date, ISRC, and provenance are cached in SQLite.
 - **Song cover URLs** — cover URLs are kept only when a metadata provider
   includes them for free; cached with their source, and returned in metadata responses.
+- **Album and artist cover URLs** — a dedicated cover database and two
+  enrichment endpoints resolve album/artist artwork from Last.fm, iTunes, and
+  Deezer in order, caching URLs (and checked misses).
 - **Searchable catalog** — local FTS5 search covers title, artist, album, and
   genre.
 
 ### Planned
 
-- Album and artist cover URLs.
-- Additional provider adapters and optional offline MusicBrainz dump import.
 - Confidence scores and richer multi-value genre/tag storage.
 
 ## API
 
 | Endpoint | Description |
 | --- | --- |
-| `GET /healthz` | Health check. Not rate limited. |
-| `GET /version` | Running application version. Not rate limited. |
+| `GET /healthz` | Health check|
+| `GET /version` | Running application version.|
 | `GET /api/metadata/get` | Exact song metadata lookup; local-first with iTunes + Deezer provider fallback. |
 | `GET /api/metadata/search` | Local metadata search; never calls upstream APIs. |
 | `GET /api/cover/get` | Cached song cover URL and cover source. |
+| `GET /api/cover/artist` | Artist cover URL; resolves Last.fm → iTunes → Deezer on a miss and caches. |
+| `GET /api/cover/album` | Album cover URL; resolves Last.fm → iTunes → Deezer on a miss and caches. |
 | `GET /api/lyrics/get` | Exact lyrics lookup; local-first with optional LRCLIB fallback. |
 | `GET /api/lyrics/search` | Local lyrics/catalog search; never calls LRCLIB. |
 
@@ -45,6 +48,8 @@ curl http://localhost:8080/healthz
 curl 'http://localhost:8080/api/metadata/get?track_name=Example%20Song&artist_name=Example%20Artist'
 curl 'http://localhost:8080/api/metadata/search?q=example&limit=20'
 curl 'http://localhost:8080/api/cover/get?track_name=Example%20Song&artist_name=Example%20Artist'
+curl 'http://localhost:8080/api/cover/artist?artist_name=Radiohead'
+curl 'http://localhost:8080/api/cover/album?artist_name=Radiohead&album_name=OK%20Computer'
 curl 'http://localhost:8080/api/lyrics/get?track_name=Example%20Song&artist_name=Example%20Artist'
 curl 'http://localhost:8080/api/lyrics/search?q=example&limit=20'
 ```
@@ -106,6 +111,7 @@ cold-lookup latency and has been removed.
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, or `error`. |
 | `METADATA_DB_PATH` | `./data/metadata.db` | SQLite database containing tracks, covers, provenance, and metadata FTS. |
 | `LYRICS_DB_PATH` | `./data/lyrics.db` | SQLite database containing lyrics and lyrics associations. |
+| `COVER_DB_PATH` | `./data/cover.db` | SQLite database containing album/artist cover URLs and checked-misses. |
 | `DB_MMAP_SIZE` | `536870912` | SQLite mmap size in bytes. |
 | `DB_CACHE_SIZE_KB` | `-64000` | SQLite page cache size. |
 | `DB_MAX_OPEN_CONNS` | `16` | SQLite connection pool limit. |
@@ -117,6 +123,10 @@ cold-lookup latency and has been removed.
 | `DEEZER_BASE_URL` | `https://api.deezer.com` | Deezer API base URL. |
 | `METADATA_USER_AGENT` | `music-utils/v0.2.1 (+https://gru0.dev)` | Descriptive upstream User-Agent. |
 | `METADATA_TIMEOUT_MS` | `5000` | Metadata provider timeout. |
+| `COVER_FALLBACK_ENABLED` | `true` | Enable Last.fm + iTunes + Deezer album/artist cover resolution. |
+| `COVER_TIMEOUT_MS` | `10000` | Album/artist cover provider timeout. |
+| `COVER_USER_AGENT` | `music-utils/v0.2.1 (+https://gru0.dev)` | Cover upstream User-Agent. |
+| `LASTFM_BASE_URL` | `https://www.last.fm` | Last.fm scraping base URL. |
 | `LRCLIB_FALLBACK_ENABLED` | `true` | Enable LRCLIB fallback. |
 | `LRCLIB_BASE_URL` | `https://lrclib.net/api` | LRCLIB API base URL. |
 | `LRCLIB_USER_AGENT` | `music-utils/v0.2.1 (+https://gru0.dev)` | LRCLIB User-Agent. |
@@ -124,7 +134,8 @@ cold-lookup latency and has been removed.
 
 ## Database migration
 
-New installations create `METADATA_DB_PATH` and `LYRICS_DB_PATH` independently.
+New installations create `METADATA_DB_PATH`, `LYRICS_DB_PATH`, and
+`COVER_DB_PATH` independently.
 On startup, an existing combined database is upgraded in place when it is used
 as the metadata path: lyrics rows are copied to the lyrics database, metadata
 tracks are rebuilt without a cross-database foreign key, and the old lyrics
@@ -148,6 +159,7 @@ Build a standalone binary with:
 ```
 cmd/server/              main entry point
 internal/config/         environment configuration and validation
+internal/cover/          Last.fm + iTunes + Deezer album/artist cover providers and resolver
 internal/db/             SQLite connections, independent schemas, migration, and queries
 internal/httpserver/     HTTP routes, handlers, middleware, rate limiting
 internal/lrclib/         LRCLIB upstream client

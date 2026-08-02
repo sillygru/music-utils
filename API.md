@@ -90,6 +90,50 @@ Example response:
 Responses: `200` cached cover, `400` invalid input, `404` not cached/not found,
 `429` rate limited, `500` internal error.
 
+## `GET /api/cover/artist`
+
+Returns artist artwork as a cover URL. It is an enrichment endpoint (unlike the
+cache-only `/api/cover/get`): on a miss it resolves the cover provider chain
+(Last.fm → iTunes → Deezer) in order, caches the winning URL, and returns it.
+The result is persisted in a dedicated cover database.
+
+Query parameter: required `artist_name`.
+
+Example response:
+
+```json
+{
+  "id": 1,
+  "entityType": "artist",
+  "artistName": "Radiohead",
+  "coverUrl": "https://is1-ssl.mzstatic.com/.../600x600bb.jpg",
+  "coverUrlSource": "itunes"
+}
+```
+
+Responses: `200` cover URL, `400` invalid input, `404` provider miss (negative
+cached for the cache window), `429` rate limited, `500` internal error.
+
+## `GET /api/cover/album`
+
+Returns album artwork as a cover URL, with the same enrichment and persistence
+behavior as `/api/cover/artist`.
+
+Query parameters: required `artist_name` and `album_name`.
+
+Example response:
+
+```json
+{
+  "id": 1,
+  "entityType": "album",
+  "artistName": "Radiohead",
+  "albumName": "OK Computer",
+  "coverUrl": "https://img.deezer.com/.../xl.jpg",
+  "coverUrlSource": "deezer"
+}
+```
+
 ## `GET /api/lyrics/get`
 
 Exact lyrics lookup. Checks SQLite first; on a miss and when
@@ -125,10 +169,27 @@ curl 'http://localhost:8080/api/lyrics/search?q=example&limit=20'
 
 `METADATA_DB_PATH` stores tracks, metadata, cover URLs, provenance, and metadata
 FTS5. `LYRICS_DB_PATH` stores lyrics bodies and their track associations. The
-service composes responses in Go; it does not use cross-database SQL joins.
-For an existing combined database, run the service once with that file as the
-metadata path and a new lyrics path to copy lyrics and remove the old combined
-lyrics tables safely.
+`COVER_DB_PATH` stores album and artist cover URLs (and checked-misses) in a
+separate database. The service composes responses in Go; it does not use
+cross-database SQL joins. For an existing combined database, run the service
+once with that file as the metadata path and a new lyrics path to copy lyrics and
+remove the old combined lyrics tables safely.
+
+## Album & artist cover behavior
+
+Album and artist artwork is resolved by chaining three keyless sources in a
+fixed fallback order: **Last.fm** (HTML scrape), then **iTunes** (Search API,
+`entity=album`), then **Deezer** (`/search/artist` and `/search/album`). The
+first non-empty URL wins. Artist art on iTunes/Deezer is the artwork of the
+top-ranked album. The chain is throttled so iTunes is never hit more than once
+every two seconds, and Last.fm is scraped conservatively (~1 request per 2s).
+Spot URL upgrades rewrite low-resolution Last.fm CDN segments to `300x300` and
+iTunes `100x100` artwork to `600x600`.
+
+Both positive results and checked misses are upserted into `COVER_DB_PATH`; a
+miss is served from cache (without spending upstream budget) until the
+negative-cache window elapses. Only URLs are cached — cover image bytes are
+never downloaded.
 
 ## Provider and cache behavior
 

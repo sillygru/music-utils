@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-//go:embed metadata_schema.sql lyrics_schema.sql
+//go:embed metadata_schema.sql lyrics_schema.sql covers_schema.sql
 var schemaFS embed.FS
 
 var metadataColumns = []struct {
@@ -102,6 +102,11 @@ func MigrateMetadata(ctx context.Context, database *sql.DB) error {
 // MigrateLyrics initializes the independent lyrics database.
 func MigrateLyrics(ctx context.Context, database *sql.DB) error {
 	return migrateSchema(ctx, database, "lyrics_schema.sql")
+}
+
+// MigrateCover initializes the independent album/artist cover URL database.
+func MigrateCover(ctx context.Context, database *sql.DB) error {
+	return migrateSchema(ctx, database, "covers_schema.sql")
 }
 
 // Migrate remains a metadata-only convenience for package callers that only
