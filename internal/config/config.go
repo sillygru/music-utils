@@ -25,9 +25,9 @@ const (
 	defaultLRCLIBBaseURL           = "https://lrclib.net/api"
 	defaultLRCLIBTimeoutMS         = 5000
 	defaultMetadataFallbackEnabled = true
-	defaultMusicBrainzBaseURL      = "https://musicbrainz.org/ws/2"
-	defaultCoverArtArchiveBaseURL  = "https://coverartarchive.org"
-	defaultMusicBrainzTimeoutMS    = 10000
+	defaultITunesBaseURL           = "https://itunes.apple.com"
+	defaultDeezerBaseURL           = "https://api.deezer.com"
+	defaultMetadataTimeoutMS       = 5000
 )
 
 // Config contains the settings needed to start the server.
@@ -47,10 +47,10 @@ type Config struct {
 	LRCLIBUserAgent         string
 	LRCLIBTimeoutMS         int
 	MetadataFallbackEnabled bool
-	MusicBrainzBaseURL      string
-	CoverArtArchiveBaseURL  string
-	MusicBrainzUserAgent    string
-	MusicBrainzTimeoutMS    int
+	ITunesBaseURL           string
+	DeezerBaseURL           string
+	MetadataTimeoutMS       int
+	MetadataUserAgent       string
 }
 
 // Load reads configuration from the environment and applies defaults when a
@@ -72,10 +72,10 @@ func Load() Config {
 		LRCLIBUserAgent:         valueOrDefault("LRCLIB_USER_AGENT", defaultLRCLIBUserAgent()),
 		LRCLIBTimeoutMS:         intOrDefault("LRCLIB_TIMEOUT_MS", defaultLRCLIBTimeoutMS),
 		MetadataFallbackEnabled: boolOrDefault("METADATA_FALLBACK_ENABLED", defaultMetadataFallbackEnabled),
-		MusicBrainzBaseURL:      valueOrDefault("MUSICBRAINZ_BASE_URL", defaultMusicBrainzBaseURL),
-		CoverArtArchiveBaseURL:  valueOrDefault("COVER_ART_ARCHIVE_BASE_URL", defaultCoverArtArchiveBaseURL),
-		MusicBrainzUserAgent:    valueOrDefault("MUSICBRAINZ_USER_AGENT", defaultMusicBrainzUserAgent()),
-		MusicBrainzTimeoutMS:    intOrDefault("MUSICBRAINZ_TIMEOUT_MS", defaultMusicBrainzTimeoutMS),
+		ITunesBaseURL:           valueOrDefault("ITUNES_BASE_URL", defaultITunesBaseURL),
+		DeezerBaseURL:           valueOrDefault("DEEZER_BASE_URL", defaultDeezerBaseURL),
+		MetadataTimeoutMS:       intOrDefault("METADATA_TIMEOUT_MS", defaultMetadataTimeoutMS),
+		MetadataUserAgent:       valueOrDefault("METADATA_USER_AGENT", defaultMetadataUserAgent()),
 	}
 }
 
@@ -119,25 +119,25 @@ func (c Config) Validate() error {
 	if c.RateLimitPerSec < 1 || c.RateLimitPerMin < 1 {
 		return fmt.Errorf("rate limits must be positive")
 	}
-	if c.LRCLIBTimeoutMS < 1 || c.MusicBrainzTimeoutMS < 1 {
+	if c.LRCLIBTimeoutMS < 1 || c.MetadataTimeoutMS < 1 {
 		return fmt.Errorf("upstream timeouts must be positive")
 	}
 	if strings.TrimSpace(c.LRCLIBUserAgent) == "" {
 		return fmt.Errorf("LRCLIB_USER_AGENT must not be empty")
 	}
-	for name, value := range map[string]string{"LRCLIB_BASE_URL": c.LRCLIBBaseURL, "MUSICBRAINZ_BASE_URL": c.MusicBrainzBaseURL, "COVER_ART_ARCHIVE_BASE_URL": c.CoverArtArchiveBaseURL} {
+	for name, value := range map[string]string{"LRCLIB_BASE_URL": c.LRCLIBBaseURL, "ITUNES_BASE_URL": c.ITunesBaseURL, "DEEZER_BASE_URL": c.DeezerBaseURL} {
 		baseURL, err := url.Parse(strings.TrimSpace(value))
 		if err != nil || (baseURL.Scheme != "http" && baseURL.Scheme != "https") || baseURL.Host == "" {
 			return fmt.Errorf("%s must be an http or https URL", name)
 		}
 	}
-	if strings.TrimSpace(c.MusicBrainzUserAgent) == "" {
-		return fmt.Errorf("MUSICBRAINZ_USER_AGENT must not be empty")
+	if strings.TrimSpace(c.MetadataUserAgent) == "" {
+		return fmt.Errorf("METADATA_USER_AGENT must not be empty")
 	}
 	return nil
 }
 
-func defaultMusicBrainzUserAgent() string {
+func defaultMetadataUserAgent() string {
 	return "music-utils/" + version.Version + " (+https://gru0.dev)"
 }
 
@@ -152,7 +152,7 @@ func validateEnvironment() error {
 	if err := validateIntEnv("DB_CACHE_SIZE_KB"); err != nil {
 		return err
 	}
-	for _, name := range []string{"DB_MAX_OPEN_CONNS", "RATE_LIMIT_PER_SEC", "RATE_LIMIT_PER_MIN", "LRCLIB_TIMEOUT_MS", "MUSICBRAINZ_TIMEOUT_MS"} {
+	for _, name := range []string{"DB_MAX_OPEN_CONNS", "RATE_LIMIT_PER_SEC", "RATE_LIMIT_PER_MIN", "LRCLIB_TIMEOUT_MS", "METADATA_TIMEOUT_MS"} {
 		if err := validatePositiveIntEnv(name); err != nil {
 			return err
 		}

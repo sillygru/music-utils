@@ -10,7 +10,7 @@ import (
 	"strings"
 
 	"github.com/sillygru/music-utils/internal/db"
-	"github.com/sillygru/music-utils/internal/musicbrainz"
+	"github.com/sillygru/music-utils/internal/metadata"
 )
 
 type metadataResponse struct {
@@ -32,7 +32,7 @@ type metadataResponse struct {
 	CoverURLSource            string  `json:"coverUrlSource,omitempty"`
 }
 
-func getMetadataHandler(database *sql.DB, client *musicbrainz.Client, fallbackEnabled bool) http.HandlerFunc {
+func getMetadataHandler(database *sql.DB, resolver *metadata.Resolver, fallbackEnabled bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
 		name := strings.TrimSpace(query.Get("track_name"))
@@ -66,7 +66,7 @@ func getMetadataHandler(database *sql.DB, client *musicbrainz.Client, fallbackEn
 			writeJSON(w, http.StatusOK, toMetadataResponse(local))
 			return
 		}
-		if !fallbackEnabled || client == nil {
+		if !fallbackEnabled || resolver == nil {
 			if local != nil {
 				setOutcome(r, "local_partial_hit")
 				writeJSON(w, http.StatusOK, toMetadataResponse(local))
@@ -76,9 +76,9 @@ func getMetadataHandler(database *sql.DB, client *musicbrainz.Client, fallbackEn
 			writeJSON(w, http.StatusNotFound, apiError{Code: http.StatusNotFound, Message: "Track not found"})
 			return
 		}
-		remote, err := client.Lookup(r.Context(), musicbrainz.Input{Name: name, Artist: artist, Album: album, Duration: duration})
+		remote, err := resolver.Lookup(r.Context(), metadata.Input{TrackName: name, ArtistName: artist, AlbumName: album, Duration: duration})
 		if err != nil {
-			if !errors.Is(err, musicbrainz.ErrNotFound) {
+			if !errors.Is(err, metadata.ErrNotFound) {
 				setRequestIssue(r, slog.LevelWarn, err.Error())
 			}
 			if local != nil {
@@ -97,21 +97,16 @@ func getMetadataHandler(database *sql.DB, client *musicbrainz.Client, fallbackEn
 			remote.AlbumName = album
 		}
 		remote.MetadataChecked = true
-		if _, err = db.UpsertTrackMetadata(r.Context(), database, *remote); err != nil {
-			setRequestIssue(r, slog.LevelError, err.Error())
-			setOutcome(r, "error")
-			writeJSON(w, http.StatusInternalServerError, apiError{Code: http.StatusInternalServerError, Message: "Internal server error"})
-			return
-		}
-		cached, err := db.FindTrackMetadataExact(r.Context(), database, remote.Name, remote.ArtistName, remote.AlbumName, remote.Duration)
+		trackID, err := db.UpsertTrackMetadata(r.Context(), database, *remote)
 		if err != nil {
 			setRequestIssue(r, slog.LevelError, err.Error())
 			setOutcome(r, "error")
 			writeJSON(w, http.StatusInternalServerError, apiError{Code: http.StatusInternalServerError, Message: "Internal server error"})
 			return
 		}
-		setOutcome(r, "musicbrainz_fallback_hit")
-		writeJSON(w, http.StatusOK, toMetadataResponse(cached))
+		remote.ID = trackID
+		setOutcome(r, "provider_fallback_hit")
+		writeJSON(w, http.StatusOK, toMetadataResponse(remote))
 	}
 }
 

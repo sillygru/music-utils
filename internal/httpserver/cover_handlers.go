@@ -20,7 +20,7 @@ type coverResponse struct {
 
 // getCoverHandler serves only cached artwork. Metadata lookup is intentionally
 // separate so clients can choose whether a cover miss should spend upstream
-// MusicBrainz/Cover Art Archive budget.
+// metadata-provider budget.
 func getCoverHandler(database *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()

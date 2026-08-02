@@ -22,19 +22,21 @@ All endpoints are served on `:8080` by default and return JSON.
 | `year` | integer | Release year. |
 | `releaseDate` | string | Provider release date, when available. |
 | `isrc` | string | ISRC, when available. |
-| `musicbrainzRecordingId` | string | Canonical recording MBID. |
-| `musicbrainzReleaseId` | string | Selected release MBID. |
-| `musicbrainzReleaseGroupId` | string | Release-group MBID. |
-| `musicbrainzArtistId` | string | Primary artist MBID. |
-| `coverUrl` | string | Cached front-cover URL, when available. |
-| `metadataSource` | string | Metadata provenance, currently `musicbrainz`. |
-| `coverUrlSource` | string | Artwork provenance, currently `cover_art_archive`. |
+| `musicbrainzRecordingId` | string | Canonical recording MBID (legacy, when populated). |
+| `musicbrainzReleaseId` | string | Selected release MBID (legacy, when populated). |
+| `musicbrainzReleaseGroupId` | string | Release-group MBID (legacy, when populated). |
+| `musicbrainzArtistId` | string | Primary artist MBID (legacy, when populated). |
+| `coverUrl` | string | Cover URL returned by a provider, when available. |
+| `metadataSource` | string | Metadata provenance: `itunes`, `deezer`, or user-provided. |
+| `coverUrlSource` | string | Artwork provenance: `itunes` or `deezer`, when a cover URL was provided. |
 
 ## `GET /api/metadata/get`
 
 Exact song lookup. Checks SQLite first. If missing or not enriched and
-`METADATA_FALLBACK_ENABLED=true`, searches MusicBrainz, resolves Cover Art
-Archive artwork, stores the result, and returns the cached record.
+`METADATA_FALLBACK_ENABLED=true`, tries the metadata provider chain (iTunes,
+then Deezer) in order, stores the result, and returns the cached record. The
+dedicated Cover Art Archive call was removed; a cover URL is only kept when a
+provider includes one in its response for free.
 
 Query parameters:
 
@@ -80,8 +82,8 @@ Example response:
   "trackName": "Example Song",
   "artistName": "Example Artist",
   "albumName": "Example Album",
-  "coverUrl": "https://coverartarchive.org/...",
-  "coverUrlSource": "cover_art_archive"
+  "coverUrl": "https://is1-ssl.mzstatic.com/.../600x600bb.jpg",
+  "coverUrlSource": "itunes"
 }
 ```
 
@@ -117,7 +119,7 @@ curl 'http://localhost:8080/api/lyrics/search?q=example&limit=20'
 ## Health/version
 
 - `GET /healthz` → `{"status":"ok"}`; not rate limited.
-- `GET /version` → `{"version":"v0.2.0"}`; not rate limited.
+- `GET /version` → `{"version":"v0.2.1"}`; not rate limited.
 
 ## Database layout
 
@@ -130,11 +132,12 @@ lyrics tables safely.
 
 ## Provider and cache behavior
 
-MusicBrainz and Cover Art Archive are queried with a descriptive User-Agent
-and the configured `RATE_LIMIT_PER_SEC` burst plus `RATE_LIMIT_PER_MIN` rolling
-window. Identical concurrent metadata lookups share one in-flight operation. Provider
-responses are bounded and cached transactionally in SQLite. Search endpoints
-are local-only to keep upstream traffic predictable.
+iTunes and Deezer (secondary) are consulted on metadata misses in that order.
+Identical metadata lookups share an in-process cache with bounded lifetimes,
+including negative (not-found) results, so repeated misses and duplicate search
+rows stop re-hitting upstream. Provider responses are bounded and cached
+transactionally in SQLite. Search endpoints are local-only to keep upstream
+traffic predictable.
 
 LRCLIB remains the lyrics provider and uses its existing bounded client,
 User-Agent, timeout, and cache behavior.

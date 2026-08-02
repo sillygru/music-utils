@@ -60,7 +60,7 @@ func UpsertTrackMetadata(ctx context.Context, database *sql.DB, track Track) (in
 		return 0, errors.New("metadata database is nil")
 	}
 	if track.Source == "" {
-		track.Source = "musicbrainz"
+		track.Source = "external"
 	}
 	normalizeTrack(&track)
 	if track.MetadataSource == "" {

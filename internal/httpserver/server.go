@@ -13,7 +13,7 @@ import (
 
 	"github.com/sillygru/music-utils/internal/config"
 	"github.com/sillygru/music-utils/internal/lrclib"
-	"github.com/sillygru/music-utils/internal/musicbrainz"
+	"github.com/sillygru/music-utils/internal/metadata"
 	"github.com/sillygru/music-utils/internal/version"
 )
 
@@ -95,14 +95,14 @@ func NewWithLogger(cfg config.Config, metadataDB, lyricsDB *sql.DB, logger *slog
 		logger = slog.Default()
 	}
 	client := newLRCLIBClient(cfg, logger)
-	metadataClient := newMusicBrainzClient(cfg, logger)
+	metadataResolver := newMetadataResolver(cfg, logger)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", healthz)
 	mux.HandleFunc("GET /version", versionHandler)
 	mux.HandleFunc("GET /api/lyrics/get", getLyricsHandler(metadataDB, lyricsDB, client, cfg.LRCLIBFallbackEnabled))
 	mux.HandleFunc("GET /api/lyrics/search", searchLyricsHandler(metadataDB, lyricsDB))
-	mux.HandleFunc("GET /api/metadata/get", getMetadataHandler(metadataDB, metadataClient, cfg.MetadataFallbackEnabled))
+	mux.HandleFunc("GET /api/metadata/get", getMetadataHandler(metadataDB, metadataResolver, cfg.MetadataFallbackEnabled))
 	mux.HandleFunc("GET /api/metadata/search", searchMetadataHandler(metadataDB))
 	mux.HandleFunc("GET /api/cover/get", getCoverHandler(metadataDB))
 
@@ -121,20 +121,25 @@ func NewWithLogger(cfg config.Config, metadataDB, lyricsDB *sql.DB, logger *slog
 	return server
 }
 
-func newMusicBrainzClient(cfg config.Config, logger *slog.Logger) *musicbrainz.Client {
-	client, err := musicbrainz.NewWithRateLimits(
-		cfg.MusicBrainzBaseURL,
-		cfg.CoverArtArchiveBaseURL,
-		cfg.MusicBrainzUserAgent,
-		time.Duration(cfg.MusicBrainzTimeoutMS)*time.Millisecond,
-		cfg.RateLimitPerSec,
-		cfg.RateLimitPerMin,
-	)
-	if err != nil {
-		logger.Error("configure MusicBrainz client", "error", err)
+func newMetadataResolver(cfg config.Config, logger *slog.Logger) *metadata.Resolver {
+	timeout := time.Duration(cfg.MetadataTimeoutMS) * time.Millisecond
+	userAgent := cfg.MetadataUserAgent
+	var providers []metadata.Provider
+
+	if itunes, err := metadata.NewITunes(cfg.ITunesBaseURL, userAgent, timeout); err != nil {
+		logger.Error("configure iTunes provider", "error", err)
+	} else {
+		providers = append(providers, itunes)
+	}
+	if deezer, err := metadata.NewDeezer(cfg.DeezerBaseURL, userAgent, timeout); err != nil {
+		logger.Error("configure Deezer provider", "error", err)
+	} else {
+		providers = append(providers, deezer)
+	}
+	if len(providers) == 0 {
 		return nil
 	}
-	return client
+	return metadata.NewResolver(providers...)
 }
 
 func newLRCLIBClient(cfg config.Config, logger *slog.Logger) *lrclib.Client {

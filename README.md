@@ -11,10 +11,9 @@ server process with minimal dependencies and a JSON-only HTTP interface.
 - **Lyrics database** — local exact lookup, FTS5 search, rate limiting, and
   optional LRCLIB fallback.
 - **Song metadata database** — title, artist, album, duration, genre, year,
-  release date, ISRC, MusicBrainz identifiers, and provenance are cached in
-  SQLite.
-- **Song cover URLs** — front-cover URLs are resolved through Cover Art Archive,
-  cached with their source, and returned in metadata responses.
+  release date, ISRC, and provenance are cached in SQLite.
+- **Song cover URLs** — cover URLs are kept only when a metadata provider
+  includes them for free; cached with their source, and returned in metadata responses.
 - **Searchable catalog** — local FTS5 search covers title, artist, album, and
   genre.
 
@@ -30,7 +29,7 @@ server process with minimal dependencies and a JSON-only HTTP interface.
 | --- | --- |
 | `GET /healthz` | Health check. Not rate limited. |
 | `GET /version` | Running application version. Not rate limited. |
-| `GET /api/metadata/get` | Exact song metadata lookup; local-first with MusicBrainz + Cover Art Archive fallback. |
+| `GET /api/metadata/get` | Exact song metadata lookup; local-first with iTunes + Deezer provider fallback. |
 | `GET /api/metadata/search` | Local metadata search; never calls upstream APIs. |
 | `GET /api/cover/get` | Cached song cover URL and cover source. |
 | `GET /api/lyrics/get` | Exact lyrics lookup; local-first with optional LRCLIB fallback. |
@@ -56,16 +55,16 @@ Full request and response reference is in [`API.md`](API.md).
 
 Metadata and lyrics are stored in independent SQLite files. Metadata and lyrics lookups check their respective local database before making an upstream request.
 Successful provider responses are upserted transactionally and subsequent
-requests are served locally. Identical concurrent MusicBrainz lookups share a
-single in-flight request. The MusicBrainz and Cover Art Archive client uses
-the configured `RATE_LIMIT_PER_SEC` burst and `RATE_LIMIT_PER_MIN` rolling
-window, uses bounded response bodies, reuses HTTP connections, and sends a
-descriptive User-Agent.
+requests are served locally. Metadata misses are resolved by a provider chain
+that consults iTunes first, then Deezer, and an in-process cache memoizes both
+hits and not-found misses with bounded lifetimes so repeated lookups stop
+re-hitting upstream providers.
 
 Metadata responses expose provenance:
 
-- `metadataSource` — currently `musicbrainz` for enriched metadata.
-- `coverUrlSource` — currently `cover_art_archive` for artwork.
+- `metadataSource` — `itunes`, `deezer`, or user-provided.
+- `coverUrlSource` — `itunes` or `deezer`, only when a provider returned a cover
+  URL for free.
 - lyrics retain their existing `source` in the database.
 
 The dedicated cover endpoint is cache-only: it never spends upstream budget.
@@ -73,29 +72,29 @@ Use `/api/metadata/get` when a cache miss should trigger enrichment.
 
 ## Provider research decision
 
-The default provider pair is **MusicBrainz + Cover Art Archive**:
+The default provider pair is **iTunes + Deezer**:
 
 - no API key or end-user credentials;
-- stable MusicBrainz IDs and rich recording/release/artist metadata;
-- MusicBrainz core data is CC0 and the APIs are intended to be used politely
-  with caching;
-- Cover Art Archive provides front-cover metadata and resized image URLs.
+- a single unauthenticated lookup returns track metadata plus a cover URL when
+  available, replacing the previous multi-step MusicBrainz + Cover Art Archive
+  chain;
+- iTunes is fast and keyless (published guidance ~20 calls/min; be gentle);
+- Deezer is a keyless secondary with strong ISRC and cover metadata (~50
+  req/5s);
+- a cover URL is only persisted when a provider includes one in its response.
 
-MusicBrainz requires a descriptive User-Agent. This service applies the
-configured `RATE_LIMIT_PER_SEC` and `RATE_LIMIT_PER_MIN` limits to outbound
-metadata and artwork requests; operators should choose values compatible with
-upstream provider policies. Commercial APIs such as Spotify, Deezer, Last.fm, and Discogs
-can provide useful enrichment, but require credentials and have more
-restrictive API terms/caching conditions, so they are not enabled by default.
+Previously the service used MusicBrainz + Cover Art Archive with a dedicated
+cover-resolution step. The Cover Art Archive call was the dominant source of
+cold-lookup latency and has been removed.
 
 ## Features
 
 - **FTS5 search** — title, artist, album, and genre search over SQLite.
-- **Metadata fallback** — MusicBrainz lookup plus Cover Art Archive enrichment.
+- **Metadata fallback** — iTunes + Deezer provider chain with local caching.
 - **Lyrics fallback** — LRCLIB exact lookup and cache.
 - **Rate limiting** — per-client-IP limits with `Retry-After` headers.
 - **Structured logging** — request outcome labels such as `local_hit`,
-  `musicbrainz_fallback_hit`, `lrclib_fallback_hit`, `miss`, and
+  `provider_fallback_hit`, `lrclib_fallback_hit`, `miss`, and
   `rate_limited`.
 - **Pure-Go build** — CGO-free SQLite via `modernc.org/sqlite`.
 
@@ -113,14 +112,14 @@ restrictive API terms/caching conditions, so they are not enabled by default.
 | `RATE_LIMIT_PER_SEC` | `10` | Per-IP token-bucket rate. |
 | `RATE_LIMIT_PER_MIN` | `180` | Per-IP rolling-minute cap. |
 | `TRUST_PROXY` | `false` | Trust the first `X-Forwarded-For` address. |
-| `METADATA_FALLBACK_ENABLED` | `true` | Enable MusicBrainz/Cover Art Archive fallback. |
-| `MUSICBRAINZ_BASE_URL` | `https://musicbrainz.org/ws/2` | MusicBrainz API base URL. |
-| `COVER_ART_ARCHIVE_BASE_URL` | `https://coverartarchive.org` | Cover Art Archive base URL. |
-| `MUSICBRAINZ_USER_AGENT` | `music-utils/v0.2.0 (+https://gru0.dev)` | Required descriptive upstream User-Agent. |
-| `MUSICBRAINZ_TIMEOUT_MS` | `10000` | Metadata provider timeout. |
+| `METADATA_FALLBACK_ENABLED` | `true` | Enable iTunes + Deezer metadata fallback. |
+| `ITUNES_BASE_URL` | `https://itunes.apple.com` | iTunes Search API base URL. |
+| `DEEZER_BASE_URL` | `https://api.deezer.com` | Deezer API base URL. |
+| `METADATA_USER_AGENT` | `music-utils/v0.2.1 (+https://gru0.dev)` | Descriptive upstream User-Agent. |
+| `METADATA_TIMEOUT_MS` | `5000` | Metadata provider timeout. |
 | `LRCLIB_FALLBACK_ENABLED` | `true` | Enable LRCLIB fallback. |
 | `LRCLIB_BASE_URL` | `https://lrclib.net/api` | LRCLIB API base URL. |
-| `LRCLIB_USER_AGENT` | `music-utils/v0.2.0 (+https://gru0.dev)` | LRCLIB User-Agent. |
+| `LRCLIB_USER_AGENT` | `music-utils/v0.2.1 (+https://gru0.dev)` | LRCLIB User-Agent. |
 | `LRCLIB_TIMEOUT_MS` | `5000` | LRCLIB timeout. |
 
 ## Database migration
@@ -152,7 +151,7 @@ internal/config/         environment configuration and validation
 internal/db/             SQLite connections, independent schemas, migration, and queries
 internal/httpserver/     HTTP routes, handlers, middleware, rate limiting
 internal/lrclib/         LRCLIB upstream client
-internal/musicbrainz/    MusicBrainz + Cover Art Archive client
+internal/metadata/       iTunes + Deezer metadata providers and resolver
 internal/version/        application version metadata
 API.md                   complete HTTP API reference
 ```

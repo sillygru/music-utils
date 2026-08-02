@@ -36,8 +36,9 @@ func main() {
 		"lrclib_base_url", cfg.LRCLIBBaseURL,
 		"lrclib_timeout_ms", cfg.LRCLIBTimeoutMS,
 		"metadata_fallback_enabled", cfg.MetadataFallbackEnabled,
-		"musicbrainz_base_url", cfg.MusicBrainzBaseURL,
-		"musicbrainz_timeout_ms", cfg.MusicBrainzTimeoutMS,
+		"itunes_base_url", cfg.ITunesBaseURL,
+		"deezer_base_url", cfg.DeezerBaseURL,
+		"metadata_timeout_ms", cfg.MetadataTimeoutMS,
 	)
 
 	metadataDB, err := db.Open(cfg.MetadataDBPath, db.Config{
