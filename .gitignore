@@ -29,3 +29,5 @@ coverage.out
 !API.md
 !DEPLOYMENT.md
 /data
+cloudflared-config.yml
+music-utils.service

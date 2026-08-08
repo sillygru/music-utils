@@ -6,7 +6,7 @@ is designed for one server process with minimal dependencies and a JSON-only
 HTTP interface.
 
 A public instance of this API is hosted at
-**`https://api.music.gru0.dev/api/`** — consumer documentation is in
+**`https://music.gru0.dev/api/`** — consumer documentation is in
 [`API.md`](API.md). The rest of this README covers configuration and
 self-hosting; the deployment guide is in [`DEPLOYMENT.md`](DEPLOYMENT.md).
 
@@ -126,6 +126,13 @@ cold-lookup latency and has been removed.
   dead URLs are re-resolved through the provider chain, capped per run). Stale
   positives are also re-resolved on demand when requested, so cover URL rot
   never leaves a permanent dead link.
+- **Request logging** — every request is logged (when, endpoint, params,
+  status, cached-or-upstream outcome, and split cache/upstream timings) into a
+  dedicated, storage-optimized SQLite database (`REQUEST_LOG_ENABLED`, default
+  on): integer timestamps, dictionary tables for repeated values, no secondary
+  indexes, WAL + incremental auto-vacuum, batched writes, and daily retention
+  pruning. The log is never served by the API and is never included in
+  `music-utils export` dumps.
 - **Structured logging** — request outcome labels such as `local_hit`,
   `provider_fallback_hit`, `lrclib_fallback_hit`, `miss`, and
   `rate_limited`.
@@ -151,11 +158,11 @@ cold-lookup latency and has been removed.
 | `METADATA_FALLBACK_ENABLED` | `true` | Enable iTunes + Deezer metadata fallback. |
 | `ITUNES_BASE_URL` | `https://itunes.apple.com` | iTunes Search API base URL. |
 | `DEEZER_BASE_URL` | `https://api.deezer.com` | Deezer API base URL. |
-| `METADATA_USER_AGENT` | `music-utils/v0.3.0 (+https://gru0.dev)` | Descriptive upstream User-Agent. |
+| `METADATA_USER_AGENT` | `music-utils/v0.4.0 (+https://gru0.dev)` | Descriptive upstream User-Agent. |
 | `METADATA_TIMEOUT_MS` | `5000` | Metadata provider timeout. |
 | `COVER_FALLBACK_ENABLED` | `true` | Enable Last.fm + iTunes + Deezer album/artist cover resolution. |
 | `COVER_TIMEOUT_MS` | `10000` | Album/artist cover provider timeout. |
-| `COVER_USER_AGENT` | `music-utils/v0.3.0 (+https://gru0.dev)` | Cover upstream User-Agent. |
+| `COVER_USER_AGENT` | `music-utils/v0.4.0 (+https://gru0.dev)` | Cover upstream User-Agent. |
 | `LASTFM_BASE_URL` | `https://www.last.fm` | Last.fm scraping base URL. |
 | `COVER_REFRESH_ENABLED` | `true` | Background refresh of aged positive cover rows. |
 | `COVER_REFRESH_AFTER_DAYS` | `30` | Revalidate cached positive cover URLs older than this. |
@@ -163,9 +170,12 @@ cold-lookup latency and has been removed.
 | `COVER_REFRESH_END_HOUR` | `5` | Refresh window end hour (exclusive; lower than start wraps across midnight). |
 | `COVER_REFRESH_MAX_ROWS` | `2000` | Max cover rows checked per refresh sweep. |
 | `COVER_REFRESH_MAX_RECHECK` | `200` | Max dead URLs re-resolved through providers per sweep. |
+| `REQUEST_LOG_ENABLED` | `true` | Record every request (when, endpoint, params, outcome, split cache/upstream timings) into the request log database. |
+| `REQUEST_LOG_DB_PATH` | `./data/request_log.db` | Storage-optimized request log database. |
+| `REQUEST_LOG_RETENTION_DAYS` | `30` | Prune request log rows older than this daily; `0` keeps everything. |
 | `LRCLIB_FALLBACK_ENABLED` | `true` | Enable LRCLIB fallback. |
 | `LRCLIB_BASE_URL` | `https://lrclib.net/api` | LRCLIB API base URL. |
-| `LRCLIB_USER_AGENT` | `music-utils/v0.3.0 (+https://gru0.dev)` | LRCLIB User-Agent. |
+| `LRCLIB_USER_AGENT` | `music-utils/v0.4.0 (+https://gru0.dev)` | LRCLIB User-Agent. |
 | `LRCLIB_TIMEOUT_MS` | `5000` | LRCLIB timeout. |
 
 ## Database migration
@@ -205,8 +215,10 @@ SQLite files: point `METADATA_DB_PATH`/`COVER_DB_PATH` at them to seed a new
 instance. Lyrics are intentionally excluded from dumps — full lyrics are
 copyrighted content owned by others and are available directly from LRCLIB, so
 self-hosters should point `LRCLIB_BASE_URL` at lrclib.net (or a self-hosted
-LRCLIB instance) rather than at a lyrics dump. Cover URLs can rotate at their
-CDNs, so treat a cover dump as a cache seed, not a permanent store.
+LRCLIB instance) rather than at a lyrics dump. The request log database is
+operational data (timestamps, client params, latency) and is likewise never
+exported. Cover URLs can rotate at their CDNs, so treat a cover dump as a
+cache seed, not a permanent store.
 
 ## Running a public instance
 
@@ -241,6 +253,7 @@ internal/httpserver/     HTTP routes, handlers, middleware, rate limiting, cover
 internal/lrclib/         LRCLIB upstream client
 internal/metadata/       iTunes + Deezer metadata providers and resolver
 internal/pacer/          shared upstream request pacing
+internal/reqlog/         storage-optimized per-request access log database
 internal/version/        application version metadata
 API.md                   complete HTTP API reference
 DEPLOYMENT.md            deployment guide (systemd, proxy, backups)

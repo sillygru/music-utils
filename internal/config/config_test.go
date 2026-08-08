@@ -20,7 +20,7 @@ func TestLoadLRCLIBDefaults(t *testing.T) {
 	if !cfg.LRCLIBFallbackEnabled || cfg.LRCLIBBaseURL != "https://lrclib.net/api" || cfg.LRCLIBTimeoutMS != 5000 {
 		t.Fatalf("unexpected LRCLIB defaults: %+v", cfg)
 	}
-	if cfg.LRCLIBUserAgent != "music-utils/v0.3.0 (+https://gru0.dev)" {
+	if cfg.LRCLIBUserAgent != "music-utils/v0.4.0 (+https://gru0.dev)" {
 		t.Fatalf("unexpected default LRCLIB user agent: %q", cfg.LRCLIBUserAgent)
 	}
 }
@@ -85,6 +85,44 @@ func TestLoadCoverRefreshMidnightStartHour(t *testing.T) {
 	cfg := Load()
 	if cfg.CoverRefreshStartHour != 0 {
 		t.Fatalf("expected start hour 0 to be honored, got %d", cfg.CoverRefreshStartHour)
+	}
+}
+
+func TestLoadRequestLogDefaults(t *testing.T) {
+	clearRateLimitEnv(t)
+	for _, name := range []string{"REQUEST_LOG_ENABLED", "REQUEST_LOG_DB_PATH", "REQUEST_LOG_RETENTION_DAYS"} {
+		t.Setenv(name, "")
+	}
+
+	cfg := Load()
+	if !cfg.RequestLogEnabled {
+		t.Fatal("expected REQUEST_LOG_ENABLED to default to true")
+	}
+	if cfg.RequestLogDBPath != "./data/request_log.db" {
+		t.Fatalf("unexpected default request log path: %q", cfg.RequestLogDBPath)
+	}
+	if cfg.RequestLogRetentionDays != 30 {
+		t.Fatalf("unexpected default request log retention: %d", cfg.RequestLogRetentionDays)
+	}
+}
+
+func TestLoadRequestLogZeroRetentionKeepsForever(t *testing.T) {
+	clearRateLimitEnv(t)
+	t.Setenv("REQUEST_LOG_RETENTION_DAYS", "0")
+
+	cfg := Load()
+	if cfg.RequestLogRetentionDays != 0 {
+		t.Fatalf("expected retention 0 to be honored, got %d", cfg.RequestLogRetentionDays)
+	}
+}
+
+func TestLoadRequestLogDisabled(t *testing.T) {
+	clearRateLimitEnv(t)
+	t.Setenv("REQUEST_LOG_ENABLED", "false")
+
+	cfg := Load()
+	if cfg.RequestLogEnabled {
+		t.Fatal("expected REQUEST_LOG_ENABLED=false to be honored")
 	}
 }
 

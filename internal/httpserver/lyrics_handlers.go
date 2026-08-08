@@ -57,9 +57,11 @@ func getLyricsHandler(metadataDB, lyricsDB *sql.DB, client *lrclib.Client, lyric
 			return
 		}
 
+		cacheStart := time.Now()
 		track, lyrics, err := db.FindTrackExact(
 			r.Context(), metadataDB, lyricsDB, trackName, artistName, query.Get("album_name"), duration,
 		)
+		setCacheDuration(r, time.Since(cacheStart))
 		if err == nil {
 			setOutcome(r, "local_hit")
 			writeJSON(w, http.StatusOK, toLyricsResponse(track, lyrics))
@@ -90,7 +92,9 @@ func getLyricsHandler(metadataDB, lyricsDB *sql.DB, client *lrclib.Client, lyric
 		}
 		defer release()
 
+		upstreamStart := time.Now()
 		remote, err := client.GetExact(r.Context(), trackName, artistName, query.Get("album_name"), duration)
+		setUpstreamDuration(r, time.Since(upstreamStart))
 		if err != nil {
 			if errors.Is(err, lrclib.ErrNotFound) {
 				lyricsMisses.Set(missKey, time.Now())
@@ -159,7 +163,9 @@ func searchLyricsHandler(metadataDB, lyricsDB *sql.DB) http.HandlerFunc {
 			return
 		}
 
+		cacheStart := time.Now()
 		tracks, err := db.SearchTracks(r.Context(), metadataDB, lyricsDB, searchQuery, limit)
+		setCacheDuration(r, time.Since(cacheStart))
 		if err != nil {
 			setOutcome(r, "error")
 			writeJSON(w, http.StatusInternalServerError, apiError{Code: http.StatusInternalServerError, Message: "Internal server error"})

@@ -1,11 +1,12 @@
 # Deployment guide
 
 `music-utils` is a single static Go binary with no runtime dependencies and no
-container needed. It stores everything in three SQLite files. This guide
-covers a production install on Linux with systemd and a reverse proxy for
-TLS. Docker is neither required nor recommended for this service.
+container needed. It stores everything in four SQLite files (metadata, lyrics,
+covers, and the request log). This guide covers a production install on Linux
+with systemd and a reverse proxy for TLS. Docker is neither required nor
+recommended for this service.
 
-The project's public instance runs at `https://api.music.gru0.dev/api/` (API
+The project's public instance runs at `https://music.gru0.dev/api/` (API
 reference in [`API.md`](API.md)); this guide covers deploying your own.
 
 ## Contents
@@ -44,7 +45,7 @@ distribution without any packages installed.
 
 ### Option A — download a release binary (recommended)
 
-Each release tags `internal/version/version.go` (e.g. `v0.3.0`) and attaches a
+Each release tags `internal/version/version.go` (e.g. `v0.4.0`) and attaches a
 single `bin/music-utils` artifact to the GitHub release.
 
 ```sh
@@ -79,17 +80,18 @@ sudo install -d -o music-utils -g music-utils /opt/music-utils/data
 ├── data/
 │   ├── metadata.db          # tracks, metadata, provenance, FTS5
 │   ├── lyrics.db            # lyrics bodies and track associations
-│   └── cover.db             # album/artist cover URLs and checked-misses
+│   ├── cover.db             # album/artist cover URLs and checked-misses
+│   └── request_log.db       # per-request access log (see Operational notes)
 └── (music-utils.db-wal / -shm files appear next to each .db while running)
 ```
 
 Database paths default to `./data/…` **relative to the working directory**,
 so the systemd unit below pins `WorkingDirectory=/opt/music-utils`. You can
 place the databases anywhere by setting `METADATA_DB_PATH`, `LYRICS_DB_PATH`,
-and `COVER_DB_PATH` — they must be three **distinct** files, and each must be
-writable by the service user. SQLite runs in WAL mode; the `-wal`/`-shm`
-sidecar files live next to each database and must be backed up together with
-it (see [Backups](#backups)).
+`COVER_DB_PATH`, and `REQUEST_LOG_DB_PATH` — they must be four **distinct**
+files, and each must be writable by the service user. SQLite runs in WAL
+mode; the `-wal`/`-shm` sidecar files live next to each database and must be
+backed up together with it (see [Backups](#backups)).
 
 The databases are caches, not an authoritative store. Deleting them is
 recoverable: the server re-fetches from upstream on demand. Cover URLs can
@@ -116,6 +118,7 @@ LOG_LEVEL=info
 METADATA_DB_PATH=/opt/music-utils/data/metadata.db
 LYRICS_DB_PATH=/opt/music-utils/data/lyrics.db
 COVER_DB_PATH=/opt/music-utils/data/cover.db
+REQUEST_LOG_DB_PATH=/opt/music-utils/data/request_log.db
 RATE_LIMIT_PER_SEC=10
 RATE_LIMIT_PER_MIN=180
 FALLBACK_PER_MIN=5
@@ -227,7 +230,7 @@ For nginx, obtain certificates with certbot. The proxy must overwrite
 
 ```sh
 curl http://localhost:8080/healthz      # {"status":"ok"}  (not rate limited)
-curl http://localhost:8080/version      # {"version":"v0.3.0"}
+curl http://localhost:8080/version      # {"version":"v0.4.0"}
 curl 'http://localhost:8080/api/metadata/get?track_name=Example%20Song&artist_name=Example%20Artist'
 ```
 
@@ -244,20 +247,25 @@ the SQLite CLI — the `.backup` command is safe under WAL mode:
 
 ```sh
 mkdir -p /backups
-sqlite3 /opt/music-utils/data/metadata.db ".backup '/backups/metadata-$(date +%F).db'"
-sqlite3 /opt/music-utils/data/lyrics.db   ".backup '/backups/lyrics-$(date +%F).db'"
-sqlite3 /opt/music-utils/data/cover.db    ".backup '/backups/cover-$(date +%F).db'"
+sqlite3 /opt/music-utils/data/metadata.db     ".backup '/backups/metadata-$(date +%F).db'"
+sqlite3 /opt/music-utils/data/lyrics.db       ".backup '/backups/lyrics-$(date +%F).db'"
+sqlite3 /opt/music-utils/data/cover.db        ".backup '/backups/cover-$(date +%F).db'"
+sqlite3 /opt/music-utils/data/request_log.db  ".backup '/backups/request_log-$(date +%F).db'"
 ```
+
+The request log is regenerable operational data (pruned daily by
+`REQUEST_LOG_RETENTION_DAYS`), so its backup is optional.
 
 Daily cron job (`crontab -e`):
 
 ```cron
-0 3 * * *  /usr/bin/mkdir -p /backups && for db in metadata lyrics cover; do /usr/bin/sqlite3 /opt/music-utils/data/$db.db ".backup '/backups/$db-$(date +\%F).db'"; done; find /backups -name '*.db' -mtime +30 -delete
+0 3 * * *  /usr/bin/mkdir -p /backups && for db in metadata lyrics cover request_log; do /usr/bin/sqlite3 /opt/music-utils/data/$db.db ".backup '/backups/$db-$(date +\%F).db'"; done; find /backups -name '*.db' -mtime +30 -delete
 ```
 
 > If `sqlite3` is not installed, `music-utils export` (below) is a
-> zero-dependency alternative for metadata and cover, and stopping the service
-> briefly and copying the `.db` files (including any `-wal` file) also works.
+> zero-dependency alternative for metadata and cover (the request log is
+> intentionally not exportable), and stopping the service briefly and copying
+> the `.db` files (including any `-wal` file) also works.
 
 **Restore:** stop the service, copy the backup back over the live file (or
 point `METADATA_DB_PATH`/`LYRICS_DB_PATH`/`COVER_DB_PATH` at the backup), and
@@ -280,12 +288,14 @@ This writes `metadata-dump.sqlite3` and `cover-dump.sqlite3`; point a new
 instance's `METADATA_DB_PATH`/`COVER_DB_PATH` at them to start with a warm
 cache. **Lyrics are intentionally excluded** — full lyrics are copyrighted
 content owned by their rightsholders; point `LRCLIB_BASE_URL` at lrclib.net
-(or a self-hosted LRCLIB) instead. Cover URLs can expire at their CDNs, so
-treat a cover dump as a cache seed, not a permanent store.
+(or a self-hosted LRCLIB) instead. The **request log is excluded too** — it is
+operational data (timestamps, client params, latency), not a cache seed. Cover
+URLs can expire at their CDNs, so treat a cover dump as a cache seed, not a
+permanent store.
 
 ## Upgrades
 
-Releases are version-tagged (e.g. `v0.3.0`) and attach the binary to the
+Releases are version-tagged (e.g. `v0.4.0`) and attach the binary to the
 GitHub release. Upgrading:
 
 1. Back up the databases (see [Backups](#backups)) — always before an upgrade.
@@ -350,5 +360,14 @@ instance:
   accumulate duplicates. The only unbounded-in-memory structures are bounded:
   the lyrics negative cache (100k entries) and the provider memo cache
   (bounded lifetimes).
+- **Request log.** `REQUEST_LOG_ENABLED` (default on) records every request
+  into `request_log.db` (timestamps as epoch ms, dictionary tables for method/
+  endpoint/outcome, integer timings, truncated params, no secondary indexes,
+  WAL + incremental auto-vacuum, batched writes). Old rows are pruned daily
+  per `REQUEST_LOG_RETENTION_DAYS`. Writes never block request handling; if
+  the queue overflows, records are dropped and counted in the log. The file is
+  queryable with any SQLite tool — e.g.
+  `sqlite3 data/request_log.db "SELECT e.name, o.name, status, cache_ms, upstream_ms FROM request_log l JOIN endpoints e ON e.id=l.endpoint_id JOIN outcomes o ON o.id=l.outcome_id ORDER BY l.id DESC LIMIT 20;"`.
 - **Logging.** JSON to stderr; `LOG_LEVEL=debug` traces upstream provider
-  calls if you need to observe pacing.
+  calls if you need to observe pacing. The per-request line carries `params`,
+  `cache_ms`, and `upstream_ms` when request logging is enabled.

@@ -52,6 +52,9 @@ func main() {
 		"cover_refresh_after_days", cfg.CoverRefreshAfterDays,
 		"cover_refresh_start_hour", cfg.CoverRefreshStartHour,
 		"cover_refresh_end_hour", cfg.CoverRefreshEndHour,
+		"request_log_enabled", cfg.RequestLogEnabled,
+		"request_log_db_path", cfg.RequestLogDBPath,
+		"request_log_retention_days", cfg.RequestLogRetentionDays,
 	)
 
 	metadataDB, err := db.Open(cfg.MetadataDBPath, db.Config{
@@ -105,7 +108,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	server := httpserver.NewWithLogger(cfg, metadataDB, lyricsDB, coverDB, logger)
+	server, requestLogs := httpserver.NewWithLogger(cfg, metadataDB, lyricsDB, coverDB, logger)
 	serverErrors := make(chan error, 1)
 	go func() {
 		logger.Info("server listening", "address", server.Addr)
@@ -127,9 +130,17 @@ func main() {
 
 		if err := server.Shutdown(ctx); err != nil {
 			logger.Error("graceful shutdown failed", "error", err)
-			return
+		} else {
+			logger.Info("server stopped")
 		}
-		logger.Info("server stopped")
+	}
+	// Flush the queued request log before the process exits. Shutdown does not
+	// wait for RegisterOnShutdown hooks (and does not run them on timeout), so
+	// Close must be called explicitly on every exit path.
+	if requestLogs != nil {
+		if err := requestLogs.Close(); err != nil {
+			logger.Error("close request log", "error", err)
+		}
 	}
 }
 

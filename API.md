@@ -2,7 +2,7 @@
 
 A public, no-authentication API for music metadata, lyrics, and cover-art URLs.
 
-**Base URL:** `https://api.music.gru0.dev/api/`
+**Base URL:** `https://music.gru0.dev/api/`
 
 No API key, no registration, no authentication. All responses are JSON.
 Self-hosted instances serve the identical endpoints at the same paths — see
@@ -11,12 +11,12 @@ Self-hosted instances serve the identical endpoints at the same paths — see
 ## Quick start
 
 ```sh
-curl 'https://api.music.gru0.dev/api/metadata/get?track_name=Paranoid%20Android&artist_name=Radiohead'
+curl 'https://music.gru0.dev/api/metadata/get?track_name=Paranoid%20Android&artist_name=Radiohead'
 ```
 
 ```js
 const res = await fetch(
-  'https://api.music.gru0.dev/api/lyrics/get?track_name=No%20Surprises&artist_name=Radiohead'
+  'https://music.gru0.dev/api/lyrics/get?track_name=No%20Surprises&artist_name=Radiohead'
 );
 const data = await res.json();
 console.log(data.plainLyrics);
@@ -55,7 +55,7 @@ console.log(data.plainLyrics);
 ## `GET /healthz` and `GET /version`
 
 - `GET /healthz` → `{"status":"ok"}` — liveness probe; never rate limited.
-- `GET /version` → `{"version":"v0.3.0"}` — never rate limited.
+- `GET /version` → `{"version":"v0.4.0"}` — never rate limited.
 
 ## `GET /api/metadata/get`
 
@@ -127,7 +127,7 @@ Query parameters:
 - `limit`, default `20`, range `1–50`.
 
 ```sh
-curl 'https://api.music.gru0.dev/api/metadata/search?q=radiohead&limit=20'
+curl 'https://music.gru0.dev/api/metadata/search?q=radiohead&limit=20'
 ```
 
 Responses: `200` JSON array of metadata objects (possibly empty) · `400`
@@ -251,7 +251,7 @@ Query parameters: `q`, or one or more of `track_name`, `artist_name`,
 `album_name`; optional `limit` from `1–50`, default `20`.
 
 ```sh
-curl 'https://api.music.gru0.dev/api/lyrics/search?q=no%20surprises&limit=20'
+curl 'https://music.gru0.dev/api/lyrics/search?q=no%20surprises&limit=20'
 ```
 
 Responses: `200` JSON array of lyrics objects (possibly empty) · `400`
@@ -277,6 +277,12 @@ fixed numbers.
 
 ## Caching and data notes
 
+- **Request logging is server-side operational data.** Instances may record
+  every request (timestamp, endpoint, params, status, cache/upstream outcome,
+  and split timings) into a dedicated, storage-optimized local database. This
+  data is never served by the API and is never included in seed dumps —
+  clients' query parameters stay on the instance's own disk, subject to its
+  retention policy (see the deployment guide).
 - The catalog grows as content is requested; popular content is served from
   cache, while obscure content may take a moment on its first request.
 - **Not-found results are memoized for 24 hours** (lyrics in memory, cover

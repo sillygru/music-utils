@@ -18,6 +18,7 @@ func TestRecoveryReturnsJSON500AndOneRequestLog(t *testing.T) {
 			panic("deliberate test panic")
 		}), logger),
 		logger,
+		nil,
 	)
 
 	response := httptest.NewRecorder()

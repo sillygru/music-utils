@@ -17,15 +17,18 @@ import (
 	"github.com/sillygru/music-utils/internal/lrclib"
 	"github.com/sillygru/music-utils/internal/metadata"
 	"github.com/sillygru/music-utils/internal/pacer"
+	"github.com/sillygru/music-utils/internal/reqlog"
 	"github.com/sillygru/music-utils/internal/version"
 )
 
 type requestStateKey struct{}
 
 type requestState struct {
-	outcome string
-	level   slog.Level
-	detail  string
+	outcome    string
+	level      slog.Level
+	detail     string
+	cacheMs    int64
+	upstreamMs int64
 }
 
 type responseWriter struct {
@@ -79,6 +82,32 @@ func setRequestIssue(r *http.Request, level slog.Level, detail string) {
 	}
 }
 
+// setCacheDuration accumulates the time a handler spent in the local database
+// or in-memory cache before any upstream fallback.
+func setCacheDuration(r *http.Request, d time.Duration) {
+	if state, ok := r.Context().Value(requestStateKey{}).(*requestState); ok {
+		state.cacheMs += wholeMilliseconds(d)
+	}
+}
+
+// setUpstreamDuration accumulates the time a handler spent querying upstream
+// providers after a cache miss.
+func setUpstreamDuration(r *http.Request, d time.Duration) {
+	if state, ok := r.Context().Value(requestStateKey{}).(*requestState); ok {
+		state.upstreamMs += wholeMilliseconds(d)
+	}
+}
+
+// wholeMilliseconds reports d in whole milliseconds. A positive sub-millisecond
+// duration is rounded up to 1 so a lookup that actually happened is never
+// recorded as 0ms in the request log.
+func wholeMilliseconds(d time.Duration) int64 {
+	if ms := d.Milliseconds(); ms > 0 || d <= 0 {
+		return ms
+	}
+	return 1
+}
+
 // New creates the HTTP server with the default application configuration.
 // NewWithConfig should be used by the application when environment-based
 // configuration is available. Cover artwork uses an in-memory database.
@@ -89,16 +118,31 @@ func New(port string, metadataDB, lyricsDB *sql.DB) *http.Server {
 // NewWithConfig creates the HTTP server and registers all application routes.
 // Cover artwork uses an in-memory database absent an explicit cover DB.
 func NewWithConfig(cfg config.Config, metadataDB, lyricsDB *sql.DB) *http.Server {
-	return NewWithLogger(cfg, metadataDB, lyricsDB, nil, slog.Default())
+	server, _ := NewWithLogger(cfg, metadataDB, lyricsDB, nil, slog.Default())
+	return server
 }
 
 // NewWithLogger is the injectable constructor used by the application and
-// tests that need deterministic logging or a custom LRCLIB endpoint.
-func NewWithLogger(cfg config.Config, metadataDB, lyricsDB, coverDB *sql.DB, logger *slog.Logger) *http.Server {
+// tests that need deterministic logging or a custom LRCLIB endpoint. It
+// returns the server and the request-log writer, which is nil when request
+// logging is disabled. The writer is also registered with
+// RegisterOnShutdown, but Shutdown does not wait for those callbacks, so
+// callers that need the final records flushed (the application on graceful
+// shutdown, tests) must call Close themselves.
+func NewWithLogger(cfg config.Config, metadataDB, lyricsDB, coverDB *sql.DB, logger *slog.Logger) (*http.Server, *reqlog.Writer) {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	client := newLRCLIBClient(cfg, logger)
+	var requestLogs *reqlog.Writer
+	if cfg.RequestLogEnabled {
+		var err error
+		requestLogs, err = reqlog.Open(cfg.RequestLogDBPath, time.Duration(cfg.RequestLogRetentionDays)*24*time.Hour, logger)
+		if err != nil {
+			logger.Error("open request log database", "error", err)
+			requestLogs = nil
+		}
+	}
 	// iTunes is consumed by both the metadata and cover resolvers; share one
 	// pacer so their combined traffic never exceeds iTunes' ~20 calls/min cap.
 	itunesPace := pacer.New(2 * time.Second)
@@ -135,7 +179,7 @@ func NewWithLogger(cfg config.Config, metadataDB, lyricsDB, coverDB *sql.DB, log
 	application := recoverMiddleware(corsMiddleware(limiter.Handler(mux)), logger)
 	server := &http.Server{
 		Addr:              ":" + normalizedPort(cfg.Port),
-		Handler:           requestLogger(application, logger),
+		Handler:           requestLogger(application, logger, requestLogs),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      15 * time.Second,
@@ -145,7 +189,10 @@ func NewWithLogger(cfg config.Config, metadataDB, lyricsDB, coverDB *sql.DB, log
 	server.RegisterOnShutdown(limiter.Stop)
 	server.RegisterOnShutdown(fallbacks.Stop)
 	server.RegisterOnShutdown(coverRefresher.Stop)
-	return server
+	if requestLogs != nil {
+		server.RegisterOnShutdown(func() { _ = requestLogs.Close() })
+	}
+	return server, requestLogs
 }
 
 func newCoverResolver(cfg config.Config, logger *slog.Logger, itunesPace *pacer.Pacer) *cover.Resolver {
@@ -237,7 +284,7 @@ func normalizedPort(port string) string {
 	return strings.TrimSpace(port)
 }
 
-func requestLogger(next http.Handler, logger *slog.Logger) http.Handler {
+func requestLogger(next http.Handler, logger *slog.Logger, logs *reqlog.Writer) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		state := &requestState{outcome: "error", level: slog.LevelInfo}
 		ctx := contextWithRequestState(r, state)
@@ -251,6 +298,30 @@ func requestLogger(next http.Handler, logger *slog.Logger) http.Handler {
 			"duration_ms", time.Since(started).Seconds() * 1000,
 			"client_ip", clientIP(r, false),
 			"outcome", state.outcome,
+		}
+		if logs != nil {
+			// Request logging is enabled: surface params and the split
+			// cache/upstream timings in the application log and persist a row
+			// to the request log database.
+			if params := reqlog.TruncateParams(r.URL.RawQuery); params != "" {
+				attrs = append(attrs, "params", params)
+			}
+			if state.cacheMs > 0 {
+				attrs = append(attrs, "cache_ms", state.cacheMs)
+			}
+			if state.upstreamMs > 0 {
+				attrs = append(attrs, "upstream_ms", state.upstreamMs)
+			}
+			logs.Log(reqlog.Record{
+				TS:         started,
+				Method:     r.Method,
+				Endpoint:   r.URL.Path,
+				Status:     wrapped.statusCode(),
+				Outcome:    state.outcome,
+				CacheMs:    state.cacheMs,
+				UpstreamMs: state.upstreamMs,
+				Params:     r.URL.RawQuery,
+			})
 		}
 		if state.detail != "" {
 			attrs = append(attrs, "detail", state.detail)

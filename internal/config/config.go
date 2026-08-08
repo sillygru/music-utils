@@ -30,6 +30,9 @@ const (
 	defaultCoverRefreshEndHour     = 5
 	defaultCoverRefreshMaxRows     = 2000
 	defaultCoverRefreshMaxRecheck  = 200
+	defaultRequestLogEnabled       = true
+	defaultRequestLogDBPath        = "./data/request_log.db"
+	defaultRequestLogRetentionDays = 30
 	defaultLRCLIBFallbackEnabled   = true
 	defaultLRCLIBBaseURL           = "https://lrclib.net/api"
 	defaultLRCLIBTimeoutMS         = 5000
@@ -62,6 +65,9 @@ type Config struct {
 	CoverRefreshEndHour     int
 	CoverRefreshMaxRows     int
 	CoverRefreshMaxRecheck  int
+	RequestLogEnabled       bool
+	RequestLogDBPath        string
+	RequestLogRetentionDays int
 	LRCLIBFallbackEnabled   bool
 	LRCLIBBaseURL           string
 	LRCLIBUserAgent         string
@@ -101,6 +107,9 @@ func Load() Config {
 		CoverRefreshEndHour:     hourOrDefault("COVER_REFRESH_END_HOUR", defaultCoverRefreshEndHour),
 		CoverRefreshMaxRows:     intOrDefault("COVER_REFRESH_MAX_ROWS", defaultCoverRefreshMaxRows),
 		CoverRefreshMaxRecheck:  intOrDefault("COVER_REFRESH_MAX_RECHECK", defaultCoverRefreshMaxRecheck),
+		RequestLogEnabled:       boolOrDefault("REQUEST_LOG_ENABLED", defaultRequestLogEnabled),
+		RequestLogDBPath:        valueOrDefault("REQUEST_LOG_DB_PATH", defaultRequestLogDBPath),
+		RequestLogRetentionDays: nonNegativeIntOrDefault("REQUEST_LOG_RETENTION_DAYS", defaultRequestLogRetentionDays),
 		LRCLIBFallbackEnabled:   boolOrDefault("LRCLIB_FALLBACK_ENABLED", defaultLRCLIBFallbackEnabled),
 		LRCLIBBaseURL:           valueOrDefault("LRCLIB_BASE_URL", defaultLRCLIBBaseURL),
 		LRCLIBUserAgent:         valueOrDefault("LRCLIB_USER_AGENT", defaultLRCLIBUserAgent()),
@@ -180,6 +189,12 @@ func (c Config) Validate() error {
 	if c.CoverRefreshMaxRecheck < 1 {
 		return fmt.Errorf("COVER_REFRESH_MAX_RECHECK must be positive")
 	}
+	if strings.TrimSpace(c.RequestLogDBPath) == "" {
+		return fmt.Errorf("REQUEST_LOG_DB_PATH must not be empty")
+	}
+	if c.RequestLogRetentionDays < 0 {
+		return fmt.Errorf("REQUEST_LOG_RETENTION_DAYS must be zero or positive")
+	}
 	if c.LRCLIBTimeoutMS < 1 || c.MetadataTimeoutMS < 1 || c.CoverTimeoutMS < 1 {
 		return fmt.Errorf("upstream timeouts must be positive")
 	}
@@ -228,7 +243,13 @@ func validateEnvironment() error {
 	if err := validatePortEnv(); err != nil {
 		return err
 	}
-	for _, name := range []string{"TRUST_PROXY", "LRCLIB_FALLBACK_ENABLED", "METADATA_FALLBACK_ENABLED", "COVER_FALLBACK_ENABLED", "COVER_REFRESH_ENABLED"} {
+	if value := strings.TrimSpace(os.Getenv("REQUEST_LOG_RETENTION_DAYS")); value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err != nil || parsed < 0 {
+			return fmt.Errorf("REQUEST_LOG_RETENTION_DAYS must be a non-negative integer")
+		}
+	}
+	for _, name := range []string{"TRUST_PROXY", "LRCLIB_FALLBACK_ENABLED", "METADATA_FALLBACK_ENABLED", "COVER_FALLBACK_ENABLED", "COVER_REFRESH_ENABLED", "REQUEST_LOG_ENABLED"} {
 		if value := strings.TrimSpace(os.Getenv(name)); value != "" {
 			if _, err := strconv.ParseBool(value); err != nil {
 				return fmt.Errorf("%s must be a boolean", name)
@@ -299,6 +320,21 @@ func intOrDefault(name string, fallback int) int {
 	}
 	parsed, err := strconv.Atoi(value)
 	if err != nil || parsed < 1 {
+		return fallback
+	}
+	return parsed
+}
+
+// nonNegativeIntOrDefault reads an int env value, allowing 0. Negative or
+// unparseable values fall back to the default. Used by
+// REQUEST_LOG_RETENTION_DAYS where 0 means keep request logs forever.
+func nonNegativeIntOrDefault(name string, fallback int) int {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed < 0 {
 		return fallback
 	}
 	return parsed
