@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/sillygru/music-utils/internal/db"
 )
@@ -30,7 +31,9 @@ func getCoverHandler(database *sql.DB) http.HandlerFunc {
 			writeJSON(w, http.StatusBadRequest, apiError{Code: http.StatusBadRequest, Message: "track_name and artist_name are required"})
 			return
 		}
+		cacheStart := time.Now()
 		track, err := db.FindTrackMetadataExact(r.Context(), database, name, artist, query.Get("album_name"), 0)
+		setCacheDuration(r, time.Since(cacheStart))
 		if errors.Is(err, sql.ErrNoRows) || err == nil && track.CoverURL == "" {
 			setOutcome(r, "miss")
 			writeJSON(w, http.StatusNotFound, apiError{Code: http.StatusNotFound, Message: "Cover not found"})

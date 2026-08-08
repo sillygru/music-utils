@@ -45,7 +45,9 @@ func handleEntityCover(database *sql.DB, resolver *cover.Resolver, fallbacks *fa
 			return
 		}
 
+		cacheStart := time.Now()
 		cached, err := db.FindCoverArt(r.Context(), database, entityType, artist, album)
+		setCacheDuration(r, time.Since(cacheStart))
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			setOutcome(r, "error")
 			writeJSON(w, http.StatusInternalServerError, apiError{Code: http.StatusInternalServerError, Message: "Internal server error"})
@@ -84,7 +86,9 @@ func handleEntityCover(database *sql.DB, resolver *cover.Resolver, fallbacks *fa
 		}
 		defer release()
 
+		upstreamStart := time.Now()
 		result, lookupErr := resolver.Lookup(r.Context(), toKind(entityType), cover.Input{ArtistName: artist, AlbumName: album})
+		setUpstreamDuration(r, time.Since(upstreamStart))
 		if lookupErr != nil {
 			// Persist a negative result so repeat lookups stop spending upstream
 			// budget for the negative-cache window.

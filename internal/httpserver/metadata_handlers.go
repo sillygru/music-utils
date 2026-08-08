@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/sillygru/music-utils/internal/db"
 	"github.com/sillygru/music-utils/internal/metadata"
@@ -54,7 +55,9 @@ func getMetadataHandler(database *sql.DB, resolver *metadata.Resolver, fallbacks
 			return
 		}
 		album := query.Get("album_name")
+		cacheStart := time.Now()
 		local, err := db.FindTrackMetadataExact(r.Context(), database, name, artist, album, duration)
+		setCacheDuration(r, time.Since(cacheStart))
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			setRequestIssue(r, slog.LevelError, err.Error())
 			setOutcome(r, "error")
@@ -83,7 +86,9 @@ func getMetadataHandler(database *sql.DB, resolver *metadata.Resolver, fallbacks
 		}
 		defer release()
 
+		upstreamStart := time.Now()
 		remote, err := resolver.Lookup(r.Context(), metadata.Input{TrackName: name, ArtistName: artist, AlbumName: album, Duration: duration})
+		setUpstreamDuration(r, time.Since(upstreamStart))
 		if err != nil {
 			if !errors.Is(err, metadata.ErrNotFound) {
 				setRequestIssue(r, slog.LevelWarn, err.Error())
@@ -135,7 +140,9 @@ func searchMetadataHandler(database *sql.DB) http.HandlerFunc {
 			writeJSON(w, http.StatusBadRequest, apiError{Code: http.StatusBadRequest, Message: "limit must be an integer between 1 and 50"})
 			return
 		}
+		cacheStart := time.Now()
 		tracks, err := db.SearchTracks(r.Context(), database, nil, searchQuery, limit)
+		setCacheDuration(r, time.Since(cacheStart))
 		if err != nil {
 			setRequestIssue(r, slog.LevelError, err.Error())
 			setOutcome(r, "error")

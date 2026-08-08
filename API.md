@@ -55,7 +55,7 @@ console.log(data.plainLyrics);
 ## `GET /healthz` and `GET /version`
 
 - `GET /healthz` → `{"status":"ok"}` — liveness probe; never rate limited.
-- `GET /version` → `{"version":"v0.3.0"}` — never rate limited.
+- `GET /version` → `{"version":"v0.4.0"}` — never rate limited.
 
 ## `GET /api/metadata/get`
 
@@ -277,6 +277,12 @@ fixed numbers.
 
 ## Caching and data notes
 
+- **Request logging is server-side operational data.** Instances may record
+  every request (timestamp, endpoint, params, status, cache/upstream outcome,
+  and split timings) into a dedicated, storage-optimized local database. This
+  data is never served by the API and is never included in seed dumps —
+  clients' query parameters stay on the instance's own disk, subject to its
+  retention policy (see the deployment guide).
 - The catalog grows as content is requested; popular content is served from
   cache, while obscure content may take a moment on its first request.
 - **Not-found results are memoized for 24 hours** (lyrics in memory, cover

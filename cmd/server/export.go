@@ -21,7 +21,8 @@ const (
 // seed dumps of the metadata and cover databases using SQLite's VACUUM INTO.
 // Lyrics are intentionally excluded: full lyrics are copyrighted content owned
 // by others and are available directly from LRCLIB, so a dump here must never
-// redistribute them.
+// redistribute them. The request log database is operational data (timestamps,
+// client params, latency) and is likewise never exported.
 func runExport(args []string) int {
 	flags := flag.NewFlagSet("export", flag.ExitOnError)
 	metadataPath := flags.String("metadata", "", "metadata database path (defaults to METADATA_DB_PATH)")
@@ -57,7 +58,7 @@ func runExport(args []string) int {
 
 	fmt.Printf("export: wrote %s\n", filepath.Join(*outDir, exportMetadataFilename))
 	fmt.Printf("export: wrote %s\n", filepath.Join(*outDir, exportCoverFilename))
-	fmt.Printf("export: lyrics are intentionally excluded; point LRCLIB_BASE_URL at lrclib.net (or a self-hosted LRCLIB) instead\n")
+	fmt.Printf("export: lyrics and the request log are intentionally excluded; point LRCLIB_BASE_URL at lrclib.net (or a self-hosted LRCLIB) instead\n")
 	return 0
 }
 
