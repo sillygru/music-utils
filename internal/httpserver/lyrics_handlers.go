@@ -62,10 +62,17 @@ func getLyricsHandler(metadataDB, lyricsDB *sql.DB, client *lrclib.Client, lyric
 			r.Context(), metadataDB, lyricsDB, trackName, artistName, query.Get("album_name"), duration,
 		)
 		setCacheDuration(r, time.Since(cacheStart))
-		if err == nil {
+		existingTrack := track
+		if err == nil && lyricsAvailable(lyrics) {
 			setOutcome(r, "local_hit")
 			writeJSON(w, http.StatusOK, toLyricsResponse(track, lyrics))
 			return
+		}
+		// A metadata row can exist before lyrics have been fetched. Treat an
+		// empty, non-instrumental lyrics row as a cache miss so it cannot mask
+		// a populated LRCLIB response for the same track.
+		if err == nil {
+			err = sql.ErrNoRows
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
 			setOutcome(r, "error")
@@ -93,17 +100,40 @@ func getLyricsHandler(metadataDB, lyricsDB *sql.DB, client *lrclib.Client, lyric
 		defer release()
 
 		upstreamStart := time.Now()
-		remote, err := client.GetExact(r.Context(), trackName, artistName, query.Get("album_name"), duration)
+		remote, remoteErr := client.GetExact(r.Context(), trackName, artistName, query.Get("album_name"), duration)
 		setUpstreamDuration(r, time.Since(upstreamStart))
-		if err != nil {
-			if errors.Is(err, lrclib.ErrNotFound) {
-				lyricsMisses.Set(missKey, time.Now())
-			} else {
-				setRequestIssue(r, slog.LevelWarn, err.Error())
+		if remoteErr != nil && !errors.Is(remoteErr, lrclib.ErrNotFound) {
+			setRequestIssue(r, slog.LevelWarn, remoteErr.Error())
+		}
+		if remoteErr == nil && !remoteLyricsAvailable(remote) {
+			// LRCLIB can return a successful metadata-only record for a release
+			// variant. It is not a usable lyrics hit, so broaden the lookup below.
+			remoteErr = lrclib.ErrNotFound
+		}
+		if remoteErr != nil {
+			// LRCLIB's exact endpoint is release-sensitive when an album hint is
+			// supplied. Broaden that lookup through search by track and artist;
+			// leave album-less 404s as genuine misses to preserve the fallback
+			// budget and avoid an unnecessary second upstream request.
+			if errors.Is(remoteErr, lrclib.ErrNotFound) && strings.TrimSpace(query.Get("album_name")) != "" {
+				searchStart := time.Now()
+				searchResults, searchErr := client.Search(r.Context(), strings.Join(nonEmpty(trackName, artistName), " "))
+				setUpstreamDuration(r, time.Since(searchStart))
+				if searchErr == nil {
+					remote = matchingLyricsResult(searchResults, trackName, artistName)
+					if remote != nil {
+						remoteErr = nil
+					}
+				} else {
+					setRequestIssue(r, slog.LevelWarn, searchErr.Error())
+				}
 			}
-			setOutcome(r, "miss")
-			writeJSON(w, http.StatusNotFound, apiError{Code: http.StatusNotFound, Message: "Track not found"})
-			return
+			if remoteErr != nil {
+				lyricsMisses.Set(missKey, time.Now())
+				setOutcome(r, "miss")
+				writeJSON(w, http.StatusNotFound, apiError{Code: http.StatusNotFound, Message: "Track not found"})
+				return
+			}
 		}
 
 		cachedTrack := db.Track{
@@ -116,7 +146,14 @@ func getLyricsHandler(metadataDB, lyricsDB *sql.DB, client *lrclib.Client, lyric
 		if cachedTrack.Duration <= 0 {
 			cachedTrack.Duration = duration
 		}
-		trackID, _, err := db.InsertTrackWithLyrics(r.Context(), metadataDB, lyricsDB, cachedTrack, db.Lyrics{
+		cacheTrack := cachedTrack
+		if existingTrack != nil {
+			// Refresh the already-known metadata row in place so a request that
+			// supplied a release alias becomes a local hit next time.
+			cacheTrack = *existingTrack
+			cacheTrack.Source = "lrclib_fallback"
+		}
+		trackID, _, err := db.InsertTrackWithLyrics(r.Context(), metadataDB, lyricsDB, cacheTrack, db.Lyrics{
 			PlainLyrics:  remote.PlainLyrics,
 			SyncedLyrics: remote.SyncedLyrics,
 			Instrumental: remote.Instrumental,
@@ -129,8 +166,8 @@ func getLyricsHandler(metadataDB, lyricsDB *sql.DB, client *lrclib.Client, lyric
 			return
 		}
 
-		track = &cachedTrack
-		track.ID = trackID
+		cacheTrack.ID = trackID
+		track = &cacheTrack
 		lyrics = &db.Lyrics{
 			PlainLyrics:  remote.PlainLyrics,
 			SyncedLyrics: remote.SyncedLyrics,
@@ -259,6 +296,32 @@ func searchLyricsHandler(metadataDB, lyricsDB *sql.DB) http.HandlerFunc {
 		}
 		writeJSON(w, http.StatusOK, results)
 	}
+}
+
+func remoteLyricsAvailable(result *lrclib.RemoteResult) bool {
+	if result == nil {
+		return false
+	}
+	return result.Instrumental || result.PlainLyrics != "" || result.SyncedLyrics != ""
+}
+
+func matchingLyricsResult(results []lrclib.RemoteResult, trackName, artistName string) *lrclib.RemoteResult {
+	for i := range results {
+		result := &results[i]
+		if strings.EqualFold(strings.TrimSpace(result.TrackName), strings.TrimSpace(trackName)) &&
+			strings.EqualFold(strings.TrimSpace(result.ArtistName), strings.TrimSpace(artistName)) &&
+			remoteLyricsAvailable(result) {
+			return result
+		}
+	}
+	return nil
+}
+
+func lyricsAvailable(lyrics *db.Lyrics) bool {
+	if lyrics == nil {
+		return false
+	}
+	return lyrics.Instrumental || lyrics.PlainLyrics != "" || lyrics.SyncedLyrics != ""
 }
 
 func toLyricsResponse(track *db.Track, lyrics *db.Lyrics) lyricsResponse {

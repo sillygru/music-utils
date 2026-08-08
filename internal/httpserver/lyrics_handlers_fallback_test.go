@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sillygru/music-utils/internal/config"
+	"github.com/sillygru/music-utils/internal/db"
 )
 
 func fallbackConfig(baseURL string) config.Config {
@@ -66,6 +67,87 @@ func TestGetLyricsFallsBackAndCaches(t *testing.T) {
 	}
 	if source != "lrclib_fallback" {
 		t.Fatalf("unexpected cached source: %q", source)
+	}
+}
+
+func TestGetLyricsDoesNotReturnEmptyCachedLyrics(t *testing.T) {
+	var getCalls, searchCalls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/get":
+			getCalls.Add(1)
+			if r.URL.Query().Get("album_name") == "Wrong Release" {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			// Simulate LRCLIB returning a metadata-only exact record for a
+			// release variant: this must not be exposed as a successful hit.
+			_, _ = w.Write([]byte(`{"id":14306,"trackName":"No Surprises","artistName":"Radiohead","albumName":"OK Computer","duration":229.12,"instrumental":false,"plainLyrics":"","syncedLyrics":""}`))
+		case "/api/search":
+			searchCalls.Add(1)
+			if got := r.URL.Query().Get("q"); got != "No Surprises Radiohead" {
+				t.Fatalf("unexpected search query: %q", got)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[{"id":34649133,"trackName":"No Surprises","artistName":"Radiohead","albumName":"No Surprises","duration":275,"instrumental":false,"plainLyrics":"A heart's full lyrics","syncedLyrics":"[00:25.65]A heart's full lyrics"}]`))
+		default:
+			t.Fatalf("unexpected upstream path: %s", r.URL.Path)
+		}
+	}))
+	defer upstream.Close()
+
+	metadataDB, lyricsDB := testHTTPDatabases(t)
+	// Seed the same metadata shape as the public instance: it has an empty
+	// lyrics row, which must be refreshed from LRCLIB rather than returned.
+	if _, _, err := db.InsertTrackWithLyrics(context.Background(), metadataDB, lyricsDB, db.Track{
+		Name:       "No Surprises",
+		ArtistName: "Radiohead",
+		AlbumName:  "OK Computer",
+		Duration:   229.12,
+	}, db.Lyrics{}); err != nil {
+		t.Fatalf("seed empty lyrics row: %v", err)
+	}
+	server := NewWithConfig(fallbackConfig(upstream.URL+"/api"), metadataDB, lyricsDB)
+	cleanupHTTPServer(t, server)
+
+	response := performRequest(t, server.Handler, "/api/lyrics/get?track_name=No+Surprises&artist_name=Radiohead&album_name=OK+Computer")
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected refreshed 200, got %d: %s", response.Code, response.Body.String())
+	}
+	var got lyricsResponse
+	if err := json.NewDecoder(response.Body).Decode(&got); err != nil {
+		t.Fatalf("decode refreshed response: %v", err)
+	}
+	if got.PlainLyrics != "A heart's full lyrics" || got.AlbumName != "OK Computer" {
+		t.Fatalf("expected populated requested track, got %+v", got)
+	}
+	if getCalls.Load() != 1 || searchCalls.Load() != 1 {
+		t.Fatalf("expected one exact and one search request, got exact=%d search=%d", getCalls.Load(), searchCalls.Load())
+	}
+
+	second := performRequest(t, server.Handler, "/api/lyrics/get?track_name=No+Surprises&artist_name=Radiohead&album_name=OK+Computer")
+	if second.Code != http.StatusOK {
+		t.Fatalf("expected refreshed result to be cached, got %d: %s", second.Code, second.Body.String())
+	}
+	var cached lyricsResponse
+	if err := json.NewDecoder(second.Body).Decode(&cached); err != nil {
+		t.Fatalf("decode cached response: %v", err)
+	}
+	if cached.PlainLyrics != "A heart's full lyrics" || cached.AlbumName != "OK Computer" {
+		t.Fatalf("expected cached populated result, got %+v", cached)
+	}
+	if getCalls.Load() != 1 || searchCalls.Load() != 1 {
+		t.Fatalf("expected no repeat upstream calls, got exact=%d search=%d", getCalls.Load(), searchCalls.Load())
+	}
+
+	// A strict exact miss must use the same search fallback.
+	strict := performRequest(t, server.Handler, "/api/lyrics/get?track_name=No+Surprises&artist_name=Radiohead&album_name=Wrong+Release")
+	if strict.Code != http.StatusOK {
+		t.Fatalf("expected strict exact miss to fall back to 200, got %d: %s", strict.Code, strict.Body.String())
+	}
+	if getCalls.Load() != 2 || searchCalls.Load() != 2 {
+		t.Fatalf("expected one additional exact/search pair, got exact=%d search=%d", getCalls.Load(), searchCalls.Load())
 	}
 }
 

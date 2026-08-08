@@ -57,7 +57,7 @@ console.log(data.plainLyrics);
 ## `GET /healthz` and `GET /version`
 
 - `GET /healthz` → `{"status":"ok"}` — liveness probe; never rate limited.
-- `GET /version` → `{"version":"v0.5.0"}` — never rate limited.
+- `GET /version` → `{"version":"v0.5.1"}` — never rate limited.
 
 ## `GET /api/metadata/get`
 
