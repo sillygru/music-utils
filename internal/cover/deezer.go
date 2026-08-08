@@ -12,12 +12,14 @@ import (
 )
 
 type deezerArtist struct {
+	Name          string `json:"name"`
 	PictureXL     string `json:"picture_xl"`
 	PictureBig    string `json:"picture_big"`
 	PictureMedium string `json:"picture_medium"`
 }
 
 type deezerAlbum struct {
+	Title       string `json:"title"`
 	CoverXL     string `json:"cover_xl"`
 	CoverBig    string `json:"cover_big"`
 	CoverMedium string `json:"cover_medium"`
@@ -67,6 +69,33 @@ func (c *Deezer) Lookup(ctx context.Context, kind Kind, input Input) (*Result, e
 		return nil, ErrNotFound
 	}
 	switch kind {
+	case Song:
+		track := strings.TrimSpace(input.TrackName)
+		if track == "" {
+			return nil, ErrNotFound
+		}
+		params := url.Values{}
+		params.Set("q", `track:"`+track+`" artist:"`+artist+`"`)
+		endpoint, err := encodeQuery(c.base, "/search", params)
+		if err != nil {
+			return nil, err
+		}
+		var response struct {
+			Data []struct {
+				Title  string       `json:"title"`
+				Artist deezerArtist `json:"artist"`
+				Album  deezerAlbum  `json:"album"`
+			} `json:"data"`
+		}
+		if err := c.client.get(ctx, endpoint, &response); err != nil {
+			return nil, err
+		}
+		for _, result := range response.Data {
+			if value := firstNonEmpty(result.Album.CoverXL, result.Album.CoverBig, result.Album.CoverMedium); value != "" {
+				return &Result{URL: value, Source: c.Name(), TrackName: result.Title, ArtistName: result.Artist.Name, AlbumName: result.Album.Title}, nil
+			}
+		}
+		return nil, ErrNotFound
 	case Artist:
 		params := url.Values{}
 		params.Set("q", artist)
@@ -80,7 +109,7 @@ func (c *Deezer) Lookup(ctx context.Context, kind Kind, input Input) (*Result, e
 		}
 		for _, result := range response.Data {
 			if value := firstNonEmpty(result.PictureXL, result.PictureBig, result.PictureMedium); value != "" {
-				return &Result{URL: value, Source: c.Name()}, nil
+				return &Result{URL: value, Source: c.Name(), ArtistName: result.Name}, nil
 			}
 		}
 		return nil, ErrNotFound
@@ -101,7 +130,7 @@ func (c *Deezer) Lookup(ctx context.Context, kind Kind, input Input) (*Result, e
 		}
 		for _, result := range response.Data {
 			if value := firstNonEmpty(result.CoverXL, result.CoverBig, result.CoverMedium); value != "" {
-				return &Result{URL: value, Source: c.Name()}, nil
+				return &Result{URL: value, Source: c.Name(), AlbumName: result.Title}, nil
 			}
 		}
 		return nil, ErrNotFound

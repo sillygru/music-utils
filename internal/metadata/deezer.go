@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -64,6 +65,34 @@ func NewDeezer(baseURL, userAgent string, timeout time.Duration) (*Deezer, error
 }
 
 func (c *Deezer) Name() string { return "deezer" }
+
+// Search returns up to limit song results from Deezer in its native ranking.
+func (c *Deezer) Search(ctx context.Context, query string, limit int) ([]*db.Track, error) {
+	if limit < 1 {
+		return []*db.Track{}, nil
+	}
+	if limit > 50 {
+		limit = 50
+	}
+	endpoint, err := url.Parse(c.baseURL + "/search")
+	if err != nil {
+		return nil, fmt.Errorf("build Deezer URL: %w", err)
+	}
+	params := endpoint.Query()
+	params.Set("q", strings.TrimSpace(query))
+	params.Set("limit", strconv.Itoa(limit))
+	endpoint.RawQuery = params.Encode()
+
+	var response deezerSearchResponse
+	if err := c.do(ctx, endpoint.String(), &response); err != nil {
+		return nil, err
+	}
+	tracks := make([]*db.Track, 0, len(response.Data))
+	for i := range response.Data {
+		tracks = append(tracks, trackFromDeezer(&response.Data[i], Input{}))
+	}
+	return tracks, nil
+}
 
 func (c *Deezer) Lookup(ctx context.Context, input Input) (*db.Track, error) {
 	endpoint, err := url.Parse(c.baseURL + "/search")

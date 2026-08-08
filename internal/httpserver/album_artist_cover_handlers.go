@@ -14,12 +14,13 @@ import (
 const lastFMTimeFormat = "2006-01-02 15:04:05"
 
 type albumArtistCoverResponse struct {
-	ID          int64  `json:"id"`
-	EntityType  string `json:"entityType"`
-	ArtistName  string `json:"artistName,omitempty"`
-	AlbumName   string `json:"albumName,omitempty"`
-	CoverURL    string `json:"coverUrl,omitempty"`
-	CoverSource string `json:"coverUrlSource,omitempty"`
+	ID          int64                 `json:"id"`
+	EntityType  string                `json:"entityType"`
+	ArtistName  string                `json:"artistName,omitempty"`
+	AlbumName   string                `json:"albumName,omitempty"`
+	CoverURL    string                `json:"coverUrl,omitempty"`
+	CoverSource string                `json:"coverUrlSource,omitempty"`
+	Results     []coverSearchResponse `json:"results,omitempty"`
 }
 
 func getArtistCoverHandler(database *sql.DB, resolver *cover.Resolver, fallbacks *fallbackGuard, refreshAfter time.Duration, fallbackEnabled bool) http.HandlerFunc {
@@ -87,9 +88,9 @@ func handleEntityCover(database *sql.DB, resolver *cover.Resolver, fallbacks *fa
 		defer release()
 
 		upstreamStart := time.Now()
-		result, lookupErr := resolver.Lookup(r.Context(), toKind(entityType), cover.Input{ArtistName: artist, AlbumName: album})
+		results, lookupErr := resolver.Search(r.Context(), toKind(entityType), cover.Input{ArtistName: artist, AlbumName: album}, 50)
 		setUpstreamDuration(r, time.Since(upstreamStart))
-		if lookupErr != nil {
+		if lookupErr != nil || len(results) == 0 {
 			// Persist a negative result so repeat lookups stop spending upstream
 			// budget for the negative-cache window.
 			_ = db.UpsertCoverArt(r.Context(), database, entityType, artist, album, "", "")
@@ -97,21 +98,24 @@ func handleEntityCover(database *sql.DB, resolver *cover.Resolver, fallbacks *fa
 			writeJSON(w, http.StatusNotFound, apiError{Code: http.StatusNotFound, Message: "Cover not found"})
 			return
 		}
-		if result == nil || result.URL == "" {
-			_ = db.UpsertCoverArt(r.Context(), database, entityType, artist, album, "", "")
-			setOutcome(r, "miss")
-			writeJSON(w, http.StatusNotFound, apiError{Code: http.StatusNotFound, Message: "Cover not found"})
-			return
-		}
+		result := results[0]
 		if err := db.UpsertCoverArt(r.Context(), database, entityType, artist, album, result.URL, result.Source); err != nil {
 			setOutcome(r, "error")
 			writeJSON(w, http.StatusInternalServerError, apiError{Code: http.StatusInternalServerError, Message: "Internal server error"})
 			return
 		}
 		setOutcome(r, "provider_fallback_hit")
+		providerResults := make([]coverSearchResponse, 0, len(results))
+		for _, item := range results {
+			providerResults = append(providerResults, coverSearchResponse{
+				EntityType: toKind(entityType).String(), TrackName: item.TrackName,
+				ArtistName: item.ArtistName, AlbumName: item.AlbumName,
+				CoverURL: item.URL, CoverSource: item.Source,
+			})
+		}
 		writeJSON(w, http.StatusOK, albumArtistCoverResponse{
 			EntityType: string(entityType), ArtistName: artist, AlbumName: album,
-			CoverURL: result.URL, CoverSource: result.Source,
+			CoverURL: result.URL, CoverSource: result.Source, Results: providerResults,
 		})
 	}
 }

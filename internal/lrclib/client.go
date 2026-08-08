@@ -26,8 +26,11 @@ const (
 	requestInterval = time.Second
 )
 
-// RemoteResult is the response shape returned by LRCLIB's exact lookup.
+// RemoteResult is the response shape returned by LRCLIB search and exact
+// lookup. ID and Name are populated by search; exact lookup may omit them.
 type RemoteResult struct {
+	ID           int64   `json:"id"`
+	Name         string  `json:"name,omitempty"`
 	TrackName    string  `json:"trackName"`
 	ArtistName   string  `json:"artistName"`
 	AlbumName    string  `json:"albumName"`
@@ -37,7 +40,7 @@ type RemoteResult struct {
 	SyncedLyrics string  `json:"syncedLyrics"`
 }
 
-// Client retrieves exact lyrics from LRCLIB.
+// Client retrieves lyrics from LRCLIB.
 type Client struct {
 	baseURL   string
 	userAgent string
@@ -75,6 +78,25 @@ func New(baseURL, userAgent string, timeout time.Duration) (*Client, error) {
 	}, nil
 }
 
+// Search performs a text search and returns the array LRCLIB provides.
+func (c *Client) Search(ctx context.Context, query string) ([]RemoteResult, error) {
+	if c == nil || c.http == nil {
+		return nil, errors.New("LRCLIB client is nil")
+	}
+	endpoint, err := url.Parse(c.baseURL + "/search")
+	if err != nil {
+		return nil, fmt.Errorf("build LRCLIB URL: %w", err)
+	}
+	params := endpoint.Query()
+	params.Set("q", strings.TrimSpace(query))
+	endpoint.RawQuery = params.Encode()
+	var results []RemoteResult
+	if err := c.doJSON(ctx, endpoint.String(), &results); err != nil {
+		return nil, err
+	}
+	return results, nil
+}
+
 // GetExact performs one request and returns ErrNotFound for a remote 404.
 func (c *Client) GetExact(ctx context.Context, trackName, artistName, albumName string, duration float64) (*RemoteResult, error) {
 	if c == nil || c.http == nil {
@@ -102,27 +124,36 @@ func (c *Client) GetExact(ctx context.Context, trackName, artistName, albumName 
 	req.Header.Set("User-Agent", c.userAgent)
 	req.Header.Set("Accept", "application/json")
 
-	if err := c.pace.Wait(ctx); err != nil {
+	var result RemoteResult
+	if err := c.doJSON(ctx, endpoint.String(), &result); err != nil {
 		return nil, err
+	}
+	return &result, nil
+}
+
+func (c *Client) doJSON(ctx context.Context, endpoint string, value any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return fmt.Errorf("create LRCLIB request: %w", err)
+	}
+	req.Header.Set("User-Agent", c.userAgent)
+	req.Header.Set("Accept", "application/json")
+	if err := c.pace.Wait(ctx); err != nil {
+		return err
 	}
 	response, err := c.http.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("request LRCLIB: %w", err)
+		return fmt.Errorf("request LRCLIB: %w", err)
 	}
 	defer response.Body.Close()
-
 	if response.StatusCode == http.StatusNotFound {
-		return nil, ErrNotFound
+		return ErrNotFound
 	}
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		_, _ = io.CopyN(io.Discard, response.Body, maxResponseBytes)
-		return nil, fmt.Errorf("LRCLIB returned HTTP %d", response.StatusCode)
+		return fmt.Errorf("LRCLIB returned HTTP %d", response.StatusCode)
 	}
-
-	var result RemoteResult
-	decoder := json.NewDecoder(io.LimitReader(response.Body, maxResponseBytes))
-	if err := decoder.Decode(&result); err != nil {
-		return nil, fmt.Errorf("decode LRCLIB response: %w", err)
+	if err := json.NewDecoder(io.LimitReader(response.Body, maxResponseBytes)).Decode(value); err != nil {
+		return fmt.Errorf("decode LRCLIB response: %w", err)
 	}
-	return &result, nil
+	return nil
 }

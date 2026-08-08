@@ -141,6 +141,82 @@ func getLyricsHandler(metadataDB, lyricsDB *sql.DB, client *lrclib.Client, lyric
 	}
 }
 
+func searchLyricsHandlerWithUpstream(metadataDB, lyricsDB *sql.DB, client *lrclib.Client, fallbacks *fallbackGuard, fallbackEnabled bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		query := r.URL.Query()
+		searchQuery := strings.TrimSpace(query.Get("q"))
+		if searchQuery == "" {
+			searchQuery = strings.Join(nonEmpty(query.Get("track_name"), query.Get("artist_name"), query.Get("album_name")), " ")
+		}
+		if searchQuery == "" {
+			setOutcome(r, "bad_request")
+			writeJSON(w, http.StatusBadRequest, apiError{Code: http.StatusBadRequest, Message: "q or track_name, artist_name, or album_name is required"})
+			return
+		}
+		limit, err := searchLimit(query.Get("limit"))
+		if err != nil {
+			setOutcome(r, "bad_request")
+			writeJSON(w, http.StatusBadRequest, apiError{Code: http.StatusBadRequest, Message: "limit must be an integer between 1 and 50"})
+			return
+		}
+		cacheStart := time.Now()
+		tracks, err := db.SearchTracks(r.Context(), metadataDB, lyricsDB, searchQuery, limit)
+		setCacheDuration(r, time.Since(cacheStart))
+		if err != nil {
+			setOutcome(r, "error")
+			writeJSON(w, http.StatusInternalServerError, apiError{Code: http.StatusInternalServerError, Message: "Internal server error"})
+			return
+		}
+		results := make([]lyricsResponse, 0, limit)
+		seen := make(map[string]struct{}, limit)
+		appendResult := func(result lrclib.RemoteResult) {
+			key := strings.ToLower(strings.TrimSpace(result.TrackName)) + "\x00" + strings.ToLower(strings.TrimSpace(result.ArtistName)) + "\x00" + strings.ToLower(strings.TrimSpace(result.AlbumName)) + "\x00" + strconv.FormatFloat(result.Duration, 'f', 0, 64)
+			if _, ok := seen[key]; ok || len(results) >= limit {
+				return
+			}
+			seen[key] = struct{}{}
+			track := &db.Track{ID: result.ID, Name: result.TrackName, ArtistName: result.ArtistName, AlbumName: result.AlbumName, Duration: result.Duration}
+			lyrics := &db.Lyrics{PlainLyrics: result.PlainLyrics, SyncedLyrics: result.SyncedLyrics, Instrumental: result.Instrumental}
+			results = append(results, toLyricsResponse(track, lyrics))
+		}
+		// Put LRCLIB results first so a warm local catalog cannot hide the
+		// upstream search merely because it fills the final limit.
+		if fallbackEnabled && client != nil {
+			release, ok := fallbacks.enter(r, w)
+			if !ok {
+				return
+			}
+			defer release()
+			upstreamStart := time.Now()
+			remote, remoteErr := client.Search(r.Context(), searchQuery)
+			setUpstreamDuration(r, time.Since(upstreamStart))
+			if remoteErr == nil {
+				for _, result := range remote {
+					appendResult(result)
+				}
+			}
+		}
+		for i := range tracks {
+			key := strings.ToLower(strings.TrimSpace(tracks[i].Track.Name)) + "\x00" + strings.ToLower(strings.TrimSpace(tracks[i].Track.ArtistName)) + "\x00" + strings.ToLower(strings.TrimSpace(tracks[i].Track.AlbumName)) + "\x00" + strconv.FormatFloat(tracks[i].Track.Duration, 'f', 0, 64)
+			if _, exists := seen[key]; exists {
+				continue
+			}
+			seen[key] = struct{}{}
+			if len(results) < limit {
+				results = append(results, toLyricsResponse(&tracks[i].Track, &tracks[i].Lyrics))
+			}
+		}
+		if len(results) == 0 {
+			setOutcome(r, "miss")
+		} else if len(tracks) > 0 {
+			setOutcome(r, "local_hit")
+		} else {
+			setOutcome(r, "lrclib_fallback_hit")
+		}
+		writeJSON(w, http.StatusOK, results)
+	}
+}
+
 func searchLyricsHandler(metadataDB, lyricsDB *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()

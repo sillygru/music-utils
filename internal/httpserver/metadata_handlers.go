@@ -122,6 +122,77 @@ func getMetadataHandler(database *sql.DB, resolver *metadata.Resolver, fallbacks
 	}
 }
 
+func searchMetadataHandlerWithUpstream(database *sql.DB, resolver *metadata.Resolver, fallbacks *fallbackGuard, fallbackEnabled bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		query := r.URL.Query()
+		searchQuery := strings.TrimSpace(query.Get("q"))
+		if searchQuery == "" {
+			searchQuery = strings.Join(nonEmpty(query.Get("track_name"), query.Get("artist_name"), query.Get("album_name"), query.Get("genre")), " ")
+		}
+		if searchQuery == "" {
+			setOutcome(r, "bad_request")
+			writeJSON(w, http.StatusBadRequest, apiError{Code: http.StatusBadRequest, Message: "q or track_name, artist_name, album_name, or genre is required"})
+			return
+		}
+		limit, err := searchLimit(query.Get("limit"))
+		if err != nil {
+			setOutcome(r, "bad_request")
+			writeJSON(w, http.StatusBadRequest, apiError{Code: http.StatusBadRequest, Message: "limit must be an integer between 1 and 50"})
+			return
+		}
+		cacheStart := time.Now()
+		tracks, err := db.SearchTracks(r.Context(), database, nil, searchQuery, limit)
+		setCacheDuration(r, time.Since(cacheStart))
+		if err != nil {
+			setRequestIssue(r, slog.LevelError, err.Error())
+			setOutcome(r, "error")
+			writeJSON(w, http.StatusInternalServerError, apiError{Code: http.StatusInternalServerError, Message: "Internal server error"})
+			return
+		}
+		results := make([]metadataResponse, 0, limit)
+		seen := make(map[string]struct{}, limit)
+		appendTrack := func(track *db.Track) {
+			if track == nil || len(results) >= limit {
+				return
+			}
+			key := strings.ToLower(strings.TrimSpace(track.Name)) + "\x00" + strings.ToLower(strings.TrimSpace(track.ArtistName)) + "\x00" + strings.ToLower(strings.TrimSpace(track.AlbumName))
+			if _, ok := seen[key]; ok {
+				return
+			}
+			seen[key] = struct{}{}
+			results = append(results, toMetadataResponse(track))
+		}
+		// Put provider results first so a warm local catalog cannot hide the
+		// requested upstream APIs merely because it fills the final limit.
+		if fallbackEnabled && resolver != nil {
+			release, ok := fallbacks.enter(r, w)
+			if !ok {
+				return
+			}
+			defer release()
+			upstreamStart := time.Now()
+			remote, remoteErr := resolver.Search(r.Context(), searchQuery, limit)
+			setUpstreamDuration(r, time.Since(upstreamStart))
+			if remoteErr == nil {
+				for _, track := range remote {
+					appendTrack(track)
+				}
+			}
+		}
+		for i := range tracks {
+			appendTrack(&tracks[i].Track)
+		}
+		if len(results) == 0 {
+			setOutcome(r, "miss")
+		} else if len(tracks) > 0 {
+			setOutcome(r, "local_hit")
+		} else {
+			setOutcome(r, "provider_fallback_hit")
+		}
+		writeJSON(w, http.StatusOK, results)
+	}
+}
+
 func searchMetadataHandler(database *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()

@@ -45,17 +45,19 @@ console.log(data.plainLyrics);
 | `GET /healthz` | Health check (not rate limited) |
 | `GET /version` | Server version (not rate limited) |
 | `GET /api/metadata/get` | Exact metadata lookup; resolves upstream on a miss |
-| `GET /api/metadata/search` | Search the local catalog (never calls upstream) |
-| `GET /api/cover/get` | Cached song cover URL (never calls upstream) |
-| `GET /api/cover/artist` | Artist artwork; resolves upstream on a miss |
-| `GET /api/cover/album` | Album artwork; resolves upstream on a miss |
-| `GET /api/lyrics/get` | Exact lyrics lookup; resolves upstream on a miss |
-| `GET /api/lyrics/search` | Search lyrics and catalog (never calls upstream) |
+| `GET /api/metadata/search` | Multi-provider metadata search; returns several results |
+| `GET /api/metadata/get` | Top metadata result; returns one object |
+| `GET /api/cover/search` | Multi-provider artist, album, or song cover search |
+| `GET /api/cover/get` | Top cover result; returns one object |
+| `GET /api/cover/artist` | Artist cover top result, with provider results included |
+| `GET /api/cover/album` | Album cover top result, with provider results included |
+| `GET /api/lyrics/get` | Exact/top lyrics lookup; returns one object |
+| `GET /api/lyrics/search` | LRCLIB-compatible multi-result lyrics search |
 
 ## `GET /healthz` and `GET /version`
 
 - `GET /healthz` → `{"status":"ok"}` — liveness probe; never rate limited.
-- `GET /version` → `{"version":"v0.4.0"}` — never rate limited.
+- `GET /version` → `{"version":"v0.5.0"}` — never rate limited.
 
 ## `GET /api/metadata/get`
 
@@ -118,8 +120,9 @@ found · `429` rate limited · `503` upstream busy · `500` internal error.
 
 ## `GET /api/metadata/search`
 
-Searches only the local catalog. It never calls an upstream API, so results
-are limited to content the instance has already cached.
+Searches the local catalog and merges matching results from iTunes and
+Deezer. Results are deduplicated by track, artist, and album; each result
+retains its provider provenance. The final response is a JSON array.
 
 Query parameters:
 
@@ -135,11 +138,14 @@ invalid input · `429` rate limited · `500` internal error.
 
 ## `GET /api/cover/get`
 
-Returns only cached song artwork; it never calls an upstream provider. To
-trigger enrichment on a miss, use `/api/metadata/get` instead.
+Returns the top cover result as one object. Use `type=artist`, `type=album`,
+or `type=song` with `artist_name` and the corresponding optional/required
+name fields. A song request without `type` remains supported for compatibility.
+The endpoint checks local caches before resolving the provider chain.
 
-Query parameters: required `track_name` and `artist_name`; optional
-`album_name`.
+Query parameters: `type` is optional and defaults to `song`; `artist_name` is
+required; `track_name` is required for songs; `album_name` is required for
+albums.
 
 Example response:
 
@@ -156,6 +162,18 @@ Example response:
 
 Responses: `200` cached cover · `400` invalid input · `404` not cached ·
 `429` rate limited · `500` internal error.
+
+## `GET /api/cover/search`
+
+Searches artwork across Last.fm, iTunes, and Deezer. The response is an array
+with one entry per provider that returned a URL; `coverUrlSource` identifies the
+provider. Set `type=artist`, `type=album`, or `type=song`.
+
+```sh
+curl 'https://music.gru0.dev/api/cover/search?type=artist&artist_name=Radiohead'
+curl 'https://music.gru0.dev/api/cover/search?type=album&artist_name=Radiohead&album_name=OK%20Computer'
+curl 'https://music.gru0.dev/api/cover/search?type=song&artist_name=Radiohead&track_name=No%20Surprises'
+```
 
 ## `GET /api/cover/artist`
 
@@ -177,9 +195,12 @@ Example response:
 }
 ```
 
-Responses: `200` cover URL · `400` invalid input · `404` provider miss
-(memoized for 24 hours) · `429` rate limited · `503` upstream busy · `500`
-internal error.
+Responses: `200` JSON array (possibly empty) · `400` invalid input · `429` rate
+limited · `503` upstream busy · `500` internal error.
+
+The artist and album endpoints also expose the selected top-level cover for
+backward compatibility and include a `results` array containing the provider
+results. Use `/api/cover/search` when you only want the array.
 
 ## `GET /api/cover/album`
 
@@ -245,10 +266,14 @@ found (memoized for 24 hours) · `429` rate limited · `503` upstream busy ·
 
 ## `GET /api/lyrics/search`
 
-Searches the local catalog and never calls LRCLIB.
+Searches the local catalog and merges it with LRCLIB's `/api/search`
+results. LRCLIB returns a JSON array containing fields such as `id`,
+`trackName`, `artistName`, `albumName`, `duration`, `instrumental`,
+`plainLyrics`, and `syncedLyrics`.
 
 Query parameters: `q`, or one or more of `track_name`, `artist_name`,
-`album_name`; optional `limit` from `1–50`, default `20`.
+`album_name`; optional `limit` from `1–50`, default `20`. `q` is passed to
+LRCLIB's `/api/search`; the server applies the final limit after merging.
 
 ```sh
 curl 'https://music.gru0.dev/api/lyrics/search?q=no%20surprises&limit=20'

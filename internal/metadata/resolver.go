@@ -42,6 +42,42 @@ func cacheKey(input Input) string {
 	return normalize(input.TrackName) + "\x00" + normalize(input.ArtistName) + "\x00" + normalize(input.AlbumName) + "\x00" + durationKey(input.Duration)
 }
 
+// Search queries every provider that supports multi-result search and merges
+// the responses in provider order. Duplicate tracks are kept once, while the
+// first provider's metadata remains authoritative for the merged item.
+func (r *Resolver) Search(ctx context.Context, query string, limit int) ([]*db.Track, error) {
+	if limit < 1 {
+		return []*db.Track{}, nil
+	}
+	if limit > 50 {
+		limit = 50
+	}
+	results := make([]*db.Track, 0, limit)
+	seen := make(map[string]struct{}, limit)
+	for _, provider := range r.providers {
+		searchProvider, ok := provider.(SearchProvider)
+		if !ok || searchProvider == nil {
+			continue
+		}
+		tracks, err := searchProvider.Search(ctx, query, limit)
+		if err != nil {
+			continue
+		}
+		for _, track := range tracks {
+			if track == nil {
+				continue
+			}
+			key := normalize(track.Name) + "\x00" + normalize(track.ArtistName) + "\x00" + normalize(track.AlbumName)
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			results = append(results, track)
+		}
+	}
+	return results, nil
+}
+
 func (r *Resolver) Lookup(ctx context.Context, input Input) (*db.Track, error) {
 	key := cacheKey(input)
 	r.mu.Lock()

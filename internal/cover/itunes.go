@@ -12,7 +12,10 @@ import (
 )
 
 type itunesResult struct {
-	ArtworkURL100 string `json:"artworkUrl100"`
+	TrackName      string `json:"trackName"`
+	ArtistName     string `json:"artistName"`
+	CollectionName string `json:"collectionName"`
+	ArtworkURL100  string `json:"artworkUrl100"`
 }
 
 type itunesSearchResponse struct {
@@ -69,6 +72,13 @@ func (c *ITunes) Lookup(ctx context.Context, kind Kind, input Input) (*Result, e
 	switch kind {
 	case Artist:
 		params.Set("term", artist)
+	case Song:
+		track := strings.TrimSpace(input.TrackName)
+		if track == "" {
+			return nil, ErrNotFound
+		}
+		params.Set("entity", "song")
+		params.Set("term", artist+" "+track)
 	case Album:
 		album := CleanAlbum(input.AlbumName)
 		if album == "" {
@@ -88,7 +98,7 @@ func (c *ITunes) Lookup(ctx context.Context, kind Kind, input Input) (*Result, e
 	}
 	for _, result := range response.Results {
 		if value := upgradeITunes(result.ArtworkURL100); value != "" {
-			return &Result{URL: value, Source: c.Name()}, nil
+			return &Result{URL: value, Source: c.Name(), TrackName: result.TrackName, ArtistName: result.ArtistName, AlbumName: result.CollectionName}, nil
 		}
 	}
 	return nil, ErrNotFound

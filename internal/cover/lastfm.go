@@ -86,6 +86,15 @@ func (c *Lastfm) Lookup(ctx context.Context, kind Kind, input Input) (*Result, e
 			"/music/" + lastfmPath(artist) + "/" + lastfmPath(album) + "/+images",
 			"/music/" + lastfmPath(artist) + "/" + lastfmPath(album),
 		}
+	case Song:
+		track := strings.TrimSpace(input.TrackName)
+		if track == "" {
+			return nil, ErrNotFound
+		}
+		pages = []string{
+			"/music/" + lastfmPath(artist) + "/_" + lastfmPath(track) + "/+images",
+			"/music/" + lastfmPath(artist) + "/_" + lastfmPath(track),
+		}
 	default:
 		return nil, ErrNotFound
 	}
@@ -96,7 +105,7 @@ func (c *Lastfm) Lookup(ctx context.Context, kind Kind, input Input) (*Result, e
 		}
 		value = upgradeLastfmArtworkURL(value)
 		if value != "" {
-			return &Result{URL: value, Source: c.Name()}, nil
+			return &Result{URL: value, Source: c.Name(), TrackName: input.TrackName, ArtistName: input.ArtistName, AlbumName: input.AlbumName}, nil
 		}
 	}
 	return nil, ErrNotFound

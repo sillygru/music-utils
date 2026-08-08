@@ -73,6 +73,38 @@ func NewITunes(baseURL, userAgent string, timeout time.Duration, pace *pacer.Pac
 
 func (c *ITunes) Name() string { return "itunes" }
 
+// Search returns up to limit song results from iTunes, preserving the
+// provider's ranking rather than collapsing the response to one match.
+func (c *ITunes) Search(ctx context.Context, query string, limit int) ([]*db.Track, error) {
+	if limit < 1 {
+		return []*db.Track{}, nil
+	}
+	if limit > 50 {
+		limit = 50
+	}
+	endpoint, err := url.Parse(c.baseURL + "/search")
+	if err != nil {
+		return nil, fmt.Errorf("build iTunes URL: %w", err)
+	}
+	params := endpoint.Query()
+	params.Set("media", "music")
+	params.Set("entity", "song")
+	params.Set("limit", strconv.Itoa(limit))
+	params.Set("country", "US")
+	params.Set("term", strings.TrimSpace(query))
+	endpoint.RawQuery = params.Encode()
+
+	var response iTunesSearchResponse
+	if err := c.do(ctx, endpoint.String(), &response); err != nil {
+		return nil, err
+	}
+	tracks := make([]*db.Track, 0, len(response.Results))
+	for i := range response.Results {
+		tracks = append(tracks, trackFromITunes(&response.Results[i], Input{}))
+	}
+	return tracks, nil
+}
+
 func (c *ITunes) Lookup(ctx context.Context, input Input) (*db.Track, error) {
 	endpoint, err := url.Parse(c.baseURL + "/search")
 	if err != nil {

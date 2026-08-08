@@ -23,3 +23,10 @@ type Provider interface {
 	Name() string
 	Lookup(ctx context.Context, input Input) (*db.Track, error)
 }
+
+// SearchProvider returns multiple metadata matches from a single upstream
+// source. It is intentionally separate from Provider so small test providers
+// and future lookup-only integrations remain valid.
+type SearchProvider interface {
+	Search(ctx context.Context, query string, limit int) ([]*db.Track, error)
+}

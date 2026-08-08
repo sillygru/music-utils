@@ -45,7 +45,7 @@ distribution without any packages installed.
 
 ### Option A — download a release binary (recommended)
 
-Each release tags `internal/version/version.go` (e.g. `v0.4.0`) and attaches a
+Each release tags `internal/version/version.go` (e.g. `v0.5.0`) and attaches a
 single `bin/music-utils` artifact to the GitHub release.
 
 ```sh
@@ -230,7 +230,7 @@ For nginx, obtain certificates with certbot. The proxy must overwrite
 
 ```sh
 curl http://localhost:8080/healthz      # {"status":"ok"}  (not rate limited)
-curl http://localhost:8080/version      # {"version":"v0.4.0"}
+curl http://localhost:8080/version      # {"version":"v0.5.0"}
 curl 'http://localhost:8080/api/metadata/get?track_name=Example%20Song&artist_name=Example%20Artist'
 ```
 
@@ -295,7 +295,7 @@ permanent store.
 
 ## Upgrades
 
-Releases are version-tagged (e.g. `v0.4.0`) and attach the binary to the
+Releases are version-tagged (e.g. `v0.5.0`) and attach the binary to the
 GitHub release. Upgrading:
 
 1. Back up the databases (see [Backups](#backups)) — always before an upgrade.

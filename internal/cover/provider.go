@@ -24,25 +24,41 @@ const (
 	Artist Kind = iota
 	// Album requests album artwork.
 	Album
+	// Song requests track artwork.
+	Song
 )
 
 func (k Kind) String() string {
-	if k == Album {
+	switch k {
+	case Album:
 		return "album"
+	case Song:
+		return "song"
+	default:
+		return "artist"
 	}
-	return "artist"
 }
 
 // Input is the normalized identity used to look up artwork.
 type Input struct {
+	TrackName  string
 	ArtistName string
 	AlbumName  string
 }
 
 // Result is a resolved cover URL and the source that produced it.
 type Result struct {
-	URL    string
-	Source string
+	URL        string
+	Source     string
+	TrackName  string
+	ArtistName string
+	AlbumName  string
+}
+
+// SearchProvider returns multiple artwork matches without changing the
+// existing first-match Provider contract used by cached get handlers.
+type SearchProvider interface {
+	Search(ctx context.Context, kind Kind, input Input, limit int) ([]Result, error)
 }
 
 // Name cleanup TTL linked to the negative-cache expiry used by callers. The

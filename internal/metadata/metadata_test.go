@@ -94,6 +94,27 @@ func (p *stubProvider) Lookup(_ context.Context, _ Input) (*db.Track, error) {
 	return p.track, p.err
 }
 
+type searchStubProvider struct {
+	stubProvider
+	results []*db.Track
+}
+
+func (p *searchStubProvider) Search(_ context.Context, _ string, _ int) ([]*db.Track, error) {
+	return p.results, nil
+}
+
+func TestResolverSearchMergesAllProviders(t *testing.T) {
+	first := &searchStubProvider{results: []*db.Track{{Name: "First", ArtistName: "Artist", AlbumName: "A"}}}
+	second := &searchStubProvider{results: []*db.Track{{Name: "First", ArtistName: "Artist", AlbumName: "A"}, {Name: "Second", ArtistName: "Artist", AlbumName: "B"}}}
+	results, err := NewResolver(first, second).Search(context.Background(), "artist", 10)
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(results) != 2 || results[0].Name != "First" || results[1].Name != "Second" {
+		t.Fatalf("unexpected merged results: %+v", results)
+	}
+}
+
 func TestResolverChainsToFallback(t *testing.T) {
 	primary := &stubProvider{name: "primary", err: ErrNotFound}
 	secondary := &stubProvider{name: "secondary", track: &db.Track{Name: "Found", ArtistName: "Artist"}}

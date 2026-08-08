@@ -159,18 +159,18 @@ func NewWithLogger(cfg config.Config, metadataDB, lyricsDB, coverDB *sql.DB, log
 
 	lyricsMisses := newLyricsMissCache()
 	fallbacks := newFallbackGuard(cfg)
-	coverRefreshAfter := time.Duration(cfg.CoverRefreshAfterDays) * 24 * time.Hour
 	coverRefresher := newCoverRefreshJob(cfg, coverDB, coverResolver, logger)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", healthz)
 	mux.HandleFunc("GET /version", versionHandler)
 	mux.HandleFunc("GET /api/lyrics/get", getLyricsHandler(metadataDB, lyricsDB, client, lyricsMisses, fallbacks, cfg.LRCLIBFallbackEnabled))
-	mux.HandleFunc("GET /api/lyrics/search", searchLyricsHandler(metadataDB, lyricsDB))
+	mux.HandleFunc("GET /api/lyrics/search", searchLyricsHandlerWithUpstream(metadataDB, lyricsDB, client, fallbacks, cfg.LRCLIBFallbackEnabled))
 	mux.HandleFunc("GET /api/metadata/get", getMetadataHandler(metadataDB, metadataResolver, fallbacks, cfg.MetadataFallbackEnabled))
-	mux.HandleFunc("GET /api/metadata/search", searchMetadataHandler(metadataDB))
-	mux.HandleFunc("GET /api/cover/get", getCoverHandler(metadataDB))
-	mux.HandleFunc("GET /api/cover/artist", getArtistCoverHandler(coverDB, coverResolver, fallbacks, coverRefreshAfter, cfg.CoverFallbackEnabled))
-	mux.HandleFunc("GET /api/cover/album", getAlbumCoverHandler(coverDB, coverResolver, fallbacks, coverRefreshAfter, cfg.CoverFallbackEnabled))
+	mux.HandleFunc("GET /api/metadata/search", searchMetadataHandlerWithUpstream(metadataDB, metadataResolver, fallbacks, cfg.MetadataFallbackEnabled))
+	mux.HandleFunc("GET /api/cover/get", getCoverTopHandler(metadataDB, coverDB, coverResolver, fallbacks, cfg.CoverFallbackEnabled))
+	mux.HandleFunc("GET /api/cover/artist", getEntityCoverSearchHandler(coverDB, coverResolver, fallbacks, db.CoverArtist, cfg.CoverFallbackEnabled))
+	mux.HandleFunc("GET /api/cover/album", getEntityCoverSearchHandler(coverDB, coverResolver, fallbacks, db.CoverAlbum, cfg.CoverFallbackEnabled))
+	mux.HandleFunc("GET /api/cover/search", searchCoverHandler(coverResolver, fallbacks, cfg.CoverFallbackEnabled))
 
 	limiter := newRateLimiter(cfg)
 	// CORS wraps the limiter so every response (including 429/503) carries the

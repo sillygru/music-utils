@@ -44,12 +44,12 @@ URL dumps (see [Seed dumps](#seed-dumps)) contain only factual data and links.
 | `GET /healthz` | Health check|
 | `GET /version` | Running application version.|
 | `GET /api/metadata/get` | Exact song metadata lookup; local-first with iTunes + Deezer provider fallback. |
-| `GET /api/metadata/search` | Local metadata search; never calls upstream APIs. |
+| `GET /api/metadata/search` | Multi-provider metadata search across the local catalog, iTunes, and Deezer. |
 | `GET /api/cover/get` | Cached song cover URL and cover source. |
 | `GET /api/cover/artist` | Artist cover URL; resolves Last.fm → iTunes → Deezer on a miss and caches. |
 | `GET /api/cover/album` | Album cover URL; resolves Last.fm → iTunes → Deezer on a miss and caches. |
 | `GET /api/lyrics/get` | Exact lyrics lookup; local-first with optional LRCLIB fallback. |
-| `GET /api/lyrics/search` | Local lyrics/catalog search; never calls LRCLIB. |
+| `GET /api/lyrics/search` | Multi-result lyrics search across the local catalog and LRCLIB. |
 
 The previous `/api/get` and `/api/search` paths are intentionally removed.
 There are no aliases or compatibility redirects.
@@ -85,8 +85,9 @@ Metadata responses expose provenance:
   URL for free.
 - lyrics retain their existing `source` in the database.
 
-The dedicated cover endpoint is cache-only: it never spends upstream budget.
-Use `/api/metadata/get` when a cache miss should trigger enrichment.
+The song cover endpoint checks the metadata cache before resolving upstream;
+artist and album cover routes return the top result plus provider results. Use
+`/api/cover/search` when you want an array of provider cover results.
 
 ## Provider research decision
 
@@ -158,11 +159,11 @@ cold-lookup latency and has been removed.
 | `METADATA_FALLBACK_ENABLED` | `true` | Enable iTunes + Deezer metadata fallback. |
 | `ITUNES_BASE_URL` | `https://itunes.apple.com` | iTunes Search API base URL. |
 | `DEEZER_BASE_URL` | `https://api.deezer.com` | Deezer API base URL. |
-| `METADATA_USER_AGENT` | `music-utils/v0.4.0 (+https://gru0.dev)` | Descriptive upstream User-Agent. |
+| `METADATA_USER_AGENT` | `music-utils/v0.5.0 (+https://gru0.dev)` | Descriptive upstream User-Agent. |
 | `METADATA_TIMEOUT_MS` | `5000` | Metadata provider timeout. |
 | `COVER_FALLBACK_ENABLED` | `true` | Enable Last.fm + iTunes + Deezer album/artist cover resolution. |
 | `COVER_TIMEOUT_MS` | `10000` | Album/artist cover provider timeout. |
-| `COVER_USER_AGENT` | `music-utils/v0.4.0 (+https://gru0.dev)` | Cover upstream User-Agent. |
+| `COVER_USER_AGENT` | `music-utils/v0.5.0 (+https://gru0.dev)` | Cover upstream User-Agent. |
 | `LASTFM_BASE_URL` | `https://www.last.fm` | Last.fm scraping base URL. |
 | `COVER_REFRESH_ENABLED` | `true` | Background refresh of aged positive cover rows. |
 | `COVER_REFRESH_AFTER_DAYS` | `30` | Revalidate cached positive cover URLs older than this. |
@@ -175,7 +176,7 @@ cold-lookup latency and has been removed.
 | `REQUEST_LOG_RETENTION_DAYS` | `30` | Prune request log rows older than this daily; `0` keeps everything. |
 | `LRCLIB_FALLBACK_ENABLED` | `true` | Enable LRCLIB fallback. |
 | `LRCLIB_BASE_URL` | `https://lrclib.net/api` | LRCLIB API base URL. |
-| `LRCLIB_USER_AGENT` | `music-utils/v0.4.0 (+https://gru0.dev)` | LRCLIB User-Agent. |
+| `LRCLIB_USER_AGENT` | `music-utils/v0.5.0 (+https://gru0.dev)` | LRCLIB User-Agent. |
 | `LRCLIB_TIMEOUT_MS` | `5000` | LRCLIB timeout. |
 
 ## Database migration
