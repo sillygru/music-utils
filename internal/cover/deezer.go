@@ -7,6 +7,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/sillygru/music-utils/internal/pacer"
 )
 
 type deezerArtist struct {
@@ -37,7 +39,9 @@ type Deezer struct {
 	client *jsonClient
 }
 
-// NewDeezer builds a Deezer cover provider.
+// NewDeezer builds a Deezer cover provider. Requests are paced to one every
+// 2 seconds even though Deezer permits roughly 50 per 5s, because the provider
+// is a tertiary fallback that is rarely hit and conservatism is free.
 func NewDeezer(baseURL, userAgent string, timeout time.Duration) (*Deezer, error) {
 	baseURL = strings.TrimSpace(baseURL)
 	if baseURL == "" {
@@ -51,7 +55,7 @@ func NewDeezer(baseURL, userAgent string, timeout time.Duration) (*Deezer, error
 	}
 	return &Deezer{
 		base:   strings.TrimRight(baseURL, "/"),
-		client: &jsonClient{client: &http.Client{Timeout: timeout}, agent: userAgent},
+		client: &jsonClient{client: &http.Client{Timeout: timeout}, agent: userAgent, rate: pacer.New(2 * time.Second)},
 	}, nil
 }
 

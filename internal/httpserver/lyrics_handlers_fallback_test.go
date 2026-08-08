@@ -88,6 +88,29 @@ func TestGetLyricsFallbackDisabledDoesNotCallUpstream(t *testing.T) {
 	}
 }
 
+func TestGetLyricsNegativeCacheSkipsUpstreamRepeat(t *testing.T) {
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		http.NotFound(w, r)
+	}))
+	defer upstream.Close()
+
+	metadataDB, lyricsDB := testHTTPDatabases(t)
+	server := NewWithConfig(fallbackConfig(upstream.URL+"/api"), metadataDB, lyricsDB)
+	cleanupHTTPServer(t, server)
+
+	for i := 0; i < 3; i++ {
+		response := performRequest(t, server.Handler, "/api/lyrics/get?track_name=Ghost+Song&artist_name=Ghost+Artist")
+		if response.Code != http.StatusNotFound {
+			t.Fatalf("expected 404, got %d: %s", response.Code, response.Body.String())
+		}
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("expected one upstream request after negative caching, got %d", calls.Load())
+	}
+}
+
 func TestGetLyricsFallbackTimeoutReturnsNotFound(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		time.Sleep(100 * time.Millisecond)

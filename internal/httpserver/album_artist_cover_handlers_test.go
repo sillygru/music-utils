@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
+	"github.com/sillygru/music-utils/internal/config"
 	"github.com/sillygru/music-utils/internal/cover"
 	"github.com/sillygru/music-utils/internal/db"
 )
@@ -25,6 +27,12 @@ func (c *coverStubProvider) Lookup(_ context.Context, _ cover.Kind, _ cover.Inpu
 		return nil, cover.ErrNotFound
 	}
 	return c.result, nil
+}
+
+// testFallbackGuard returns a guard with generous limits so handler-level
+// tests never trip the per-IP budget or the queue gate.
+func testFallbackGuard() *fallbackGuard {
+	return newFallbackGuard(config.Config{FallbackPerMin: 100, FallbackMaxQueue: 100})
 }
 
 func testCoverDB(t *testing.T) *sql.DB {
@@ -45,7 +53,7 @@ func TestArtistCoverProviderFallbackHitAndCaches(t *testing.T) {
 	handler := getArtistCoverHandler(database, cover.NewResolver(&coverStubProvider{
 		name:   "itunes",
 		result: &cover.Result{URL: "http://img/artist.jpg", Source: "itunes"},
-	}), true)
+	}), testFallbackGuard(), 0, true)
 
 	first := performRequest(t, handler, "/?artist_name=Radiohead")
 	if first.Code != http.StatusOK {
@@ -60,7 +68,7 @@ func TestArtistCoverProviderFallbackHitAndCaches(t *testing.T) {
 	}
 
 	stub := &coverStubProvider{name: "itunes", result: &cover.Result{URL: "http://img/artist.jpg", Source: "itunes"}}
-	handler = getArtistCoverHandler(database, cover.NewResolver(stub), true)
+	handler = getArtistCoverHandler(database, cover.NewResolver(stub), testFallbackGuard(), 0, true)
 	second := performRequest(t, handler, "/?artist_name=Radiohead")
 	if second.Code != http.StatusOK {
 		t.Fatalf("expected cached 200, got %d", second.Code)
@@ -74,7 +82,7 @@ func TestArtistCoverProviderFallbackHitAndCaches(t *testing.T) {
 func TestAlbumCoverActorCache(t *testing.T) {
 	database := testCoverDB(t)
 	stub := &coverStubProvider{name: "lastfm"}
-	handler := getAlbumCoverHandler(database, cover.NewResolver(stub), true)
+	handler := getAlbumCoverHandler(database, cover.NewResolver(stub), testFallbackGuard(), 0, true)
 
 	first := performRequest(t, handler, "/?artist_name=Radiohead&album_name=OK+Computer")
 	if first.Code != http.StatusNotFound {
@@ -91,7 +99,7 @@ func TestAlbumCoverActorCache(t *testing.T) {
 
 func TestAlbumCoverRequiresArtistAndAlbum(t *testing.T) {
 	db := testCoverDB(t)
-	handler := getAlbumCoverHandler(db, nil, true)
+	handler := getAlbumCoverHandler(db, nil, testFallbackGuard(), 0, true)
 	first := performArtistRequest(t, handler, "/?artist_name=Radiohead")
 	if first.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 without album_name, got %d", first.Code)
@@ -104,10 +112,60 @@ func TestAlbumCoverRequiresArtistAndAlbum(t *testing.T) {
 
 func TestArtistCoverDisabledFallbackServesNotFound(t *testing.T) {
 	db := testCoverDB(t)
-	handler := getArtistCoverHandler(db, cover.NewResolver(&coverStubProvider{name: "lastfm"}), false)
+	handler := getArtistCoverHandler(db, cover.NewResolver(&coverStubProvider{name: "lastfm"}), testFallbackGuard(), 0, false)
 	response := performArtistRequest(t, handler, "/?artist_name=Radiohead")
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("expected 404 when fallback disabled, got %d", response.Code)
+	}
+}
+
+func TestArtistCoverStalePositiveReResolves(t *testing.T) {
+	database := testCoverDB(t)
+	if err := db.UpsertCoverArt(context.Background(), database, db.CoverArtist, "Radiohead", "", "http://old/cover.jpg", "itunes"); err != nil {
+		t.Fatalf("seed cover: %v", err)
+	}
+	if _, err := database.ExecContext(context.Background(), `UPDATE cover_urls SET checked_at = datetime('now', '-40 days')`); err != nil {
+		t.Fatalf("age cover row: %v", err)
+	}
+
+	stub := &coverStubProvider{name: "itunes", result: &cover.Result{URL: "http://fresh/cover.jpg", Source: "itunes"}}
+	handler := getArtistCoverHandler(database, cover.NewResolver(stub), testFallbackGuard(), time.Hour, true)
+	response := performArtistRequest(t, handler, "/?artist_name=Radiohead")
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected re-resolved 200, got %d: %s", response.Code, response.Body.String())
+	}
+	var got albumArtistCoverResponse
+	if err := json.NewDecoder(response.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.CoverURL != "http://fresh/cover.jpg" {
+		t.Fatalf("expected fresh URL, got %q", got.CoverURL)
+	}
+	if stub.calls != 1 {
+		t.Fatalf("expected one re-resolution, got %d calls", stub.calls)
+	}
+}
+
+func TestArtistCoverStalePositiveServedWhenFallbackDisabled(t *testing.T) {
+	database := testCoverDB(t)
+	if err := db.UpsertCoverArt(context.Background(), database, db.CoverArtist, "Radiohead", "", "http://old/cover.jpg", "itunes"); err != nil {
+		t.Fatalf("seed cover: %v", err)
+	}
+	if _, err := database.ExecContext(context.Background(), `UPDATE cover_urls SET checked_at = datetime('now', '-40 days')`); err != nil {
+		t.Fatalf("age cover row: %v", err)
+	}
+
+	handler := getArtistCoverHandler(database, cover.NewResolver(&coverStubProvider{name: "lastfm"}), testFallbackGuard(), time.Hour, false)
+	response := performArtistRequest(t, handler, "/?artist_name=Radiohead")
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected stale cached 200, got %d: %s", response.Code, response.Body.String())
+	}
+	var got albumArtistCoverResponse
+	if err := json.NewDecoder(response.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.CoverURL != "http://old/cover.jpg" {
+		t.Fatalf("expected cached URL when fallback disabled, got %q", got.CoverURL)
 	}
 }
 

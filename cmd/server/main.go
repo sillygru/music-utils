@@ -17,6 +17,9 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "export" {
+		os.Exit(runExport(os.Args[2:]))
+	}
 	cfg, err := config.LoadAndValidate()
 	if err != nil {
 		slog.Error("invalid configuration", "error", err)
@@ -32,6 +35,8 @@ func main() {
 		"db_max_open_conns", cfg.DBMaxOpenConns,
 		"rate_limit_per_sec", cfg.RateLimitPerSec,
 		"rate_limit_per_min", cfg.RateLimitPerMin,
+		"fallback_per_min", cfg.FallbackPerMin,
+		"fallback_max_queue", cfg.FallbackMaxQueue,
 		"trust_proxy", cfg.TrustProxy,
 		"lrclib_fallback_enabled", cfg.LRCLIBFallbackEnabled,
 		"lrclib_base_url", cfg.LRCLIBBaseURL,
@@ -43,6 +48,10 @@ func main() {
 		"lastfm_base_url", cfg.LastfmBaseURL,
 		"cover_timeout_ms", cfg.CoverTimeoutMS,
 		"metadata_timeout_ms", cfg.MetadataTimeoutMS,
+		"cover_refresh_enabled", cfg.CoverRefreshEnabled,
+		"cover_refresh_after_days", cfg.CoverRefreshAfterDays,
+		"cover_refresh_start_hour", cfg.CoverRefreshStartHour,
+		"cover_refresh_end_hour", cfg.CoverRefreshEndHour,
 	)
 
 	metadataDB, err := db.Open(cfg.MetadataDBPath, db.Config{

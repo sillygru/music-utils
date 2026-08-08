@@ -1,42 +1,68 @@
 # music-utils API
 
-All endpoints are served on `:8080` by default and return JSON.
+A public, no-authentication API for music metadata, lyrics, and cover-art URLs.
 
-- Errors: `{"code": <http_status>, "message": "<description>"}`.
-- `/api/*` endpoints are rate limited per client IP.
-- Metadata and lyrics exact lookups are local-first, using separate SQLite databases.
-- The old `/api/get` and `/api/search` paths do not exist.
+**Base URL:** `https://api.music.gru0.dev/api/`
 
-## Metadata object
+No API key, no registration, no authentication. All responses are JSON.
+Self-hosted instances serve the identical endpoints at the same paths — see
+[Self-hosting](#self-hosting) at the bottom.
 
-`GET /api/metadata/get` and `GET /api/metadata/search` return objects with:
+## Quick start
 
-| Field | Type | Description |
-| --- | --- | --- |
-| `id` | integer | Local SQLite track ID. |
-| `trackName` | string | Song title. |
-| `artistName` | string | Artist name. |
-| `albumName` | string | Album/release title. |
-| `duration` | number | Seconds. |
-| `genre` | string | Best available genre/tag. |
-| `year` | integer | Release year. |
-| `releaseDate` | string | Provider release date, when available. |
-| `isrc` | string | ISRC, when available. |
-| `musicbrainzRecordingId` | string | Canonical recording MBID (legacy, when populated). |
-| `musicbrainzReleaseId` | string | Selected release MBID (legacy, when populated). |
-| `musicbrainzReleaseGroupId` | string | Release-group MBID (legacy, when populated). |
-| `musicbrainzArtistId` | string | Primary artist MBID (legacy, when populated). |
-| `coverUrl` | string | Cover URL returned by a provider, when available. |
-| `metadataSource` | string | Metadata provenance: `itunes`, `deezer`, or user-provided. |
-| `coverUrlSource` | string | Artwork provenance: `itunes` or `deezer`, when a cover URL was provided. |
+```sh
+curl 'https://api.music.gru0.dev/api/metadata/get?track_name=Paranoid%20Android&artist_name=Radiohead'
+```
+
+```js
+const res = await fetch(
+  'https://api.music.gru0.dev/api/lyrics/get?track_name=No%20Surprises&artist_name=Radiohead'
+);
+const data = await res.json();
+console.log(data.plainLyrics);
+```
+
+## Conventions
+
+- **Errors** are always `{"code": <http_status>, "message": "<description>"}`.
+- **Status codes:** `200` ok · `400` invalid input · `404` not found ·
+  `429` rate limited · `503` upstream temporarily busy · `500` internal error.
+- **Rate limits** apply per client IP (see [Rate limits](#rate-limits)).
+  `429` and `503` responses carry a `Retry-After` header — honor it.
+- **CORS:** the API is callable directly from browsers
+  (`Access-Control-Allow-Origin: *`).
+- **Etiquette:** send a descriptive `User-Agent` with contact information
+  (e.g. `my-app/1.0 (+https://example.com)`). The API proxies keyless upstream
+  sources with strict rate caps, so heavy or abusive usage degrades it for
+  everyone.
+- **IDs:** `id` values are local row identifiers. They are stable within an
+  instance but are not guaranteed to match across instances.
+
+## Endpoints
+
+| Endpoint | Description |
+| --- | --- |
+| `GET /healthz` | Health check (not rate limited) |
+| `GET /version` | Server version (not rate limited) |
+| `GET /api/metadata/get` | Exact metadata lookup; resolves upstream on a miss |
+| `GET /api/metadata/search` | Search the local catalog (never calls upstream) |
+| `GET /api/cover/get` | Cached song cover URL (never calls upstream) |
+| `GET /api/cover/artist` | Artist artwork; resolves upstream on a miss |
+| `GET /api/cover/album` | Album artwork; resolves upstream on a miss |
+| `GET /api/lyrics/get` | Exact lyrics lookup; resolves upstream on a miss |
+| `GET /api/lyrics/search` | Search lyrics and catalog (never calls upstream) |
+
+## `GET /healthz` and `GET /version`
+
+- `GET /healthz` → `{"status":"ok"}` — liveness probe; never rate limited.
+- `GET /version` → `{"version":"v0.3.0"}` — never rate limited.
 
 ## `GET /api/metadata/get`
 
-Exact song lookup. Checks SQLite first. If missing or not enriched and
-`METADATA_FALLBACK_ENABLED=true`, tries the metadata provider chain (iTunes,
-then Deezer) in order, stores the result, and returns the cached record. The
-dedicated Cover Art Archive call was removed; a cover URL is only kept when a
-provider includes one in its response for free.
+Exact song lookup by title and artist. Serves the cached record when
+available; on a miss it resolves through the upstream providers (iTunes, then
+Deezer), stores the result, and returns it. A cover URL is included when a
+provider returns one.
 
 Query parameters:
 
@@ -45,18 +71,55 @@ Query parameters:
 - `album_name` — optional narrowing hint.
 - `duration` — optional non-negative seconds hint.
 
-Example:
+Example response:
 
-```sh
-curl 'http://localhost:8080/api/metadata/get?track_name=Example%20Song&artist_name=Example%20Artist'
+```json
+{
+  "id": 42,
+  "trackName": "Paranoid Android",
+  "artistName": "Radiohead",
+  "albumName": "OK Computer",
+  "duration": 383,
+  "genre": "Alternative",
+  "year": 1997,
+  "releaseDate": "1997-05-28T07:00:00Z",
+  "isrc": "GBSTW9700021",
+  "musicbrainzRecordingId": "…",
+  "musicbrainzReleaseId": "…",
+  "musicbrainzReleaseGroupId": "…",
+  "musicbrainzArtistId": "…",
+  "coverUrl": "https://is1-ssl.mzstatic.com/…/600x600bb.jpg",
+  "metadataSource": "itunes",
+  "coverUrlSource": "itunes"
+}
 ```
 
-Responses: `200` metadata object, `400` invalid/missing input, `404` provider
-miss or disabled fallback, `429` rate limited, `500` internal error.
+| Field | Type | Description |
+| --- | --- | --- |
+| `id` | integer | Local track ID. |
+| `trackName` | string | Song title. |
+| `artistName` | string | Artist name. |
+| `albumName` | string | Album/release title. |
+| `duration` | number | Seconds. |
+| `genre` | string | Best available genre/tag (omitted when unknown). |
+| `year` | integer | Release year (omitted when unknown). |
+| `releaseDate` | string | Provider release date (omitted when unknown). |
+| `isrc` | string | ISRC, when available. |
+| `musicbrainzRecordingId` | string | Canonical recording MBID, when available. |
+| `musicbrainzReleaseId` | string | Selected release MBID, when available. |
+| `musicbrainzReleaseGroupId` | string | Release-group MBID, when available. |
+| `musicbrainzArtistId` | string | Primary artist MBID, when available. |
+| `coverUrl` | string | Cover URL returned by a provider, when available. |
+| `metadataSource` | string | Metadata provenance: `itunes`, `deezer`, or user-provided. |
+| `coverUrlSource` | string | Artwork provenance: `itunes` or `deezer`, when a cover URL is present. |
+
+Responses: `200` metadata object · `400` invalid/missing input · `404` not
+found · `429` rate limited · `503` upstream busy · `500` internal error.
 
 ## `GET /api/metadata/search`
 
-Searches only the local FTS5 catalog. It never calls an upstream API.
+Searches only the local catalog. It never calls an upstream API, so results
+are limited to content the instance has already cached.
 
 Query parameters:
 
@@ -64,12 +127,16 @@ Query parameters:
 - `limit`, default `20`, range `1–50`.
 
 ```sh
-curl 'http://localhost:8080/api/metadata/search?q=example&limit=20'
+curl 'https://api.music.gru0.dev/api/metadata/search?q=radiohead&limit=20'
 ```
+
+Responses: `200` JSON array of metadata objects (possibly empty) · `400`
+invalid input · `429` rate limited · `500` internal error.
 
 ## `GET /api/cover/get`
 
-Returns only cached artwork; it never calls upstream providers.
+Returns only cached song artwork; it never calls an upstream provider. To
+trigger enrichment on a miss, use `/api/metadata/get` instead.
 
 Query parameters: required `track_name` and `artist_name`; optional
 `album_name`.
@@ -78,24 +145,23 @@ Example response:
 
 ```json
 {
-  "id": 1,
-  "trackName": "Example Song",
-  "artistName": "Example Artist",
-  "albumName": "Example Album",
-  "coverUrl": "https://is1-ssl.mzstatic.com/.../600x600bb.jpg",
+  "id": 42,
+  "trackName": "Paranoid Android",
+  "artistName": "Radiohead",
+  "albumName": "OK Computer",
+  "coverUrl": "https://is1-ssl.mzstatic.com/…/600x600bb.jpg",
   "coverUrlSource": "itunes"
 }
 ```
 
-Responses: `200` cached cover, `400` invalid input, `404` not cached/not found,
-`429` rate limited, `500` internal error.
+Responses: `200` cached cover · `400` invalid input · `404` not cached ·
+`429` rate limited · `500` internal error.
 
 ## `GET /api/cover/artist`
 
-Returns artist artwork as a cover URL. It is an enrichment endpoint (unlike the
-cache-only `/api/cover/get`): on a miss it resolves the cover provider chain
-(Last.fm → iTunes → Deezer) in order, caches the winning URL, and returns it.
-The result is persisted in a dedicated cover database.
+Returns artist artwork as a cover URL. On a miss it resolves the provider
+chain (Last.fm → iTunes → Deezer) in order, caches the winning URL, and
+returns it.
 
 Query parameter: required `artist_name`.
 
@@ -106,18 +172,19 @@ Example response:
   "id": 1,
   "entityType": "artist",
   "artistName": "Radiohead",
-  "coverUrl": "https://is1-ssl.mzstatic.com/.../600x600bb.jpg",
+  "coverUrl": "https://is1-ssl.mzstatic.com/…/600x600bb.jpg",
   "coverUrlSource": "itunes"
 }
 ```
 
-Responses: `200` cover URL, `400` invalid input, `404` provider miss (negative
-cached for the cache window), `429` rate limited, `500` internal error.
+Responses: `200` cover URL · `400` invalid input · `404` provider miss
+(memoized for 24 hours) · `429` rate limited · `503` upstream busy · `500`
+internal error.
 
 ## `GET /api/cover/album`
 
-Returns album artwork as a cover URL, with the same enrichment and persistence
-behavior as `/api/cover/artist`.
+Album artwork, with the same enrichment and caching behavior as
+`/api/cover/artist`.
 
 Query parameters: required `artist_name` and `album_name`.
 
@@ -129,82 +196,101 @@ Example response:
   "entityType": "album",
   "artistName": "Radiohead",
   "albumName": "OK Computer",
-  "coverUrl": "https://img.deezer.com/.../xl.jpg",
+  "coverUrl": "https://e-cdns-images.dzcdn.net/…/xl.jpg",
   "coverUrlSource": "deezer"
 }
 ```
 
+Responses: `200` cover URL · `400` invalid input · `404` provider miss
+(memoized for 24 hours) · `429` rate limited · `503` upstream busy · `500`
+internal error.
+
 ## `GET /api/lyrics/get`
 
-Exact lyrics lookup. Checks SQLite first; on a miss and when
-`LRCLIB_FALLBACK_ENABLED=true`, fetches LRCLIB and caches the result.
+Exact lyrics lookup. Serves cached lyrics when available; on a miss it
+consults LRCLIB and caches the result.
 
-Parameters: required `track_name` and `artist_name`; optional `album_name` and
-non-negative `duration`.
+Query parameters: required `track_name` and `artist_name`; optional
+`album_name` and non-negative `duration`.
 
-Returns the lyrics fields `instrumental`, `plainLyrics`, and `syncedLyrics`,
-plus the track title, artist, album, duration, and local ID.
+Example response:
 
-```sh
-curl 'http://localhost:8080/api/lyrics/get?track_name=Example%20Song&artist_name=Example%20Artist'
+```json
+{
+  "id": 42,
+  "trackName": "No Surprises",
+  "artistName": "Radiohead",
+  "albumName": "OK Computer",
+  "duration": 229,
+  "instrumental": false,
+  "plainLyrics": "A heart that's full up like a landfill…",
+  "syncedLyrics": "[00:00.00] A heart that's full up like a landfill…"
+}
 ```
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `id` | integer | Local track ID. |
+| `trackName` | string | Song title. |
+| `artistName` | string | Artist name. |
+| `albumName` | string | Album/release title. |
+| `duration` | number | Seconds. |
+| `instrumental` | boolean | True for instrumental tracks (lyrics fields empty). |
+| `plainLyrics` | string | Plain-text lyrics. |
+| `syncedLyrics` | string | Timestamped LRC lyrics, when available. |
+
+Responses: `200` lyrics object · `400` invalid/missing input · `404` not
+found (memoized for 24 hours) · `429` rate limited · `503` upstream busy ·
+`500` internal error.
 
 ## `GET /api/lyrics/search`
 
-Searches the local FTS5 catalog and never calls LRCLIB.
+Searches the local catalog and never calls LRCLIB.
 
-Parameters: `q`, or one or more of `track_name`, `artist_name`, `album_name`;
-optional `limit` from `1–50`, default `20`.
+Query parameters: `q`, or one or more of `track_name`, `artist_name`,
+`album_name`; optional `limit` from `1–50`, default `20`.
 
 ```sh
-curl 'http://localhost:8080/api/lyrics/search?q=example&limit=20'
+curl 'https://api.music.gru0.dev/api/lyrics/search?q=no%20surprises&limit=20'
 ```
 
-## Health/version
+Responses: `200` JSON array of lyrics objects (possibly empty) · `400`
+invalid input · `429` rate limited · `500` internal error.
 
-- `GET /healthz` → `{"status":"ok"}`; not rate limited.
-- `GET /version` → `{"version":"v0.2.1"}`; not rate limited.
+## Rate limits
 
-## Database layout
+Current public policy, applied per client IP:
 
-`METADATA_DB_PATH` stores tracks, metadata, cover URLs, provenance, and metadata
-FTS5. `LYRICS_DB_PATH` stores lyrics bodies and their track associations. The
-`COVER_DB_PATH` stores album and artist cover URLs (and checked-misses) in a
-separate database. The service composes responses in Go; it does not use
-cross-database SQL joins. For an existing combined database, run the service
-once with that file as the metadata path and a new lyrics path to copy lyrics and
-remove the old combined lyrics tables safely.
+- **2 requests/second** and **60 requests/minute** on all `/api/*` endpoints.
+- **Cache hits do not consume the stricter upstream budget below**, but every
+  `/api/*` request counts toward the per-IP limits above.
+- Only requests that miss the cache and actually fetch from an upstream
+  source count against a separate, stricter cap: **5 upstream-triggering
+  requests/minute**. A client that repeatedly queries content the API does
+  not have will hit this second cap and receive `429`.
+- When the shared upstream queue is saturated, new misses fail fast with
+  `503` instead of waiting — retry after the `Retry-After` interval.
 
-## Album & artist cover behavior
+`/healthz` and `/version` are never rate limited. Limit values are current
+policy and may be adjusted; always honor `Retry-After` rather than assuming
+fixed numbers.
 
-Album and artist artwork is resolved by chaining three keyless sources in a
-fixed fallback order: **Last.fm** (HTML scrape), then **iTunes** (Search API,
-`entity=album`), then **Deezer** (`/search/artist` and `/search/album`). The
-first non-empty URL wins. Artist art on iTunes/Deezer is the artwork of the
-top-ranked album. The chain is throttled so iTunes is never hit more than once
-every two seconds, and Last.fm is scraped conservatively (~1 request per 2s).
-Spot URL upgrades rewrite low-resolution Last.fm CDN segments to `300x300` and
-iTunes `100x100` artwork to `600x600`.
+## Caching and data notes
 
-Both positive results and checked misses are upserted into `COVER_DB_PATH`; a
-miss is served from cache (without spending upstream budget) until the
-negative-cache window elapses. Only URLs are cached — cover image bytes are
-never downloaded.
+- The catalog grows as content is requested; popular content is served from
+  cache, while obscure content may take a moment on its first request.
+- **Not-found results are memoized for 24 hours** (lyrics in memory, cover
+  misses in the store). Re-requesting a missing song within the window will
+  not trigger another upstream lookup — retrying in a tight loop is both
+  pointless and rate-limited.
+- **Cover URLs are CDN links, not image data.** They can rotate or expire at
+  the CDN over time. If a client renders a broken image, re-request the
+  endpoint — stale URLs are re-resolved automatically. The API never serves
+  or stores image bytes.
 
-## Provider and cache behavior
+## Self-hosting
 
-iTunes and Deezer (secondary) are consulted on metadata misses in that order.
-Identical metadata lookups share an in-process cache with bounded lifetimes,
-including negative (not-found) results, so repeated misses and duplicate search
-rows stop re-hitting upstream. Provider responses are bounded and cached
-transactionally in SQLite. Search endpoints are local-only to keep upstream
-traffic predictable.
-
-LRCLIB remains the lyrics provider and uses its existing bounded client,
-User-Agent, timeout, and cache behavior.
-
-## Rate limiting
-
-`RATE_LIMIT_PER_SEC` controls burst/token-bucket rate and
-`RATE_LIMIT_PER_MIN` controls the rolling-minute cap. Rate-limited responses
-include `Retry-After`.
+The server is open source (MIT) and ships as a single static binary. A
+self-hosted instance serves the exact same endpoints at the same paths —
+clients only need a different base URL. See the project repository's
+README and deployment guide for configuration and operations.

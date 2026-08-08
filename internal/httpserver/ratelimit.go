@@ -92,30 +92,39 @@ func (l *rateLimiter) Handler(next http.Handler) http.Handler {
 		}
 
 		ip := clientIP(r, l.config.TrustProxy)
-		entry := l.entryFor(ip)
-		now := time.Now()
-
-		entry.lastSeen = now
-		entry.requests = recentRequests(entry.requests, now.Add(-time.Minute))
-
-		if len(entry.requests) >= l.config.RateLimitPerMin {
-			retryAfter := retryAfterWindow(entry.requests[0], now)
-			entry.mu.Unlock()
+		if allowed, retryAfter := l.allow(ip); !allowed {
 			setOutcome(r, "rate_limited")
 			writeRateLimitResponse(w, retryAfter)
 			return
 		}
-		if !entry.perSec.Allow() {
-			entry.mu.Unlock()
-			setOutcome(r, "rate_limited")
-			writeRateLimitResponse(w, 1)
-			return
-		}
-
-		entry.requests = append(entry.requests, now)
-		entry.mu.Unlock()
 		next.ServeHTTP(w, r)
 	})
+}
+
+// allow records one request for ip under the limiter's per-second and
+// per-minute limits and reports whether it may proceed. retryAfter is only
+// meaningful when allowed is false. It is safe to call concurrently and is
+// reused by the fallback budget limiter.
+func (l *rateLimiter) allow(ip string) (allowed bool, retryAfter int) {
+	entry := l.entryFor(ip)
+	now := time.Now()
+
+	entry.lastSeen = now
+	entry.requests = recentRequests(entry.requests, now.Add(-time.Minute))
+
+	if len(entry.requests) >= l.config.RateLimitPerMin {
+		retryAfter := retryAfterWindow(entry.requests[0], now)
+		entry.mu.Unlock()
+		return false, retryAfter
+	}
+	if !entry.perSec.Allow() {
+		entry.mu.Unlock()
+		return false, 1
+	}
+
+	entry.requests = append(entry.requests, now)
+	entry.mu.Unlock()
+	return true, 0
 }
 
 // entryFor returns an entry with its mutex held. The caller must unlock it.

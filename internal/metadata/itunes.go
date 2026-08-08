@@ -13,20 +13,21 @@ import (
 	"time"
 
 	"github.com/sillygru/music-utils/internal/db"
+	"github.com/sillygru/music-utils/internal/pacer"
 )
 
 const maxResponseBytes = 4 << 20
 
 type iTunesResult struct {
-	TrackName       string `json:"trackName"`
-	ArtistName      string `json:"artistName"`
-	CollectionName  string `json:"collectionName"`
-	TrackTimeMillis int64  `json:"trackTimeMillis"`
-	ReleaseDate     string `json:"releaseDate"`
+	TrackName        string `json:"trackName"`
+	ArtistName       string `json:"artistName"`
+	CollectionName   string `json:"collectionName"`
+	TrackTimeMillis  int64  `json:"trackTimeMillis"`
+	ReleaseDate      string `json:"releaseDate"`
 	PrimaryGenreName string `json:"primaryGenreName"`
-	ArtworkURL100   string `json:"artworkUrl100"`
-	ArtworkURL600   string `json:"artworkUrl600"`
-	ISRC            string `json:"isrc"`
+	ArtworkURL100    string `json:"artworkUrl100"`
+	ArtworkURL600    string `json:"artworkUrl600"`
+	ISRC             string `json:"isrc"`
 }
 
 type iTunesSearchResponse struct {
@@ -35,14 +36,21 @@ type iTunesSearchResponse struct {
 }
 
 // ITunes queries the iTunes Search API, which returns metadata and a cover
-// artwork URL in a single unauthenticated request.
+// artwork URL in a single unauthenticated request. Requests are paced to one
+// every 2 seconds (iTunes soft-caps at roughly 20 calls/min).
 type ITunes struct {
 	baseURL   string
 	userAgent string
 	client    *http.Client
+	pace      *pacer.Pacer
 }
 
-func NewITunes(baseURL, userAgent string, timeout time.Duration) (*ITunes, error) {
+// NewITunes builds an iTunes metadata provider. pace spaces requests to one
+// every 2 seconds (iTunes soft-caps at roughly 20 calls/min); when nil, a
+// fresh 2-second pacer is used. Pass a shared pacer when several providers
+// consume the same upstream host so their combined traffic stays within
+// budget.
+func NewITunes(baseURL, userAgent string, timeout time.Duration, pace *pacer.Pacer) (*ITunes, error) {
 	if strings.TrimSpace(baseURL) == "" {
 		baseURL = "https://itunes.apple.com"
 	}
@@ -52,10 +60,14 @@ func NewITunes(baseURL, userAgent string, timeout time.Duration) (*ITunes, error
 	if timeout <= 0 {
 		return nil, errors.New("iTunes timeout must be positive")
 	}
+	if pace == nil {
+		pace = pacer.New(2 * time.Second)
+	}
 	return &ITunes{
 		baseURL:   strings.TrimRight(strings.TrimSpace(baseURL), "/"),
 		userAgent: userAgent,
 		client:    &http.Client{Timeout: timeout},
+		pace:      pace,
 	}, nil
 }
 
@@ -98,6 +110,9 @@ func (c *ITunes) do(ctx context.Context, endpoint string, value any) error {
 	}
 	req.Header.Set("User-Agent", c.userAgent)
 	req.Header.Set("Accept", "application/json")
+	if err := c.pace.Wait(ctx); err != nil {
+		return err
+	}
 	response, err := c.client.Do(req)
 	if err != nil {
 		return fmt.Errorf("request iTunes: %w", err)
@@ -154,11 +169,11 @@ func itunesScore(candidate iTunesResult, input Input) int {
 func trackFromITunes(candidate *iTunesResult, input Input) *db.Track {
 	track := &db.Track{
 		Name:            firstNonEmpty(candidate.TrackName, input.TrackName),
-		ArtistName:     firstNonEmpty(candidate.ArtistName, input.ArtistName),
-		Duration:       input.Duration,
-		ISRC:           candidate.ISRC,
-		MetadataSource: "itunes",
-		Source:         "itunes",
+		ArtistName:      firstNonEmpty(candidate.ArtistName, input.ArtistName),
+		Duration:        input.Duration,
+		ISRC:            candidate.ISRC,
+		MetadataSource:  "itunes",
+		Source:          "itunes",
 		MetadataChecked: true,
 		CoverURLChecked: true,
 	}

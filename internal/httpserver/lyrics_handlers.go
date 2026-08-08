@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/sillygru/music-utils/internal/db"
 	"github.com/sillygru/music-utils/internal/lrclib"
@@ -33,7 +34,7 @@ type apiError struct {
 	Message string `json:"message"`
 }
 
-func getLyricsHandler(metadataDB, lyricsDB *sql.DB, client *lrclib.Client, fallbackEnabled bool) http.HandlerFunc {
+func getLyricsHandler(metadataDB, lyricsDB *sql.DB, client *lrclib.Client, lyricsMisses *lyricsMissCache, fallbacks *fallbackGuard, fallbackEnabled bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
 		trackName := strings.TrimSpace(query.Get("track_name"))
@@ -70,15 +71,30 @@ func getLyricsHandler(metadataDB, lyricsDB *sql.DB, client *lrclib.Client, fallb
 			return
 		}
 
+		missKey := lyricsMissKey(trackName, artistName, query.Get("album_name"), duration)
+		if lyricsMisses.Has(missKey, time.Now()) {
+			setOutcome(r, "miss")
+			writeJSON(w, http.StatusNotFound, apiError{Code: http.StatusNotFound, Message: "Track not found"})
+			return
+		}
+
 		if !fallbackEnabled || client == nil {
 			setOutcome(r, "miss")
 			writeJSON(w, http.StatusNotFound, apiError{Code: http.StatusNotFound, Message: "Track not found"})
 			return
 		}
 
+		release, ok := fallbacks.enter(r, w)
+		if !ok {
+			return
+		}
+		defer release()
+
 		remote, err := client.GetExact(r.Context(), trackName, artistName, query.Get("album_name"), duration)
 		if err != nil {
-			if !errors.Is(err, lrclib.ErrNotFound) {
+			if errors.Is(err, lrclib.ErrNotFound) {
+				lyricsMisses.Set(missKey, time.Now())
+			} else {
 				setRequestIssue(r, slog.LevelWarn, err.Error())
 			}
 			setOutcome(r, "miss")

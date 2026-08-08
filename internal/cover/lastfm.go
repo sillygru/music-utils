@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/sillygru/music-utils/internal/pacer"
 )
 
 // Last.fm scrapes artist/album pages over HTTPS and regex-extracts image URLs.
@@ -17,7 +19,7 @@ type Lastfm struct {
 	base   string
 	client *http.Client
 	agent  string
-	rate   *intervalLimiter
+	rate   *pacer.Pacer
 }
 
 // lastfmRegexes are tried in order; the first match that isn't a placeholder
@@ -57,7 +59,7 @@ func NewLastfm(baseURL, userAgent string, timeout time.Duration) (*Lastfm, error
 		base:   strings.TrimRight(baseURL, "/"),
 		client: &http.Client{Timeout: timeout},
 		agent:  userAgent,
-		rate:   &intervalLimiter{interval: 2 * time.Second},
+		rate:   pacer.New(2 * time.Second),
 	}, nil
 }
 

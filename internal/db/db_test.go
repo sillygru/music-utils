@@ -105,6 +105,44 @@ func TestCoverArtUpsertAndFind(t *testing.T) {
 	}
 }
 
+func TestCoverArtReupsertUpdatesNotDuplicates(t *testing.T) {
+	ctx := context.Background()
+	database, err := Open(":memory:", Config{MmapSize: 512 * 1024 * 1024, CacheSizeKB: -64000, MaxOpenConns: 1})
+	if err != nil {
+		t.Fatalf("open cover database: %v", err)
+	}
+	defer database.Close()
+	if err := MigrateCover(ctx, database); err != nil {
+		t.Fatalf("migrate cover database: %v", err)
+	}
+
+	// Artist rows store '' for the album column; re-upserting the same artist
+	// must update the single row rather than inserting a duplicate (SQLite
+	// UNIQUE indexes treat NULLs as distinct, so NULL album rows never
+	// conflict).
+	if err := UpsertCoverArt(ctx, database, CoverArtist, "Radiohead", "", "http://img/old.jpg", "itunes"); err != nil {
+		t.Fatalf("first artist upsert: %v", err)
+	}
+	if err := UpsertCoverArt(ctx, database, CoverArtist, "Radiohead", "", "http://img/new.jpg", "deezer"); err != nil {
+		t.Fatalf("second artist upsert: %v", err)
+	}
+
+	var count int
+	if err := database.QueryRowContext(ctx, `SELECT count(*) FROM cover_urls WHERE entity_type = 'artist' AND artist_name_lower = 'radiohead'`).Scan(&count); err != nil {
+		t.Fatalf("count artist rows: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected one artist row after re-upsert, got %d", count)
+	}
+	row, err := FindCoverArt(ctx, database, CoverArtist, "Radiohead", "")
+	if err != nil {
+		t.Fatalf("find re-upserted artist cover: %v", err)
+	}
+	if row.CoverURL != "http://img/new.jpg" || row.CoverSource != "deezer" {
+		t.Fatalf("expected the re-upsert to replace the URL, got %+v", row)
+	}
+}
+
 func TestReopenPreservesFTSIndex(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "music.db")
 	cfg := Config{

@@ -8,54 +8,21 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"sync"
-	"time"
+
+	"github.com/sillygru/music-utils/internal/pacer"
 )
 
 const maxResponseBytes = 4 << 20
 
-// intervalLimiter paces upstream requests so the slowest honored source's rate
-// limit is never exceeded. The whole chain shares one limiter so concurrent
-// lookups cannot burst one source past its budget.
-type intervalLimiter struct {
-	mu       sync.Mutex
-	interval time.Duration
-	last     time.Time
-}
-
-// Wait blocks until the caller may issue its next request. The first call is
-// never delayed but still records its timestamp so subsequent calls space out.
-func (l *intervalLimiter) Wait(ctx context.Context) error {
-	if l.interval <= 0 {
-		return nil
-	}
-	l.mu.Lock()
-	if l.last.IsZero() {
-		l.last = time.Now()
-		l.mu.Unlock()
-		return nil
-	}
-	wait := time.Until(l.last.Add(l.interval))
-	l.mu.Unlock()
-	if wait > 0 {
-		select {
-		case <-time.After(wait):
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
-	l.mu.Lock()
-	l.last = time.Now()
-	l.mu.Unlock()
-	return nil
-}
-
 // jsonClient performs authenticated-by-absence JSON GETs shared by iTunes and
 // Deezer. Non-2xx responses return an error rather than an empty result.
+// The rate field paces upstream requests so the slowest honored source's rate
+// limit is never exceeded: the whole chain shares one pacer per source so
+// concurrent lookups cannot burst a provider past its budget.
 type jsonClient struct {
 	client *http.Client
 	agent  string
-	rate   *intervalLimiter
+	rate   *pacer.Pacer
 }
 
 func (c *jsonClient) get(ctx context.Context, endpoint string, value any) error {

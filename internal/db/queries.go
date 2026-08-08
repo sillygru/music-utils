@@ -231,11 +231,10 @@ func UpsertCoverArt(ctx context.Context, database *sql.DB, entityType CoverEntit
 	if entityType != CoverArtist && entityType != CoverAlbum {
 		return fmt.Errorf("invalid cover entity type %q", entityType)
 	}
+	// Artist rows store '' (not NULL) for the album column: SQLite treats
+	// NULLs as distinct in UNIQUE indexes, so NULL would make the ON CONFLICT
+	// never match and every re-upsert would insert a duplicate row.
 	album := albumType(albumName)
-	var albumValue any
-	if album != "" {
-		albumValue = album
-	}
 	var urlValue any
 	if coverURL != "" {
 		urlValue = coverURL
@@ -250,7 +249,7 @@ ON CONFLICT(entity_type,artist_name_lower,album_name_lower) DO UPDATE SET
 cover_url=CASE WHEN excluded.cover_url IS NOT NULL THEN excluded.cover_url ELSE cover_url END,
 cover_source=CASE WHEN excluded.cover_url IS NOT NULL THEN excluded.cover_source ELSE cover_source END,
 checked_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP`,
-		string(entityType), normalize(artistName), albumValue, urlValue, sourceValue)
+		string(entityType), normalize(artistName), album, urlValue, sourceValue)
 	if err != nil {
 		return fmt.Errorf("upsert cover art: %w", err)
 	}

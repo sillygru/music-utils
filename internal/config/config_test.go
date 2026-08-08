@@ -20,7 +20,7 @@ func TestLoadLRCLIBDefaults(t *testing.T) {
 	if !cfg.LRCLIBFallbackEnabled || cfg.LRCLIBBaseURL != "https://lrclib.net/api" || cfg.LRCLIBTimeoutMS != 5000 {
 		t.Fatalf("unexpected LRCLIB defaults: %+v", cfg)
 	}
-	if cfg.LRCLIBUserAgent != "music-utils/v0.2.1 (+https://gru0.dev)" {
+	if cfg.LRCLIBUserAgent != "music-utils/v0.3.0 (+https://gru0.dev)" {
 		t.Fatalf("unexpected default LRCLIB user agent: %q", cfg.LRCLIBUserAgent)
 	}
 }
@@ -49,6 +49,42 @@ func TestLoadRateLimitDefaults(t *testing.T) {
 	}
 	if cfg.TrustProxy {
 		t.Fatal("expected TRUST_PROXY to default to false")
+	}
+}
+
+func TestLoadFallbackDefaults(t *testing.T) {
+	clearRateLimitEnv(t)
+	t.Setenv("FALLBACK_PER_MIN", "")
+	t.Setenv("FALLBACK_MAX_QUEUE", "")
+
+	cfg := Load()
+	if cfg.FallbackPerMin != 10 || cfg.FallbackMaxQueue != 5 {
+		t.Fatalf("unexpected fallback defaults: %+v", cfg)
+	}
+}
+
+func TestLoadCoverRefreshDefaults(t *testing.T) {
+	clearRateLimitEnv(t)
+	for _, name := range []string{"COVER_REFRESH_ENABLED", "COVER_REFRESH_AFTER_DAYS", "COVER_REFRESH_START_HOUR", "COVER_REFRESH_END_HOUR", "COVER_REFRESH_MAX_ROWS", "COVER_REFRESH_MAX_RECHECK"} {
+		t.Setenv(name, "")
+	}
+
+	cfg := Load()
+	if !cfg.CoverRefreshEnabled || cfg.CoverRefreshAfterDays != 30 || cfg.CoverRefreshStartHour != 2 || cfg.CoverRefreshEndHour != 5 {
+		t.Fatalf("unexpected cover refresh defaults: %+v", cfg)
+	}
+	if cfg.CoverRefreshMaxRows != 2000 || cfg.CoverRefreshMaxRecheck != 200 {
+		t.Fatalf("unexpected cover refresh caps: %+v", cfg)
+	}
+}
+
+func TestLoadCoverRefreshMidnightStartHour(t *testing.T) {
+	clearRateLimitEnv(t)
+	t.Setenv("COVER_REFRESH_START_HOUR", "0")
+
+	cfg := Load()
+	if cfg.CoverRefreshStartHour != 0 {
+		t.Fatalf("expected start hour 0 to be honored, got %d", cfg.CoverRefreshStartHour)
 	}
 }
 

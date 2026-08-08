@@ -22,15 +22,15 @@ type albumArtistCoverResponse struct {
 	CoverSource string `json:"coverUrlSource,omitempty"`
 }
 
-func getArtistCoverHandler(database *sql.DB, resolver *cover.Resolver, fallbackEnabled bool) http.HandlerFunc {
-	return handleEntityCover(database, resolver, fallbackEnabled, db.CoverArtist)
+func getArtistCoverHandler(database *sql.DB, resolver *cover.Resolver, fallbacks *fallbackGuard, refreshAfter time.Duration, fallbackEnabled bool) http.HandlerFunc {
+	return handleEntityCover(database, resolver, fallbacks, refreshAfter, fallbackEnabled, db.CoverArtist)
 }
 
-func getAlbumCoverHandler(database *sql.DB, resolver *cover.Resolver, fallbackEnabled bool) http.HandlerFunc {
-	return handleEntityCover(database, resolver, fallbackEnabled, db.CoverAlbum)
+func getAlbumCoverHandler(database *sql.DB, resolver *cover.Resolver, fallbacks *fallbackGuard, refreshAfter time.Duration, fallbackEnabled bool) http.HandlerFunc {
+	return handleEntityCover(database, resolver, fallbacks, refreshAfter, fallbackEnabled, db.CoverAlbum)
 }
 
-func handleEntityCover(database *sql.DB, resolver *cover.Resolver, fallbackEnabled bool, entityType db.CoverEntity) http.HandlerFunc {
+func handleEntityCover(database *sql.DB, resolver *cover.Resolver, fallbacks *fallbackGuard, refreshAfter time.Duration, fallbackEnabled bool, entityType db.CoverEntity) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		artist := strings.TrimSpace(r.URL.Query().Get("artist_name"))
 		album := strings.TrimSpace(r.URL.Query().Get("album_name"))
@@ -52,12 +52,19 @@ func handleEntityCover(database *sql.DB, resolver *cover.Resolver, fallbackEnabl
 			return
 		}
 		if err == nil {
-			if cached.CoverURL != "" {
+			if cached.CoverURL != "" && !coverPositiveStale(cached.CheckedAt, refreshAfter) {
 				setOutcome(r, "local_hit")
 				writeJSON(w, http.StatusOK, albumArtistCoverFromRow(cached, entityType, artist, album))
 				return
 			}
-			if checkedRecently(cached.CheckedAt) {
+			if cached.CoverURL != "" && (!fallbackEnabled || resolver == nil) {
+				// Stale positive with no fallback to refresh it: serving the
+				// cached URL beats returning 404.
+				setOutcome(r, "local_hit")
+				writeJSON(w, http.StatusOK, albumArtistCoverFromRow(cached, entityType, artist, album))
+				return
+			}
+			if cached.CoverURL == "" && checkedRecently(cached.CheckedAt) {
 				// Fresh negative cache: do not spend upstream budget again.
 				setOutcome(r, "miss")
 				writeJSON(w, http.StatusNotFound, apiError{Code: http.StatusNotFound, Message: "Cover not found"})
@@ -70,6 +77,12 @@ func handleEntityCover(database *sql.DB, resolver *cover.Resolver, fallbackEnabl
 			writeJSON(w, http.StatusNotFound, apiError{Code: http.StatusNotFound, Message: "Cover not found"})
 			return
 		}
+
+		release, ok := fallbacks.enter(r, w)
+		if !ok {
+			return
+		}
+		defer release()
 
 		result, lookupErr := resolver.Lookup(r.Context(), toKind(entityType), cover.Input{ArtistName: artist, AlbumName: album})
 		if lookupErr != nil {
@@ -115,6 +128,23 @@ func checkedRecently(checkedAt string) bool {
 		return false
 	}
 	return time.Since(checked) < cover.NegativeCacheTTL
+}
+
+// coverPositiveStale reports whether a cached positive cover row should be
+// re-resolved because its last check is older than refreshAfter. A zero or
+// negative refreshAfter disables staleness (always serve the cached URL).
+func coverPositiveStale(checkedAt string, refreshAfter time.Duration) bool {
+	if refreshAfter <= 0 {
+		return false
+	}
+	if checkedAt == "" {
+		return true
+	}
+	checked, err := time.Parse(lastFMTimeFormat, checkedAt)
+	if err != nil {
+		return false
+	}
+	return time.Since(checked) > refreshAfter
 }
 
 func albumArtistCoverFromRow(row *db.CoverArt, entityType db.CoverEntity, artist, album string) albumArtistCoverResponse {

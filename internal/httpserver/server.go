@@ -16,6 +16,7 @@ import (
 	"github.com/sillygru/music-utils/internal/db"
 	"github.com/sillygru/music-utils/internal/lrclib"
 	"github.com/sillygru/music-utils/internal/metadata"
+	"github.com/sillygru/music-utils/internal/pacer"
 	"github.com/sillygru/music-utils/internal/version"
 )
 
@@ -98,8 +99,11 @@ func NewWithLogger(cfg config.Config, metadataDB, lyricsDB, coverDB *sql.DB, log
 		logger = slog.Default()
 	}
 	client := newLRCLIBClient(cfg, logger)
-	metadataResolver := newMetadataResolver(cfg, logger)
-	coverResolver := newCoverResolver(cfg, logger)
+	// iTunes is consumed by both the metadata and cover resolvers; share one
+	// pacer so their combined traffic never exceeds iTunes' ~20 calls/min cap.
+	itunesPace := pacer.New(2 * time.Second)
+	metadataResolver := newMetadataResolver(cfg, logger, itunesPace)
+	coverResolver := newCoverResolver(cfg, logger, itunesPace)
 	if coverDB == nil {
 		var err error
 		coverDB, err = coverDatabase()
@@ -109,19 +113,26 @@ func NewWithLogger(cfg config.Config, metadataDB, lyricsDB, coverDB *sql.DB, log
 		}
 	}
 
+	lyricsMisses := newLyricsMissCache()
+	fallbacks := newFallbackGuard(cfg)
+	coverRefreshAfter := time.Duration(cfg.CoverRefreshAfterDays) * 24 * time.Hour
+	coverRefresher := newCoverRefreshJob(cfg, coverDB, coverResolver, logger)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", healthz)
 	mux.HandleFunc("GET /version", versionHandler)
-	mux.HandleFunc("GET /api/lyrics/get", getLyricsHandler(metadataDB, lyricsDB, client, cfg.LRCLIBFallbackEnabled))
+	mux.HandleFunc("GET /api/lyrics/get", getLyricsHandler(metadataDB, lyricsDB, client, lyricsMisses, fallbacks, cfg.LRCLIBFallbackEnabled))
 	mux.HandleFunc("GET /api/lyrics/search", searchLyricsHandler(metadataDB, lyricsDB))
-	mux.HandleFunc("GET /api/metadata/get", getMetadataHandler(metadataDB, metadataResolver, cfg.MetadataFallbackEnabled))
+	mux.HandleFunc("GET /api/metadata/get", getMetadataHandler(metadataDB, metadataResolver, fallbacks, cfg.MetadataFallbackEnabled))
 	mux.HandleFunc("GET /api/metadata/search", searchMetadataHandler(metadataDB))
 	mux.HandleFunc("GET /api/cover/get", getCoverHandler(metadataDB))
-	mux.HandleFunc("GET /api/cover/artist", getArtistCoverHandler(coverDB, coverResolver, cfg.CoverFallbackEnabled))
-	mux.HandleFunc("GET /api/cover/album", getAlbumCoverHandler(coverDB, coverResolver, cfg.CoverFallbackEnabled))
+	mux.HandleFunc("GET /api/cover/artist", getArtistCoverHandler(coverDB, coverResolver, fallbacks, coverRefreshAfter, cfg.CoverFallbackEnabled))
+	mux.HandleFunc("GET /api/cover/album", getAlbumCoverHandler(coverDB, coverResolver, fallbacks, coverRefreshAfter, cfg.CoverFallbackEnabled))
 
 	limiter := newRateLimiter(cfg)
-	application := recoverMiddleware(limiter.Handler(mux), logger)
+	// CORS wraps the limiter so every response (including 429/503) carries the
+	// headers browsers need, and preflight requests are answered before they
+	// can consume rate-limit budget.
+	application := recoverMiddleware(corsMiddleware(limiter.Handler(mux)), logger)
 	server := &http.Server{
 		Addr:              ":" + normalizedPort(cfg.Port),
 		Handler:           requestLogger(application, logger),
@@ -132,10 +143,12 @@ func NewWithLogger(cfg config.Config, metadataDB, lyricsDB, coverDB *sql.DB, log
 		MaxHeaderBytes:    1 << 20,
 	}
 	server.RegisterOnShutdown(limiter.Stop)
+	server.RegisterOnShutdown(fallbacks.Stop)
+	server.RegisterOnShutdown(coverRefresher.Stop)
 	return server
 }
 
-func newCoverResolver(cfg config.Config, logger *slog.Logger) *cover.Resolver {
+func newCoverResolver(cfg config.Config, logger *slog.Logger, itunesPace *pacer.Pacer) *cover.Resolver {
 	timeout := time.Duration(cfg.CoverTimeoutMS) * time.Millisecond
 	userAgent := cfg.CoverUserAgent
 	var providers []cover.Provider
@@ -145,7 +158,7 @@ func newCoverResolver(cfg config.Config, logger *slog.Logger) *cover.Resolver {
 	} else {
 		providers = append(providers, lastfm)
 	}
-	if itunes, err := cover.NewITunes(cfg.ITunesBaseURL, userAgent, timeout); err != nil {
+	if itunes, err := cover.NewITunes(cfg.ITunesBaseURL, userAgent, timeout, itunesPace); err != nil {
 		logger.Error("configure iTunes cover provider", "error", err)
 	} else {
 		providers = append(providers, itunes)
@@ -175,12 +188,12 @@ func coverDatabase() (*sql.DB, error) {
 	return database, nil
 }
 
-func newMetadataResolver(cfg config.Config, logger *slog.Logger) *metadata.Resolver {
+func newMetadataResolver(cfg config.Config, logger *slog.Logger, itunesPace *pacer.Pacer) *metadata.Resolver {
 	timeout := time.Duration(cfg.MetadataTimeoutMS) * time.Millisecond
 	userAgent := cfg.MetadataUserAgent
 	var providers []metadata.Provider
 
-	if itunes, err := metadata.NewITunes(cfg.ITunesBaseURL, userAgent, timeout); err != nil {
+	if itunes, err := metadata.NewITunes(cfg.ITunesBaseURL, userAgent, timeout, itunesPace); err != nil {
 		logger.Error("configure iTunes provider", "error", err)
 	} else {
 		providers = append(providers, itunes)
@@ -243,6 +256,25 @@ func requestLogger(next http.Handler, logger *slog.Logger) http.Handler {
 			attrs = append(attrs, "detail", state.detail)
 		}
 		logger.Log(r.Context(), state.level, "request", attrs...)
+	})
+}
+
+// corsMiddleware makes the API callable directly from browsers. It sets
+// permissive CORS headers on every response and answers OPTIONS preflight
+// requests with 204 before they reach the rate limiter.
+func corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		header := w.Header()
+		header.Set("Access-Control-Allow-Origin", "*")
+		if r.Method == http.MethodOptions {
+			setOutcome(r, "preflight")
+			header.Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+			header.Set("Access-Control-Allow-Headers", "*")
+			header.Set("Access-Control-Max-Age", "86400")
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
 	})
 }
 

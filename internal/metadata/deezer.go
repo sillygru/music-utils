@@ -12,21 +12,22 @@ import (
 	"time"
 
 	"github.com/sillygru/music-utils/internal/db"
+	"github.com/sillygru/music-utils/internal/pacer"
 )
 
 type deezerAlbum struct {
-	Title   string `json:"title"`
+	Title    string `json:"title"`
 	CoverBig string `json:"cover_big"`
 }
 
 type deezerTrack struct {
-	ID          int64        `json:"id"`
-	Title       string       `json:"title"`
+	ID          int64                 `json:"id"`
+	Title       string                `json:"title"`
 	Artist      struct{ Name string } `json:"artist"`
-	Album       deezerAlbum  `json:"album"`
-	Duration    float64      `json:"duration"`
-	ISRC        string       `json:"isrc"`
-	ReleaseDate string       `json:"release_date"`
+	Album       deezerAlbum           `json:"album"`
+	Duration    float64               `json:"duration"`
+	ISRC        string                `json:"isrc"`
+	ReleaseDate string                `json:"release_date"`
 }
 
 type deezerSearchResponse struct {
@@ -34,11 +35,14 @@ type deezerSearchResponse struct {
 }
 
 // Deezer queries the public Deezer API, which exposes metadata, ISRC, and a
-// cover URL without authentication.
+// cover URL without authentication. Requests are paced to one every 2 seconds:
+// Deezer permits roughly 50 per 5s, but it is the secondary provider, so
+// conservatism costs nothing.
 type Deezer struct {
 	baseURL   string
 	userAgent string
 	client    *http.Client
+	pace      *pacer.Pacer
 }
 
 func NewDeezer(baseURL, userAgent string, timeout time.Duration) (*Deezer, error) {
@@ -55,6 +59,7 @@ func NewDeezer(baseURL, userAgent string, timeout time.Duration) (*Deezer, error
 		baseURL:   strings.TrimRight(strings.TrimSpace(baseURL), "/"),
 		userAgent: userAgent,
 		client:    &http.Client{Timeout: timeout},
+		pace:      pacer.New(2 * time.Second),
 	}, nil
 }
 
@@ -83,10 +88,10 @@ func (c *Deezer) Lookup(ctx context.Context, input Input) (*db.Track, error) {
 func deezerQuery(input Input) string {
 	var parts []string
 	if track := strings.TrimSpace(input.TrackName); track != "" {
-		parts = append(parts, `track:"`+strings.ReplaceAll(track, `"`, `\"`) + `"`)
+		parts = append(parts, `track:"`+strings.ReplaceAll(track, `"`, `\"`)+`"`)
 	}
 	if artist := strings.TrimSpace(input.ArtistName); artist != "" {
-		parts = append(parts, `artist:"`+strings.ReplaceAll(artist, `"`, `\"`) + `"`)
+		parts = append(parts, `artist:"`+strings.ReplaceAll(artist, `"`, `\"`)+`"`)
 	}
 	if len(parts) == 0 {
 		return ""
@@ -101,6 +106,9 @@ func (c *Deezer) do(ctx context.Context, endpoint string, value any) error {
 	}
 	req.Header.Set("User-Agent", c.userAgent)
 	req.Header.Set("Accept", "application/json")
+	if err := c.pace.Wait(ctx); err != nil {
+		return err
+	}
 	response, err := c.client.Do(req)
 	if err != nil {
 		return fmt.Errorf("request Deezer: %w", err)

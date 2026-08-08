@@ -32,7 +32,7 @@ type metadataResponse struct {
 	CoverURLSource            string  `json:"coverUrlSource,omitempty"`
 }
 
-func getMetadataHandler(database *sql.DB, resolver *metadata.Resolver, fallbackEnabled bool) http.HandlerFunc {
+func getMetadataHandler(database *sql.DB, resolver *metadata.Resolver, fallbacks *fallbackGuard, fallbackEnabled bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
 		name := strings.TrimSpace(query.Get("track_name"))
@@ -76,6 +76,13 @@ func getMetadataHandler(database *sql.DB, resolver *metadata.Resolver, fallbackE
 			writeJSON(w, http.StatusNotFound, apiError{Code: http.StatusNotFound, Message: "Track not found"})
 			return
 		}
+
+		release, ok := fallbacks.enter(r, w)
+		if !ok {
+			return
+		}
+		defer release()
+
 		remote, err := resolver.Lookup(r.Context(), metadata.Input{TrackName: name, ArtistName: artist, AlbumName: album, Duration: duration})
 		if err != nil {
 			if !errors.Is(err, metadata.ErrNotFound) {

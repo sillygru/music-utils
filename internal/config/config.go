@@ -22,6 +22,14 @@ const (
 	defaultRateLimitPerSec         = 10
 	defaultRateLimitPerMin         = 180
 	defaultTrustProxy              = false
+	defaultFallbackPerMin          = 10
+	defaultFallbackMaxQueue        = 5
+	defaultCoverRefreshEnabled     = true
+	defaultCoverRefreshAfterDays   = 30
+	defaultCoverRefreshStartHour   = 2
+	defaultCoverRefreshEndHour     = 5
+	defaultCoverRefreshMaxRows     = 2000
+	defaultCoverRefreshMaxRecheck  = 200
 	defaultLRCLIBFallbackEnabled   = true
 	defaultLRCLIBBaseURL           = "https://lrclib.net/api"
 	defaultLRCLIBTimeoutMS         = 5000
@@ -46,6 +54,14 @@ type Config struct {
 	RateLimitPerSec         int
 	RateLimitPerMin         int
 	TrustProxy              bool
+	FallbackPerMin          int
+	FallbackMaxQueue        int
+	CoverRefreshEnabled     bool
+	CoverRefreshAfterDays   int
+	CoverRefreshStartHour   int
+	CoverRefreshEndHour     int
+	CoverRefreshMaxRows     int
+	CoverRefreshMaxRecheck  int
 	LRCLIBFallbackEnabled   bool
 	LRCLIBBaseURL           string
 	LRCLIBUserAgent         string
@@ -77,6 +93,14 @@ func Load() Config {
 		RateLimitPerSec:         intOrDefault("RATE_LIMIT_PER_SEC", defaultRateLimitPerSec),
 		RateLimitPerMin:         intOrDefault("RATE_LIMIT_PER_MIN", defaultRateLimitPerMin),
 		TrustProxy:              boolOrDefault("TRUST_PROXY", defaultTrustProxy),
+		FallbackPerMin:          intOrDefault("FALLBACK_PER_MIN", defaultFallbackPerMin),
+		FallbackMaxQueue:        intOrDefault("FALLBACK_MAX_QUEUE", defaultFallbackMaxQueue),
+		CoverRefreshEnabled:     boolOrDefault("COVER_REFRESH_ENABLED", defaultCoverRefreshEnabled),
+		CoverRefreshAfterDays:   intOrDefault("COVER_REFRESH_AFTER_DAYS", defaultCoverRefreshAfterDays),
+		CoverRefreshStartHour:   hourOrDefault("COVER_REFRESH_START_HOUR", defaultCoverRefreshStartHour),
+		CoverRefreshEndHour:     hourOrDefault("COVER_REFRESH_END_HOUR", defaultCoverRefreshEndHour),
+		CoverRefreshMaxRows:     intOrDefault("COVER_REFRESH_MAX_ROWS", defaultCoverRefreshMaxRows),
+		CoverRefreshMaxRecheck:  intOrDefault("COVER_REFRESH_MAX_RECHECK", defaultCoverRefreshMaxRecheck),
 		LRCLIBFallbackEnabled:   boolOrDefault("LRCLIB_FALLBACK_ENABLED", defaultLRCLIBFallbackEnabled),
 		LRCLIBBaseURL:           valueOrDefault("LRCLIB_BASE_URL", defaultLRCLIBBaseURL),
 		LRCLIBUserAgent:         valueOrDefault("LRCLIB_USER_AGENT", defaultLRCLIBUserAgent()),
@@ -138,6 +162,24 @@ func (c Config) Validate() error {
 	if c.RateLimitPerSec < 1 || c.RateLimitPerMin < 1 {
 		return fmt.Errorf("rate limits must be positive")
 	}
+	if c.FallbackPerMin < 1 {
+		return fmt.Errorf("FALLBACK_PER_MIN must be positive")
+	}
+	if c.FallbackMaxQueue < 1 {
+		return fmt.Errorf("FALLBACK_MAX_QUEUE must be positive")
+	}
+	if c.CoverRefreshAfterDays < 1 {
+		return fmt.Errorf("COVER_REFRESH_AFTER_DAYS must be positive")
+	}
+	if c.CoverRefreshStartHour < 0 || c.CoverRefreshStartHour > 23 || c.CoverRefreshEndHour < 0 || c.CoverRefreshEndHour > 23 {
+		return fmt.Errorf("COVER_REFRESH_START_HOUR and COVER_REFRESH_END_HOUR must be between 0 and 23")
+	}
+	if c.CoverRefreshMaxRows < 1 {
+		return fmt.Errorf("COVER_REFRESH_MAX_ROWS must be positive")
+	}
+	if c.CoverRefreshMaxRecheck < 1 {
+		return fmt.Errorf("COVER_REFRESH_MAX_RECHECK must be positive")
+	}
 	if c.LRCLIBTimeoutMS < 1 || c.MetadataTimeoutMS < 1 || c.CoverTimeoutMS < 1 {
 		return fmt.Errorf("upstream timeouts must be positive")
 	}
@@ -178,7 +220,7 @@ func validateEnvironment() error {
 	if err := validateIntEnv("DB_CACHE_SIZE_KB"); err != nil {
 		return err
 	}
-	for _, name := range []string{"DB_MAX_OPEN_CONNS", "RATE_LIMIT_PER_SEC", "RATE_LIMIT_PER_MIN", "LRCLIB_TIMEOUT_MS", "METADATA_TIMEOUT_MS", "COVER_TIMEOUT_MS"} {
+	for _, name := range []string{"DB_MAX_OPEN_CONNS", "RATE_LIMIT_PER_SEC", "RATE_LIMIT_PER_MIN", "FALLBACK_PER_MIN", "FALLBACK_MAX_QUEUE", "COVER_REFRESH_AFTER_DAYS", "COVER_REFRESH_MAX_ROWS", "COVER_REFRESH_MAX_RECHECK", "LRCLIB_TIMEOUT_MS", "METADATA_TIMEOUT_MS", "COVER_TIMEOUT_MS"} {
 		if err := validatePositiveIntEnv(name); err != nil {
 			return err
 		}
@@ -186,7 +228,7 @@ func validateEnvironment() error {
 	if err := validatePortEnv(); err != nil {
 		return err
 	}
-	for _, name := range []string{"TRUST_PROXY", "LRCLIB_FALLBACK_ENABLED", "METADATA_FALLBACK_ENABLED", "COVER_FALLBACK_ENABLED"} {
+	for _, name := range []string{"TRUST_PROXY", "LRCLIB_FALLBACK_ENABLED", "METADATA_FALLBACK_ENABLED", "COVER_FALLBACK_ENABLED", "COVER_REFRESH_ENABLED"} {
 		if value := strings.TrimSpace(os.Getenv(name)); value != "" {
 			if _, err := strconv.ParseBool(value); err != nil {
 				return fmt.Errorf("%s must be a boolean", name)
@@ -257,6 +299,20 @@ func intOrDefault(name string, fallback int) int {
 	}
 	parsed, err := strconv.Atoi(value)
 	if err != nil || parsed < 1 {
+		return fallback
+	}
+	return parsed
+}
+
+// hourOrDefault reads a 0-23 hour value, allowing 0 (midnight), which
+// intOrDefault would otherwise reject as below its positive floor.
+func hourOrDefault(name string, fallback int) int {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
 		return fallback
 	}
 	return parsed

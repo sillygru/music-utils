@@ -7,6 +7,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/sillygru/music-utils/internal/pacer"
 )
 
 type itunesResult struct {
@@ -25,9 +27,12 @@ type ITunes struct {
 	client *jsonClient
 }
 
-// NewITunes builds an iTunes cover provider. rate limits requests to one every
-// 2 seconds (iTunes soft-caps at roughly 20 requests/min).
-func NewITunes(baseURL, userAgent string, timeout time.Duration) (*ITunes, error) {
+// NewITunes builds an iTunes cover provider. pace spaces requests to one
+// every 2 seconds (iTunes soft-caps at roughly 20 requests/min); when nil, a
+// fresh 2-second pacer is used. Pass a shared pacer when several providers
+// consume the same upstream host so their combined traffic stays within
+// budget.
+func NewITunes(baseURL, userAgent string, timeout time.Duration, pace *pacer.Pacer) (*ITunes, error) {
 	baseURL = strings.TrimSpace(baseURL)
 	if baseURL == "" {
 		baseURL = "https://itunes.apple.com"
@@ -38,12 +43,15 @@ func NewITunes(baseURL, userAgent string, timeout time.Duration) (*ITunes, error
 	if timeout <= 0 {
 		return nil, fmt.Errorf("iTunes timeout must be positive")
 	}
+	if pace == nil {
+		pace = pacer.New(2 * time.Second)
+	}
 	return &ITunes{
 		base: strings.TrimRight(baseURL, "/"),
 		client: &jsonClient{
 			client: &http.Client{Timeout: timeout},
 			agent:  userAgent,
-			rate:   &intervalLimiter{interval: 2 * time.Second},
+			rate:   pace,
 		},
 	}, nil
 }

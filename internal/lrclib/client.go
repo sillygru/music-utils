@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/sillygru/music-utils/internal/pacer"
 )
 
 var ErrNotFound = errors.New("lrclib track not found")
@@ -18,6 +20,10 @@ var ErrNotFound = errors.New("lrclib track not found")
 const (
 	maxResponseBytes = 2 << 20
 	maxIdleConns     = 100
+	// requestInterval paces LRCLIB to one request per second process-wide.
+	// LRCLIB is community-run with no documented quota; a gentle shared rate
+	// keeps the server's IP welcome regardless of client traffic.
+	requestInterval = time.Second
 )
 
 // RemoteResult is the response shape returned by LRCLIB's exact lookup.
@@ -36,6 +42,7 @@ type Client struct {
 	baseURL   string
 	userAgent string
 	http      *http.Client
+	pace      *pacer.Pacer
 }
 
 // New creates a client for baseURL, which should point at LRCLIB's /api path.
@@ -64,6 +71,7 @@ func New(baseURL, userAgent string, timeout time.Duration) (*Client, error) {
 		baseURL:   baseURL,
 		userAgent: userAgent,
 		http:      &http.Client{Timeout: timeout, Transport: transport},
+		pace:      pacer.New(requestInterval),
 	}, nil
 }
 
@@ -94,6 +102,9 @@ func (c *Client) GetExact(ctx context.Context, trackName, artistName, albumName 
 	req.Header.Set("User-Agent", c.userAgent)
 	req.Header.Set("Accept", "application/json")
 
+	if err := c.pace.Wait(ctx); err != nil {
+		return nil, err
+	}
 	response, err := c.http.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("request LRCLIB: %w", err)

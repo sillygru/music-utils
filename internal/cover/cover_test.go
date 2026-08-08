@@ -26,7 +26,7 @@ func TestITunesArtistImage(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := NewITunes(server.URL, "test-agent", time.Second)
+	client, err := NewITunes(server.URL, "test-agent", time.Second, nil)
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
@@ -49,7 +49,7 @@ func TestITunesAlbumQueryConcatenatedTerm(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := NewITunes(server.URL, "test-agent", time.Second)
+	client, err := NewITunes(server.URL, "test-agent", time.Second, nil)
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}

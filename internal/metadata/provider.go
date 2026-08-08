@@ -12,7 +12,7 @@ var ErrNotFound = errors.New("track not found in any metadata provider")
 
 // Input is the normalized identity used to look up a track.
 type Input struct {
-	TrackName string
+	TrackName  string
 	ArtistName string
 	AlbumName  string
 	Duration   float64
