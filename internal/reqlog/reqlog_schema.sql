@@ -29,5 +29,6 @@ CREATE TABLE IF NOT EXISTS request_log (
     outcome_id  INTEGER NOT NULL,               -- local_hit, miss, rate_limited, ...
     cache_ms    INTEGER NOT NULL DEFAULT 0,     -- time in the local cache lookup
     upstream_ms INTEGER NOT NULL DEFAULT 0,     -- time talking to upstream providers
-    params      TEXT NOT NULL DEFAULT ''        -- raw query string, truncated
+    params      TEXT NOT NULL DEFAULT '',        -- raw query string, truncated
+    user_agent  TEXT NOT NULL DEFAULT ''         -- client User-Agent header, truncated
 );

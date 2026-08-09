@@ -68,6 +68,7 @@ func performRequest(t *testing.T, handler http.Handler, target string) *httptest
 	t.Helper()
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, target, nil)
+	request.Header.Set("User-Agent", "test-agent/1.0")
 	handler.ServeHTTP(recorder, request)
 	return recorder
 }

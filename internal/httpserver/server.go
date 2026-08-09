@@ -137,7 +137,11 @@ func NewWithLogger(cfg config.Config, metadataDB, lyricsDB, coverDB *sql.DB, log
 	var requestLogs *reqlog.Writer
 	if cfg.RequestLogEnabled {
 		var err error
-		requestLogs, err = reqlog.Open(cfg.RequestLogDBPath, time.Duration(cfg.RequestLogRetentionDays)*24*time.Hour, logger)
+		requestLogs, err = reqlog.Open(cfg.RequestLogDBPath, &reqlog.Options{
+			Retention:     time.Duration(cfg.RequestLogRetentionDays) * 24 * time.Hour,
+			UAOptimize:    boolptr(cfg.RequestLogUAOptimize),
+			UASaveUnknown: boolptr(cfg.RequestLogUASaveUnknown),
+		}, logger)
 		if err != nil {
 			logger.Error("open request log database", "error", err)
 			requestLogs = nil
@@ -193,9 +197,9 @@ func NewWithLogger(cfg config.Config, metadataDB, lyricsDB, coverDB *sql.DB, log
 		// FALLBACK_QUEUE_WAIT_MS) plus the slowest upstream call
 		// (METADATA_TIMEOUT_MS / COVER_TIMEOUT_MS), or queued cache-missing
 		// requests are killed mid-flight before their upstream lookup returns.
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       120 * time.Second,
-		MaxHeaderBytes:    1 << 20,
+		WriteTimeout:   30 * time.Second,
+		IdleTimeout:    120 * time.Second,
+		MaxHeaderBytes: 1 << 20,
 	}
 	server.RegisterOnShutdown(limiter.Stop)
 	server.RegisterOnShutdown(replayCache.Stop)
@@ -299,6 +303,9 @@ func normalizedPort(port string) string {
 	return strings.TrimSpace(port)
 }
 
+// boolptr returns a pointer to v for use with optional config parameters.
+func boolptr(v bool) *bool { return &v }
+
 func requestLogger(next http.Handler, logger *slog.Logger, logs *reqlog.Writer) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		state := &requestState{outcome: "error", level: slog.LevelInfo}
@@ -336,6 +343,7 @@ func requestLogger(next http.Handler, logger *slog.Logger, logs *reqlog.Writer) 
 				CacheMs:    state.cacheMs,
 				UpstreamMs: state.upstreamMs,
 				Params:     r.URL.RawQuery,
+				UserAgent:  r.UserAgent(),
 			})
 		}
 		if state.detail != "" {

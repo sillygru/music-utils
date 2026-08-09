@@ -34,6 +34,8 @@ const (
 	defaultRequestLogEnabled       = true
 	defaultRequestLogDBPath        = "./data/request_log.db"
 	defaultRequestLogRetentionDays = 30
+	defaultRequestLogUAOptimize    = true
+	defaultRequestLogUASaveUnknown = true
 	defaultLRCLIBFallbackEnabled   = true
 	defaultLRCLIBBaseURL           = "https://lrclib.net/api"
 	defaultLRCLIBTimeoutMS         = 5000
@@ -77,6 +79,8 @@ type Config struct {
 	RequestLogEnabled       bool
 	RequestLogDBPath        string
 	RequestLogRetentionDays int
+	RequestLogUAOptimize    bool
+	RequestLogUASaveUnknown bool
 	LRCLIBFallbackEnabled   bool
 	LRCLIBBaseURL           string
 	LRCLIBUserAgent         string
@@ -93,13 +97,13 @@ type Config struct {
 	CoverTimeoutMS       int
 	CoverUserAgent       string
 
-	PrefetchEnabled       bool
-	PrefetchPerMin        int
-	PrefetchConcurrency   int
-	PrefetchQueueSize     int
-	PrefetchLyrics        bool
-	PrefetchAlbumCover    bool
-	PrefetchArtistCover   bool
+	PrefetchEnabled     bool
+	PrefetchPerMin      int
+	PrefetchConcurrency int
+	PrefetchQueueSize   int
+	PrefetchLyrics      bool
+	PrefetchAlbumCover  bool
+	PrefetchArtistCover bool
 }
 
 // Load reads configuration from the environment and applies defaults when a
@@ -128,6 +132,8 @@ func Load() Config {
 		RequestLogEnabled:       boolOrDefault("REQUEST_LOG_ENABLED", defaultRequestLogEnabled),
 		RequestLogDBPath:        valueOrDefault("REQUEST_LOG_DB_PATH", defaultRequestLogDBPath),
 		RequestLogRetentionDays: nonNegativeIntOrDefault("REQUEST_LOG_RETENTION_DAYS", defaultRequestLogRetentionDays),
+		RequestLogUAOptimize:    boolOrDefault("REQUEST_LOG_UA_OPTIMIZE", defaultRequestLogUAOptimize),
+		RequestLogUASaveUnknown: boolOrDefault("REQUEST_LOG_UA_SAVE_UNKNOWN", defaultRequestLogUASaveUnknown),
 		LRCLIBFallbackEnabled:   boolOrDefault("LRCLIB_FALLBACK_ENABLED", defaultLRCLIBFallbackEnabled),
 		LRCLIBBaseURL:           valueOrDefault("LRCLIB_BASE_URL", defaultLRCLIBBaseURL),
 		LRCLIBUserAgent:         valueOrDefault("LRCLIB_USER_AGENT", defaultLRCLIBUserAgent()),
@@ -144,13 +150,13 @@ func Load() Config {
 		CoverTimeoutMS:       intOrDefault("COVER_TIMEOUT_MS", defaultCoverTimeoutMS),
 		CoverUserAgent:       valueOrDefault("COVER_USER_AGENT", defaultCoverUserAgent()),
 
-		PrefetchEnabled:       boolOrDefault("PREFETCH_ENABLED", defaultPrefetchEnabled),
-		PrefetchPerMin:        intOrDefault("PREFETCH_PER_MIN", defaultPrefetchPerMin),
-		PrefetchConcurrency:   intOrDefault("PREFETCH_CONCURRENCY", defaultPrefetchConcurrency),
-		PrefetchQueueSize:     intOrDefault("PREFETCH_QUEUE_SIZE", defaultPrefetchQueueSize),
-		PrefetchLyrics:        boolOrDefault("PREFETCH_LYRICS", defaultPrefetchLyrics),
-		PrefetchAlbumCover:    boolOrDefault("PREFETCH_ALBUM_COVER", defaultPrefetchAlbumCover),
-		PrefetchArtistCover:   boolOrDefault("PREFETCH_ARTIST_COVER", defaultPrefetchArtistCover),
+		PrefetchEnabled:     boolOrDefault("PREFETCH_ENABLED", defaultPrefetchEnabled),
+		PrefetchPerMin:      intOrDefault("PREFETCH_PER_MIN", defaultPrefetchPerMin),
+		PrefetchConcurrency: intOrDefault("PREFETCH_CONCURRENCY", defaultPrefetchConcurrency),
+		PrefetchQueueSize:   intOrDefault("PREFETCH_QUEUE_SIZE", defaultPrefetchQueueSize),
+		PrefetchLyrics:      boolOrDefault("PREFETCH_LYRICS", defaultPrefetchLyrics),
+		PrefetchAlbumCover:  boolOrDefault("PREFETCH_ALBUM_COVER", defaultPrefetchAlbumCover),
+		PrefetchArtistCover: boolOrDefault("PREFETCH_ARTIST_COVER", defaultPrefetchArtistCover),
 	}
 }
 
@@ -287,7 +293,7 @@ func validateEnvironment() error {
 			return fmt.Errorf("REQUEST_LOG_RETENTION_DAYS must be a non-negative integer")
 		}
 	}
-	for _, name := range []string{"TRUST_PROXY", "LRCLIB_FALLBACK_ENABLED", "METADATA_FALLBACK_ENABLED", "COVER_FALLBACK_ENABLED", "COVER_REFRESH_ENABLED", "REQUEST_LOG_ENABLED", "PREFETCH_ENABLED", "PREFETCH_LYRICS", "PREFETCH_ALBUM_COVER", "PREFETCH_ARTIST_COVER"} {
+	for _, name := range []string{"TRUST_PROXY", "LRCLIB_FALLBACK_ENABLED", "METADATA_FALLBACK_ENABLED", "COVER_FALLBACK_ENABLED", "COVER_REFRESH_ENABLED", "REQUEST_LOG_ENABLED", "REQUEST_LOG_UA_OPTIMIZE", "REQUEST_LOG_UA_SAVE_UNKNOWN", "PREFETCH_ENABLED", "PREFETCH_LYRICS", "PREFETCH_ALBUM_COVER", "PREFETCH_ARTIST_COVER"} {
 		if value := strings.TrimSpace(os.Getenv(name)); value != "" {
 			if _, err := strconv.ParseBool(value); err != nil {
 				return fmt.Errorf("%s must be a boolean", name)

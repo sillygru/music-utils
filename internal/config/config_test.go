@@ -95,7 +95,7 @@ func TestLoadCoverRefreshMidnightStartHour(t *testing.T) {
 
 func TestLoadRequestLogDefaults(t *testing.T) {
 	clearRateLimitEnv(t)
-	for _, name := range []string{"REQUEST_LOG_ENABLED", "REQUEST_LOG_DB_PATH", "REQUEST_LOG_RETENTION_DAYS"} {
+	for _, name := range []string{"REQUEST_LOG_ENABLED", "REQUEST_LOG_DB_PATH", "REQUEST_LOG_RETENTION_DAYS", "REQUEST_LOG_UA_OPTIMIZE", "REQUEST_LOG_UA_SAVE_UNKNOWN"} {
 		t.Setenv(name, "")
 	}
 
@@ -108,6 +108,26 @@ func TestLoadRequestLogDefaults(t *testing.T) {
 	}
 	if cfg.RequestLogRetentionDays != 30 {
 		t.Fatalf("unexpected default request log retention: %d", cfg.RequestLogRetentionDays)
+	}
+	if !cfg.RequestLogUAOptimize {
+		t.Fatal("expected REQUEST_LOG_UA_OPTIMIZE to default to true")
+	}
+	if !cfg.RequestLogUASaveUnknown {
+		t.Fatal("expected REQUEST_LOG_UA_SAVE_UNKNOWN to default to true")
+	}
+}
+
+func TestLoadRequestLogUAOptimizationFlags(t *testing.T) {
+	clearRateLimitEnv(t)
+	t.Setenv("REQUEST_LOG_UA_OPTIMIZE", "false")
+	t.Setenv("REQUEST_LOG_UA_SAVE_UNKNOWN", "false")
+
+	cfg := Load()
+	if cfg.RequestLogUAOptimize {
+		t.Fatal("expected REQUEST_LOG_UA_OPTIMIZE=false to be honored")
+	}
+	if cfg.RequestLogUASaveUnknown {
+		t.Fatal("expected REQUEST_LOG_UA_SAVE_UNKNOWN=false to be honored")
 	}
 }
 

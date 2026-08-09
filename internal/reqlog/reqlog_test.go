@@ -30,7 +30,7 @@ func openTestDB(t *testing.T, path string) *sql.DB {
 
 func TestOpenAppliesStorageOptimizations(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "request_log.db")
-	w, err := Open(path, 30*24*time.Hour, testLogger())
+	w, err := Open(path, &Options{Retention: 30 * 24 * time.Hour}, testLogger())
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -66,12 +66,12 @@ func TestOpenAppliesStorageOptimizations(t *testing.T) {
 
 func TestWriteFlushAndReadBack(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "request_log.db")
-	w, err := Open(path, 0, testLogger())
+	w, err := Open(path, &Options{Retention: 0}, testLogger())
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	w.Log(Record{TS: time.Now(), Method: "GET", Endpoint: "/api/lyrics/get", Status: 200, Outcome: "local_hit", CacheMs: 3, Params: "track_name=x&artist_name=y"})
-	w.Log(Record{TS: time.Now(), Method: "GET", Endpoint: "/api/lyrics/get", Status: 404, Outcome: "miss", UpstreamMs: 120, Params: "track_name=a&artist_name=b"})
+	w.Log(Record{TS: time.Now(), Method: "GET", Endpoint: "/api/lyrics/get", Status: 200, Outcome: "local_hit", CacheMs: 3, Params: "track_name=x&artist_name=y", UserAgent: "test-agent/1.0"})
+	w.Log(Record{TS: time.Now(), Method: "GET", Endpoint: "/api/lyrics/get", Status: 404, Outcome: "miss", UpstreamMs: 120, Params: "track_name=a&artist_name=b", UserAgent: "test-agent/1.0"})
 	if err := w.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
@@ -85,15 +85,15 @@ func TestWriteFlushAndReadBack(t *testing.T) {
 		t.Fatalf("expected 2 rows, got %d", count)
 	}
 
-	var endpoint, outcome, params string
+	var endpoint, outcome, params, userAgent string
 	var status int
 	var cacheMs, upstreamMs int64
 	err = read.QueryRowContext(context.Background(), `
-		SELECT e.name, o.name, l.params, l.status, l.cache_ms, l.upstream_ms
+		SELECT e.name, o.name, l.params, l.status, l.cache_ms, l.upstream_ms, l.user_agent
 		FROM request_log l
 		JOIN endpoints e ON e.id = l.endpoint_id
 		JOIN outcomes o ON o.id = l.outcome_id
-		ORDER BY l.id LIMIT 1`).Scan(&endpoint, &outcome, &params, &status, &cacheMs, &upstreamMs)
+		ORDER BY l.id LIMIT 1`).Scan(&endpoint, &outcome, &params, &status, &cacheMs, &upstreamMs, &userAgent)
 	if err != nil {
 		t.Fatalf("read first row: %v", err)
 	}
@@ -102,6 +102,9 @@ func TestWriteFlushAndReadBack(t *testing.T) {
 	}
 	if params != "track_name=x&artist_name=y" {
 		t.Fatalf("unexpected params %q", params)
+	}
+	if userAgent != "test-agent/1.0" {
+		t.Fatalf("unexpected user_agent %q", userAgent)
 	}
 	if cacheMs != 3 || upstreamMs != 0 {
 		t.Fatalf("unexpected timings: cache_ms=%d upstream_ms=%d", cacheMs, upstreamMs)
@@ -121,7 +124,7 @@ func TestWriteFlushAndReadBack(t *testing.T) {
 
 func TestPruneRemovesExpiredRowsAndKeepsFresh(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "request_log.db")
-	w, err := Open(path, time.Hour, testLogger())
+	w, err := Open(path, &Options{Retention: time.Hour}, testLogger())
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -132,7 +135,7 @@ func TestPruneRemovesExpiredRowsAndKeepsFresh(t *testing.T) {
 	}
 
 	// Prune through a fresh writer against the same file.
-	w2, err := Open(path, time.Hour, testLogger())
+	w2, err := Open(path, &Options{Retention: time.Hour}, testLogger())
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
@@ -197,5 +200,144 @@ func TestTruncateParamsBoundsWithoutSplittingRunes(t *testing.T) {
 	// Short values pass through untouched.
 	if got := TruncateParams("q=hello"); got != "q=hello" {
 		t.Fatalf("short value changed: %q", got)
+	}
+}
+
+func TestTruncateUserAgentBoundsWithoutTruncating(t *testing.T) {
+	long := strings.Repeat("a", 512)
+	if got := TruncateUserAgent(long); len(got) != maxUserAgentLen {
+		t.Fatalf("expected truncation to maxUserAgentLen, got %d", len(got))
+	}
+	// 200 two-byte runes = 400 bytes; cutting at 256 must not split a rune.
+	multibyte := strings.Repeat("é", 200)
+	got := TruncateUserAgent(multibyte)
+	if !utf8.ValidString(got) {
+		t.Fatalf("truncation split a UTF-8 rune: %q", got)
+	}
+	if len(got) > maxUserAgentLen {
+		t.Fatalf("truncation exceeded maxUserAgentLen: %d", len(got))
+	}
+	// Short values pass through untouched, including exactly the cap.
+	if got := TruncateUserAgent("my-agent/1.0"); got != "my-agent/1.0" {
+		t.Fatalf("short value changed: %q", got)
+	}
+	if got := TruncateUserAgent(strings.Repeat("b", maxUserAgentLen)); len(got) != maxUserAgentLen {
+		t.Fatalf("cap-length value changed: %d", len(got))
+	}
+}
+
+func TestNormalizeUserAgentCollapsesKnownClients(t *testing.T) {
+	w := &Writer{uaOptimize: true, uaSaveUnknown: true}
+	cases := map[string]string{
+		"curl/8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0 OpenSSL/3.2.1": "curl",
+		"Wget/1.21.4":            "wget",
+		"Go-http-client/1.1":     "go-http-client",
+		"python-requests/2.31.0": "python-requests",
+		"aiohttp/3.9.1":          "python-aiohttp",
+		"Mozilla/5.0 ... Chrome/120.0 Safari/537.36":   "browser-chromium",
+		"Mozilla/5.0 ... Firefox/122.0":                "browser-firefox",
+		"Mozilla/5.0 ... Edg/120.0":                    "browser-edge",
+		"Mozilla/5.0 ... Version/17.2 Safari/605.1.15": "browser-webkit",
+		"PostmanRuntime/7.36.0":                        "postman",
+		"test-agent/1.0 custom":                        "test-agent/1.0 custom",
+	}
+	for ua, want := range cases {
+		if got := w.normalizeUserAgent(ua); got != want {
+			t.Errorf("normalizeUserAgent(%q) = %q, want %q", ua, got, want)
+		}
+	}
+}
+
+func TestNormalizeUserAgentUnknownPolicy(t *testing.T) {
+	// When optimize is off, the full string is always kept.
+	off := &Writer{uaOptimize: false, uaSaveUnknown: false}
+	if got := off.normalizeUserAgent("some/unknown client"); got != "some/unknown client" {
+		t.Fatalf("expected full UA with optimize off, got %q", got)
+	}
+	// Optimize on + saveUnknown off drops unknown UAs.
+	drop := &Writer{uaOptimize: true, uaSaveUnknown: false}
+	if got := drop.normalizeUserAgent("some/unknown client"); got != "" {
+		t.Fatalf("expected unknown UA dropped, got %q", got)
+	}
+	// Known UAs are still collapsed even when saving unknown is off.
+	if got := drop.normalizeUserAgent("curl/8.0.0"); got != "curl" {
+		t.Fatalf("expected known curl to still collapse, got %q", got)
+	}
+	// Empty UA is always empty.
+	if got := drop.normalizeUserAgent(""); got != "" {
+		t.Fatalf("expected empty UA to stay empty, got %q", got)
+	}
+}
+
+func TestNormalizeUserAgentOverflowBounded(t *testing.T) {
+	w := &Writer{uaOptimize: true, uaSaveUnknown: true}
+	long := "curl/" + strings.Repeat("a", 4096)
+	if got := w.normalizeUserAgent(long); got != "curl" {
+		t.Fatalf("expected known curl to collapse regardless of length, got %q", got)
+	}
+	// An unknown long UA is bounded by TruncateUserAgent.
+	unknown := &Writer{uaOptimize: true, uaSaveUnknown: true}
+	got := unknown.normalizeUserAgent(strings.Repeat("Ü", 512))
+	if len(got) > maxUserAgentLen || len(got) == 0 {
+		t.Fatalf("expected unknown long UA bounded to maxUserAgentLen, got len %d", len(got))
+	}
+}
+
+func TestNormalizeUserAgentSaveUnknownDisabledDropsLongUnknown(t *testing.T) {
+	w := &Writer{uaOptimize: true, uaSaveUnknown: false}
+	if got := w.normalizeUserAgent(strings.Repeat("xyz", 512)); got != "" {
+		t.Fatalf("expected long unknown UA dropped, got len %d", len(got))
+	}
+}
+
+func TestOpenMigratesExistingDatabaseWithUserAgent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "request_log.db")
+	// Build a pre-migration database: create the schema minus user_agent and
+	// insert a row, mirroring what an older build left behind.
+	legacy := openTestDB(t, path)
+	if _, err := legacy.Exec(`
+		CREATE TABLE request_log (
+			id INTEGER PRIMARY KEY,
+			ts INTEGER NOT NULL,
+			method_id INTEGER NOT NULL,
+			endpoint_id INTEGER NOT NULL,
+			status INTEGER NOT NULL,
+			outcome_id INTEGER NOT NULL,
+			cache_ms INTEGER NOT NULL DEFAULT 0,
+			upstream_ms INTEGER NOT NULL DEFAULT 0,
+			params TEXT NOT NULL DEFAULT ''
+		)`); err != nil {
+		t.Fatalf("create legacy table: %v", err)
+	}
+	if _, err := legacy.Exec(`
+		INSERT INTO request_log (ts, method_id, endpoint_id, status, outcome_id) VALUES (0, 1, 1, 200, 1)`); err != nil {
+		t.Fatalf("seed legacy row: %v", err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatalf("close legacy db: %v", err)
+	}
+
+	// Open via the normal path must add the column and preserve rows.
+	w, err := Open(path, &Options{Retention: 0}, testLogger())
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() { _ = w.Close() }()
+
+	read := openTestDB(t, path)
+	var hasCol int
+	if err := read.QueryRowContext(context.Background(),
+		"SELECT count(*) FROM pragma_table_info('request_log') WHERE name='user_agent'").Scan(&hasCol); err != nil {
+		t.Fatalf("check user_agent column: %v", err)
+	}
+	if hasCol != 1 {
+		t.Fatalf("expected user_agent column after migration, found %d", hasCol)
+	}
+	var count int
+	if err := read.QueryRowContext(context.Background(), "SELECT count(*) FROM request_log").Scan(&count); err != nil {
+		t.Fatalf("count rows: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected the legacy row to survive migration, got %d rows", count)
 	}
 }

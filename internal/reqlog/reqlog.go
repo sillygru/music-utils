@@ -30,6 +30,9 @@ const (
 	// maxParamsLen caps how many bytes of the raw query string are kept per
 	// row; client-supplied values beyond this are dropped.
 	maxParamsLen = 1024
+	// maxUserAgentLen caps how many bytes of the client User-Agent header are
+	// kept per row; User-Agent strings are unbounded client input.
+	maxUserAgentLen = 256
 	// channelCapacity bounds buffered records so a slow disk can never make
 	// request handling wait; overflow is counted and dropped.
 	channelCapacity = 4096
@@ -46,6 +49,30 @@ const (
 	writeTimeout = 5 * time.Second
 )
 
+// Options tunes request log persistence and storage costs.
+type Options struct {
+	// Retention is how long rows are kept; zero or less keeps rows forever.
+	Retention time.Duration
+	// UAOptimize collapses well-known User-Agent strings to short canonical
+	// tokens (e.g. "curl/8.5.0 ..." -> "curl") to shrink the request_log file.
+	// A zero value means the default (true) is used.
+	UAOptimize *bool
+	// UASaveUnknown controls what happens when a User-Agent is not recognized.
+	// When true (default) the full string is stored; when false it is dropped
+	// as empty to minimize storage. A nil pointer means the default (true)
+	// applies; the flag only matters when UAOptimize is enabled.
+	UASaveUnknown *bool
+}
+
+// retention returns the configured retention window, defaulting to "kept
+// forever" (zero duration) when opts is nil.
+func retention(opts *Options) time.Duration {
+	if opts == nil {
+		return 0
+	}
+	return opts.Retention
+}
+
 // Record describes one HTTP request.
 type Record struct {
 	TS         time.Time
@@ -56,16 +83,19 @@ type Record struct {
 	CacheMs    int64  // time spent in the local database/cache lookup
 	UpstreamMs int64  // time spent talking to upstream providers
 	Params     string // raw query string
+	UserAgent  string // client User-Agent header
 }
 
 // Writer is a background, batched writer for the request log database. Log
 // never blocks the caller; records are queued and flushed in batches. Close
 // flushes anything queued and shuts the maintenance loop down.
 type Writer struct {
-	db        *sql.DB
-	ch        chan Record
-	logger    *slog.Logger
-	retention time.Duration
+	db            *sql.DB
+	ch            chan Record
+	logger        *slog.Logger
+	retention     time.Duration
+	uaOptimize    bool
+	uaSaveUnknown bool
 
 	stopOnce  sync.Once
 	stop      chan struct{}
@@ -82,11 +112,21 @@ type Writer struct {
 }
 
 // Open opens (creating if needed) the request log database at path and starts
-// its background writer. A retention of zero or less keeps rows forever;
-// otherwise rows older than retention are pruned by the maintenance loop.
-func Open(path string, retention time.Duration, logger *slog.Logger) (*Writer, error) {
+// its background writer. opts may be nil for package defaults (keep rows
+// forever, UA optimization on, unknown UAs saved).
+func Open(path string, opts *Options, logger *slog.Logger) (*Writer, error) {
 	if logger == nil {
 		logger = slog.Default()
+	}
+	uaOptimize := true
+	uaSaveUnknown := true
+	if opts != nil {
+		if opts.UAOptimize != nil {
+			uaOptimize = *opts.UAOptimize
+		}
+		if opts.UASaveUnknown != nil {
+			uaSaveUnknown = *opts.UASaveUnknown
+		}
 	}
 	if strings.TrimSpace(path) == "" {
 		return nil, fmt.Errorf("request log database path is empty")
@@ -118,17 +158,32 @@ func Open(path string, retention time.Duration, logger *slog.Logger) (*Writer, e
 		_ = database.Close()
 		return nil, fmt.Errorf("apply request log schema: %w", err)
 	}
+	// Older request log databases predate the user_agent column. CREATE TABLE
+	// IF NOT EXISTS is a no-op for them, so add the column in place rather than
+	// forcing a rebuild; this is idempotent and safe to run on every open.
+	if _, err := database.Exec(
+		"ALTER TABLE request_log ADD COLUMN user_agent TEXT NOT NULL DEFAULT ''",
+	); err != nil {
+		// SQLite returns "duplicate column name" when the column already
+		// exists, which just means this database is already current.
+		if !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			_ = database.Close()
+			return nil, fmt.Errorf("migrate request log schema: %w", err)
+		}
+	}
 	w := &Writer{
-		db:        database,
-		ch:        make(chan Record, channelCapacity),
-		logger:    logger,
-		retention: retention,
-		stop:      make(chan struct{}),
-		done:      make(chan struct{}),
-		pruneDone: make(chan struct{}),
-		methods:   make(map[string]int64),
-		endpoints: make(map[string]int64),
-		outcomes:  make(map[string]int64),
+		db:            database,
+		ch:            make(chan Record, channelCapacity),
+		logger:        logger,
+		retention:     retention(opts),
+		uaOptimize:    uaOptimize,
+		uaSaveUnknown: uaSaveUnknown,
+		stop:          make(chan struct{}),
+		done:          make(chan struct{}),
+		pruneDone:     make(chan struct{}),
+		methods:       make(map[string]int64),
+		endpoints:     make(map[string]int64),
+		outcomes:      make(map[string]int64),
 	}
 	go w.run()
 	go w.pruneLoop()
@@ -227,8 +282,8 @@ func (w *Writer) flush(batch []Record) {
 		return
 	}
 	statement, err := tx.PrepareContext(ctx, `
-		INSERT INTO request_log (ts, method_id, endpoint_id, status, outcome_id, cache_ms, upstream_ms, params)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+		INSERT INTO request_log (ts, method_id, endpoint_id, status, outcome_id, cache_ms, upstream_ms, params, user_agent)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		_ = tx.Rollback()
 		w.writeFailure(err)
@@ -260,6 +315,7 @@ func (w *Writer) flush(batch []Record) {
 		if _, err := statement.ExecContext(ctx,
 			rec.TS.UnixMilli(), methodID, endpointID, rec.Status, outcomeID,
 			rec.CacheMs, rec.UpstreamMs, TruncateParams(rec.Params),
+			w.normalizeUserAgent(rec.UserAgent),
 		); err != nil {
 			_ = statement.Close()
 			_ = tx.Rollback()
@@ -275,6 +331,70 @@ func (w *Writer) flush(batch []Record) {
 	if err := tx.Commit(); err != nil {
 		w.writeFailure(err)
 	}
+}
+
+// canonicalUAs maps a short, case-insensitive substring to the compact token
+// stored in the request log. Substrings are matched against a lowercase copy
+// of the User-Agent header; tokens are stored verbatim. Order matters: more
+// specific or more common markers must appear before broader ones.
+var canonicalUAs = []struct {
+	needle string
+	token  string
+}{
+	{"curl", "curl"},
+	{"wget", "wget"},
+	{"go-http-client", "go-http-client"},
+	{"python-requests", "python-requests"},
+	{"python-urllib", "python-urllib"},
+	{"aiohttp", "python-aiohttp"},
+	{"httpx", "python-httpx"},
+	{"axios", "axios"},
+	{"node-fetch", "node-fetch"},
+	{"node", "node"},
+	{"okhttp", "okhttp"},
+	{"rust", "rust-http"},
+	{"postman", "postman"},
+	{"insomnia", "insomnia"},
+	{"httpie", "httpie"},
+	{"npm/", "npm"},
+	{"pnpm", "pnpm"},
+	{"yarn/", "yarn"},
+	{"deno", "deno"},
+	{"grcurl", "grpcurl"},
+	{"k6", "k6"},
+	{"chrome", "browser-chromium"},
+	{"chromium", "browser-chromium"},
+	{"edg/", "browser-edge"},
+	{"edge", "browser-edge"},
+	{"firefox", "browser-firefox"},
+	{"fxios", "browser-firefox"},
+	{"safari", "browser-webkit"},
+	{"webkit", "browser-webkit"},
+	{"mozilla", "mozilla"},
+}
+
+// normalizeUserAgent prepares a User-Agent for storage. With UA optimization
+// enabled it collapses known clients to a compact token; unrecognized strings
+// are kept or dropped depending on uaSaveUnknown. The result is always bounded
+// by TruncateUserAgent. Optimization is intentionally cheap: a single lowercase
+// pass and substring scans at flush time.
+func (w *Writer) normalizeUserAgent(ua string) string {
+	if !w.uaOptimize {
+		return TruncateUserAgent(ua)
+	}
+	if ua == "" {
+		return ""
+	}
+	lower := strings.ToLower(ua)
+	for _, c := range canonicalUAs {
+		if strings.Contains(lower, c.needle) {
+			return c.token
+		}
+	}
+	if !w.uaSaveUnknown {
+		return ""
+	}
+	return TruncateUserAgent(ua)
 }
 
 // dictionaryID returns the row id for value in table, inserting the row on
@@ -370,6 +490,21 @@ func TruncateParams(value string) string {
 		return value
 	}
 	value = value[:maxParamsLen]
+	for !utf8.ValidString(value) {
+		_, size := utf8.DecodeLastRuneInString(value)
+		value = value[:len(value)-size]
+	}
+	return value
+}
+
+// TruncateUserAgent bounds a User-Agent header to maxUserAgentLen bytes without
+// splitting a UTF-8 rune. The header is unbounded client input, so it is always
+// truncated before being stored.
+func TruncateUserAgent(value string) string {
+	if len(value) <= maxUserAgentLen {
+		return value
+	}
+	value = value[:maxUserAgentLen]
 	for !utf8.ValidString(value) {
 		_, size := utf8.DecodeLastRuneInString(value)
 		value = value[:len(value)-size]

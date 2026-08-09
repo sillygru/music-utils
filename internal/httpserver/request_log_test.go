@@ -59,21 +59,25 @@ func TestRequestLogRecordsEveryRequest(t *testing.T) {
 		t.Fatalf("expected 3 logged requests, got %d", count)
 	}
 
-	// The search hit must carry its params, outcome, status, and cache timing.
-	var outcome, params string
+	// The search hit must carry its params, outcome, status, cache timing,
+	// and the client User-Agent.
+	var outcome, params, userAgent string
 	var status int
 	var cacheMs, upstreamMs int64
 	err := logged.QueryRowContext(context.Background(), `
-		SELECT o.name, l.params, l.status, l.cache_ms, l.upstream_ms
+		SELECT o.name, l.params, l.status, l.cache_ms, l.upstream_ms, l.user_agent
 		FROM request_log l
 		JOIN endpoints e ON e.id = l.endpoint_id
 		JOIN outcomes o ON o.id = l.outcome_id
-		WHERE e.name = '/api/lyrics/search'`).Scan(&outcome, &params, &status, &cacheMs, &upstreamMs)
+		WHERE e.name = '/api/lyrics/search'`).Scan(&outcome, &params, &status, &cacheMs, &upstreamMs, &userAgent)
 	if err != nil {
 		t.Fatalf("query search log row: %v", err)
 	}
 	if outcome != "local_hit" || params != "q=example&limit=5" || status != http.StatusOK {
 		t.Fatalf("unexpected search log row: outcome=%q params=%q status=%d", outcome, params, status)
+	}
+	if userAgent != "test-agent/1.0" {
+		t.Fatalf("unexpected user_agent in log: %q", userAgent)
 	}
 	if cacheMs < 1 || upstreamMs != 0 {
 		t.Fatalf("unexpected timings for a local hit: cache_ms=%d upstream_ms=%d", cacheMs, upstreamMs)
