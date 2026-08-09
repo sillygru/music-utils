@@ -141,6 +141,16 @@ func TestLoadRequestLogZeroRetentionKeepsForever(t *testing.T) {
 	}
 }
 
+func TestLoadRequestLogNegativeOneRetentionKeepsForever(t *testing.T) {
+	clearRateLimitEnv(t)
+	t.Setenv("REQUEST_LOG_RETENTION_DAYS", "-1")
+
+	cfg := Load()
+	if cfg.RequestLogRetentionDays != 0 {
+		t.Fatalf("expected -1 to normalize to 0 (keep forever), got %d", cfg.RequestLogRetentionDays)
+	}
+}
+
 func TestLoadRequestLogDisabled(t *testing.T) {
 	clearRateLimitEnv(t)
 	t.Setenv("REQUEST_LOG_ENABLED", "false")
@@ -169,6 +179,57 @@ func TestLoadRequestsTodayDefaultsAndFlags(t *testing.T) {
 	t.Setenv("REQUESTS_TODAY_ENABLED", "false")
 	if cfg := Load(); cfg.RequestsTodayEnabled {
 		t.Fatal("expected REQUESTS_TODAY_ENABLED=false to be honored")
+	}
+}
+
+func TestLoadStatsEndpointsDefaultDisabled(t *testing.T) {
+	clearRateLimitEnv(t)
+	t.Setenv("STATS_ENDPOINTS", "")
+
+	cfg := Load()
+	if len(cfg.StatsEndpoints) != 0 {
+		t.Fatalf("expected STATS_ENDPOINTS to default to none served, got %v", cfg.StatsEndpoints)
+	}
+}
+
+func TestLoadStatsEndpointsParsesList(t *testing.T) {
+	clearRateLimitEnv(t)
+	t.Setenv("STATS_ENDPOINTS", "metadata, lyrics, COVERS")
+
+	cfg := Load()
+	want := []string{"metadata", "lyrics", "covers"}
+	if len(cfg.StatsEndpoints) != len(want) {
+		t.Fatalf("expected endpoints %v, got %v", want, cfg.StatsEndpoints)
+	}
+	for i := range want {
+		if cfg.StatsEndpoints[i] != want[i] {
+			t.Fatalf("expected endpoint %q at index %d, got %q", want[i], i, cfg.StatsEndpoints[i])
+		}
+	}
+}
+
+func TestLoadStatsEndpointsAll(t *testing.T) {
+	clearRateLimitEnv(t)
+	t.Setenv("STATS_ENDPOINTS", "all")
+
+	cfg := Load()
+	want := allStatsEndpoints()
+	if len(cfg.StatsEndpoints) != len(want) {
+		t.Fatalf("expected all endpoints %v, got %v", want, cfg.StatsEndpoints)
+	}
+	for i := range want {
+		if cfg.StatsEndpoints[i] != want[i] {
+			t.Fatalf("expected endpoint %q at index %d, got %q", want[i], i, cfg.StatsEndpoints[i])
+		}
+	}
+}
+
+func TestLoadAndValidateRejectsUnknownStatsEndpoint(t *testing.T) {
+	clearRateLimitEnv(t)
+	t.Setenv("STATS_ENDPOINTS", "metadata,bogus")
+
+	if _, err := LoadAndValidate(); err == nil {
+		t.Fatal("expected an unknown STATS_ENDPOINTS token to fail validation")
 	}
 }
 

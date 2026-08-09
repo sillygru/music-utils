@@ -37,6 +37,7 @@ const (
 	defaultRequestLogUAOptimize    = true
 	defaultRequestLogUASaveUnknown = true
 	defaultRequestsTodayEnabled    = false
+	defaultStatsEndpoints          = ""
 	defaultLRCLIBFallbackEnabled   = true
 	defaultLRCLIBBaseURL           = "https://lrclib.net/api"
 	defaultLRCLIBTimeoutMS         = 5000
@@ -83,6 +84,7 @@ type Config struct {
 	RequestLogUAOptimize    bool
 	RequestLogUASaveUnknown bool
 	RequestsTodayEnabled    bool
+	StatsEndpoints          []string
 	LRCLIBFallbackEnabled   bool
 	LRCLIBBaseURL           string
 	LRCLIBUserAgent         string
@@ -137,6 +139,7 @@ func Load() Config {
 		RequestLogUAOptimize:    boolOrDefault("REQUEST_LOG_UA_OPTIMIZE", defaultRequestLogUAOptimize),
 		RequestLogUASaveUnknown: boolOrDefault("REQUEST_LOG_UA_SAVE_UNKNOWN", defaultRequestLogUASaveUnknown),
 		RequestsTodayEnabled:    boolOrDefault("REQUESTS_TODAY_ENABLED", defaultRequestsTodayEnabled),
+		StatsEndpoints:          statsEndpointsOrDefault("STATS_ENDPOINTS", nil),
 		LRCLIBFallbackEnabled:   boolOrDefault("LRCLIB_FALLBACK_ENABLED", defaultLRCLIBFallbackEnabled),
 		LRCLIBBaseURL:           valueOrDefault("LRCLIB_BASE_URL", defaultLRCLIBBaseURL),
 		LRCLIBUserAgent:         valueOrDefault("LRCLIB_USER_AGENT", defaultLRCLIBUserAgent()),
@@ -260,6 +263,11 @@ func (c Config) Validate() error {
 	if strings.TrimSpace(c.CoverUserAgent) == "" {
 		return fmt.Errorf("COVER_USER_AGENT must not be empty")
 	}
+	for _, endpoint := range c.StatsEndpoints {
+		if !validStatsEndpoint(endpoint) {
+			return fmt.Errorf("STATS_ENDPOINTS may only contain metadata, lyrics, covers, total, songs, or all; got %q", endpoint)
+		}
+	}
 	return nil
 }
 
@@ -292,8 +300,8 @@ func validateEnvironment() error {
 	}
 	if value := strings.TrimSpace(os.Getenv("REQUEST_LOG_RETENTION_DAYS")); value != "" {
 		parsed, err := strconv.Atoi(value)
-		if err != nil || parsed < 0 {
-			return fmt.Errorf("REQUEST_LOG_RETENTION_DAYS must be a non-negative integer")
+		if err != nil || parsed < -1 {
+			return fmt.Errorf("REQUEST_LOG_RETENTION_DAYS must be an integer >= -1 (-1 means keep forever)")
 		}
 	}
 	for _, name := range []string{"TRUST_PROXY", "LRCLIB_FALLBACK_ENABLED", "METADATA_FALLBACK_ENABLED", "COVER_FALLBACK_ENABLED", "COVER_REFRESH_ENABLED", "REQUEST_LOG_ENABLED", "REQUEST_LOG_UA_OPTIMIZE", "REQUEST_LOG_UA_SAVE_UNKNOWN", "REQUESTS_TODAY_ENABLED", "PREFETCH_ENABLED", "PREFETCH_LYRICS", "PREFETCH_ALBUM_COVER", "PREFETCH_ARTIST_COVER"} {
@@ -372,17 +380,21 @@ func intOrDefault(name string, fallback int) int {
 	return parsed
 }
 
-// nonNegativeIntOrDefault reads an int env value, allowing 0. Negative or
+// nonNegativeIntOrDefault reads an int env value, allowing 0 and -1. -1 is
+// normalized to 0; both mean "keep forever". Negative (other than -1) or
 // unparseable values fall back to the default. Used by
-// REQUEST_LOG_RETENTION_DAYS where 0 means keep request logs forever.
+// REQUEST_LOG_RETENTION_DAYS where 0 (or -1) means keep request logs forever.
 func nonNegativeIntOrDefault(name string, fallback int) int {
 	value := strings.TrimSpace(os.Getenv(name))
 	if value == "" {
 		return fallback
 	}
 	parsed, err := strconv.Atoi(value)
-	if err != nil || parsed < 0 {
+	if err != nil || parsed < -1 {
 		return fallback
+	}
+	if parsed == -1 {
+		return 0
 	}
 	return parsed
 }
@@ -411,4 +423,47 @@ func boolOrDefault(name string, fallback bool) bool {
 		return fallback
 	}
 	return parsed
+}
+
+// allStatsEndpoints is the complete set of servable /api/stats/* endpoints,
+// selected by STATS_ENDPOINTS=all.
+func allStatsEndpoints() []string {
+	return []string{"metadata", "lyrics", "covers", "total", "songs"}
+}
+
+// validStatsEndpoint reports whether name is a servable /api/stats/* endpoint.
+func validStatsEndpoint(name string) bool {
+	switch name {
+	case "metadata", "lyrics", "covers", "total", "songs":
+		return true
+	}
+	return false
+}
+
+// statsEndpointsOrDefault reads the STATS_ENDPOINTS env var, a comma-separated
+// list of the /api/stats/* cache-count endpoints to serve. The token "all"
+// expands to every endpoint; an unset or empty value means none are served.
+// Tokens are trimmed, lowercased, and deduplicated so "Metadata, lyrics"
+// equals "metadata,lyrics".
+func statsEndpointsOrDefault(name string, fallback []string) []string {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback
+	}
+	seen := make(map[string]bool)
+	var endpoints []string
+	for _, token := range strings.Split(value, ",") {
+		token = strings.ToLower(strings.TrimSpace(token))
+		if token == "" {
+			continue
+		}
+		if token == "all" {
+			return allStatsEndpoints()
+		}
+		if !seen[token] {
+			seen[token] = true
+			endpoints = append(endpoints, token)
+		}
+	}
+	return endpoints
 }

@@ -310,6 +310,69 @@ func SearchTracks(ctx context.Context, metadataDB, lyricsDB *sql.DB, query strin
 	return result, nil
 }
 
+// CoverCounts breaks down cached cover entries by what they cover. Songs come
+// from the metadata cache (a track with a cover URL), albums and artists from
+// the dedicated cover URL cache.
+type CoverCounts struct {
+	Songs   int64
+	Albums  int64
+	Artists int64
+}
+
+// Total returns the combined number of cached cover entries.
+func (c CoverCounts) Total() int64 { return c.Songs + c.Albums + c.Artists }
+
+// CountTracks reports how many songs have cached metadata.
+func CountTracks(ctx context.Context, database *sql.DB) (int64, error) {
+	return countQuery(ctx, database, "SELECT COUNT(*) FROM tracks", "count metadata tracks")
+}
+
+// CountDistinctTrackNames reports how many individual, distinct track names are
+// cached (case-insensitively), counting a song once no matter how many records
+// represent it.
+func CountDistinctTrackNames(ctx context.Context, database *sql.DB) (int64, error) {
+	return countQuery(ctx, database, "SELECT COUNT(DISTINCT name_lower) FROM tracks", "count distinct track names")
+}
+
+// CountLyricsTracks reports how many songs have cached lyrics. Mindful of
+// content deduplication in the lyrics table, this counts the song-to-lyrics
+// associations rather than the deduplicated content rows.
+func CountLyricsTracks(ctx context.Context, database *sql.DB) (int64, error) {
+	return countQuery(ctx, database, "SELECT COUNT(*) FROM lyrics_tracks", "count lyrics tracks")
+}
+
+// CountCovers reports how many cached cover entries exist: songs whose metadata
+// cache carries a cover URL, plus album and artist covers stored in the cover
+// URL cache. Negative cache rows (a checked miss with an empty URL) are not
+// counted. A nil coverDB leaves the album and artist counts at zero.
+func CountCovers(ctx context.Context, metadataDB, coverDB *sql.DB) (CoverCounts, error) {
+	var counts CoverCounts
+	var err error
+	if counts.Songs, err = countQuery(ctx, metadataDB, `SELECT COUNT(*) FROM tracks WHERE cover_url IS NOT NULL AND cover_url <> ''`, "count song covers"); err != nil {
+		return CoverCounts{}, err
+	}
+	if coverDB != nil {
+		if counts.Albums, err = countQuery(ctx, coverDB, `SELECT COUNT(*) FROM cover_urls WHERE entity_type = 'album' AND cover_url IS NOT NULL AND cover_url <> ''`, "count album covers"); err != nil {
+			return CoverCounts{}, err
+		}
+		if counts.Artists, err = countQuery(ctx, coverDB, `SELECT COUNT(*) FROM cover_urls WHERE entity_type = 'artist' AND cover_url IS NOT NULL AND cover_url <> ''`, "count artist covers"); err != nil {
+			return CoverCounts{}, err
+		}
+	}
+	return counts, nil
+}
+
+func countQuery(ctx context.Context, database *sql.DB, statement, label string) (int64, error) {
+	if database == nil {
+		return 0, fmt.Errorf("%s: %w", label, errors.New("database is nil"))
+	}
+	var count int64
+	if err := database.QueryRowContext(ctx, statement).Scan(&count); err != nil {
+		return 0, fmt.Errorf("%s: %w", label, err)
+	}
+	return count, nil
+}
+
 func trackColumns(alias string) string {
 	return alias + `.id, ` + alias + `.name, ` + alias + `.name_lower, ` + alias + `.artist_name, ` + alias + `.artist_name_lower, COALESCE(` + alias + `.album_name,''), COALESCE(` + alias + `.album_name_lower,''), COALESCE(` + alias + `.duration,0), COALESCE(` + alias + `.genre,''), COALESCE(` + alias + `.genre_lower,''), COALESCE(` + alias + `.year,0), COALESCE(` + alias + `.release_date,''), COALESCE(` + alias + `.isrc,''), COALESCE(` + alias + `.musicbrainz_recording_id,''), COALESCE(` + alias + `.musicbrainz_release_id,''), COALESCE(` + alias + `.musicbrainz_release_group_id,''), COALESCE(` + alias + `.musicbrainz_artist_id,''), COALESCE(` + alias + `.cover_url,''), COALESCE(` + alias + `.metadata_source,''), COALESCE(` + alias + `.cover_url_source,''), COALESCE(` + alias + `.metadata_checked,0), COALESCE(` + alias + `.cover_url_checked,0), COALESCE(` + alias + `.last_lyrics_id,0), COALESCE(` + alias + `.source,'' )`
 }

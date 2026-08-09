@@ -54,6 +54,11 @@ console.log(data.plainLyrics);
 | `GET /api/lyrics/get` | Exact/top lyrics lookup; returns one object |
 | `GET /api/lyrics/search` | LRCLIB-compatible multi-result lyrics search |
 | `GET /api/stats/requests-today` | Requests served since the local start of day (opt-in) |
+| `GET /api/stats/metadata` | Songs with cached metadata (opt-in) |
+| `GET /api/stats/lyrics` | Songs with cached lyrics (opt-in) |
+| `GET /api/stats/covers` | Cached cover entries, with song/album/artist breakdown (opt-in) |
+| `GET /api/stats/total` | Everything cached summed: metadata + lyrics + covers (opt-in) |
+| `GET /api/stats/songs` | Distinct individual track names cached (opt-in) |
 
 ## `GET /api/healthz` and `GET /api/version`
 
@@ -79,6 +84,57 @@ This endpoint is **opt-in** (`REQUESTS_TODAY_ENABLED=true`) and defaults to
 off; when disabled it returns `404`. It depends on the request log
 (`REQUEST_LOG_ENABLED`) for a real count and reports `0` when logging is
 turned off. Subject to the same per-IP rate limits as the rest of `/api/*`.
+Like every `/api/stats/*` endpoint, its requests are never written to the
+request log database.
+
+## `GET /api/stats/metadata`, `/api/stats/lyrics`, `/api/stats/covers`, `/api/stats/total`, `/api/stats/songs`
+
+How many songs are cached, split by cache. Each endpoint is individually
+**opt-in** through the `STATS_ENDPOINTS` environment variable
+(`metadata,lyrics,covers,total,songs`, or `all` for every endpoint) and
+defaults to off; when an endpoint is not enabled it returns `404`. These are
+pure local cache counts — no upstream calls ever happen. Their requests are
+never written to the request log database, and they are subject to the same
+per-IP rate limits as the rest of `/api/*`.
+
+Example responses:
+
+```json
+{ "metadataSongs": 51234 }
+
+{ "lyricsSongs": 48177 }
+
+{
+  "covers": 6611,
+  "songCovers": 4420,
+  "albumCovers": 1174,
+  "artistCovers": 1017
+}
+
+{
+  "total": 106022,
+  "metadata": 51234,
+  "lyrics": 48177,
+  "covers": 6611
+}
+
+{ "songs": 48453 }
+```
+
+Semantics:
+
+- `metadataSongs` — rows in the metadata cache (`tracks`): every cached song,
+  including songs whose cache entry only carries lyrics or a cover.
+- `lyricsSongs` — songs with a cached lyrics association. Sharing one lyrics
+  row between songs still counts each song once.
+- `covers` = `songCovers` + `albumCovers` + `artistCovers`. `songCovers` counts
+  songs whose metadata cache carries a cover URL; `albumCovers`/`artistCovers`
+  count positive album and artist cover entries. Checked-miss rows (no art
+  found) are never counted.
+- `total` = `metadata` + `lyrics` + `covers`, the unified amount of everything
+  cached (a song in several caches counts once per cache).
+- `songs` — distinct individual track names cached (case-insensitive), so a
+  song cached in several caches is still counted once.
 
 ## `GET /api/metadata/get`
 

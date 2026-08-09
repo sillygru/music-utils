@@ -178,6 +178,23 @@ func NewWithLogger(cfg config.Config, metadataDB, lyricsDB, coverDB *sql.DB, log
 	if cfg.RequestsTodayEnabled {
 		mux.HandleFunc("GET "+requestsTodayPath, requestsTodayHandler(requestLogs))
 	}
+	// The /api/stats/* cache-count endpoints are individually opt-in through
+	// STATS_ENDPOINTS (validated at startup), so only the requested set is
+	// registered. Their requests are never persisted to the request log.
+	for _, endpoint := range cfg.StatsEndpoints {
+		switch endpoint {
+		case "metadata":
+			mux.HandleFunc("GET "+statsMetadataPath, statsMetadataHandler(metadataDB))
+		case "lyrics":
+			mux.HandleFunc("GET "+statsLyricsPath, statsLyricsHandler(lyricsDB))
+		case "covers":
+			mux.HandleFunc("GET "+statsCoversPath, statsCoversHandler(metadataDB, coverDB))
+		case "total":
+			mux.HandleFunc("GET "+statsTotalPath, statsTotalHandler(metadataDB, lyricsDB, coverDB))
+		case "songs":
+			mux.HandleFunc("GET "+statsSongsPath, statsSongsHandler(metadataDB))
+		}
+	}
 	mux.HandleFunc("GET /api/lyrics/get", getLyricsHandler(metadataDB, lyricsDB, client, lyricsMisses, fallbacks, cfg.LRCLIBFallbackEnabled, prefetcher))
 	mux.HandleFunc("GET /api/lyrics/search", searchLyricsHandlerWithUpstream(metadataDB, lyricsDB, client, fallbacks, cfg.LRCLIBFallbackEnabled))
 	mux.HandleFunc("GET /api/metadata/get", getMetadataHandler(metadataDB, metadataResolver, fallbacks, cfg.MetadataFallbackEnabled, prefetcher))
@@ -340,7 +357,9 @@ func requestLogger(next http.Handler, logger *slog.Logger, logs *reqlog.Writer) 
 		if logs != nil {
 			// Request logging is enabled: surface params and the split
 			// cache/upstream timings in the application log and persist a row
-			// to the request log database.
+			// to the request log database. Requests under /api/stats/ are the
+			// exception: they are operational probes that must never write to
+			// the request log, so they are logged to the application log only.
 			if params := reqlog.TruncateParams(r.URL.RawQuery); params != "" {
 				attrs = append(attrs, "params", params)
 			}
@@ -350,17 +369,19 @@ func requestLogger(next http.Handler, logger *slog.Logger, logs *reqlog.Writer) 
 			if state.upstreamMs > 0 {
 				attrs = append(attrs, "upstream_ms", state.upstreamMs)
 			}
-			logs.Log(reqlog.Record{
-				TS:         started,
-				Method:     r.Method,
-				Endpoint:   r.URL.Path,
-				Status:     wrapped.statusCode(),
-				Outcome:    state.outcome,
-				CacheMs:    state.cacheMs,
-				UpstreamMs: state.upstreamMs,
-				Params:     r.URL.RawQuery,
-				UserAgent:  r.UserAgent(),
-			})
+			if !strings.HasPrefix(r.URL.Path, "/api/stats/") {
+				logs.Log(reqlog.Record{
+					TS:         started,
+					Method:     r.Method,
+					Endpoint:   r.URL.Path,
+					Status:     wrapped.statusCode(),
+					Outcome:    state.outcome,
+					CacheMs:    state.cacheMs,
+					UpstreamMs: state.upstreamMs,
+					Params:     r.URL.RawQuery,
+					UserAgent:  r.UserAgent(),
+				})
+			}
 		}
 		if state.detail != "" {
 			attrs = append(attrs, "detail", state.detail)

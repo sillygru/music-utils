@@ -122,3 +122,117 @@ func TestSearchTracksUsesFTS(t *testing.T) {
 		t.Fatalf("unexpected search results: %+v", tracks)
 	}
 }
+
+func TestCountHelpers(t *testing.T) {
+	metadataDB, lyricsDB := testDatabases(t)
+	ctx := context.Background()
+
+	assertCount := func(label string, got int64, err error, want int64) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("%s: %v", label, err)
+		}
+		if got != want {
+			t.Fatalf("%s: expected %d, got %d", label, want, got)
+		}
+	}
+
+	// Empty caches count zero, and album/artist covers are zero without a
+	// cover database.
+	metadataCount, err := CountTracks(ctx, metadataDB)
+	assertCount("count tracks on empty", metadataCount, err, 0)
+	nameCount, err := CountDistinctTrackNames(ctx, metadataDB)
+	assertCount("count names on empty", nameCount, err, 0)
+	lyricsCount, err := CountLyricsTracks(ctx, lyricsDB)
+	assertCount("count lyrics on empty", lyricsCount, err, 0)
+	coverCounts, err := CountCovers(ctx, metadataDB, nil)
+	assertCount("count song covers on empty", coverCounts.Songs, err, 0)
+	if coverCounts.Total() != 0 || coverCounts.Albums != 0 || coverCounts.Artists != 0 {
+		t.Fatalf("expected zero cover counts, got %+v", coverCounts)
+	}
+
+	// Two tracks share one (case-normalized) name; the first two also carry
+	// lyrics and a song cover URL, the third is metadata-only. The shared
+	// lyrics content deduplicates into one lyrics row across two associations.
+	tracks := []Track{
+		{Name: "Paranoid Android", ArtistName: "Radiohead", AlbumName: "OK Computer", Duration: 383, CoverURL: "http://cover/1"},
+		{Name: "paranoid android", ArtistName: "A Cover Band", AlbumName: "Tribute", Duration: 300, CoverURL: "http://cover/2"},
+		{Name: "No Surprises", ArtistName: "Radiohead", AlbumName: "OK Computer", Duration: 229},
+	}
+	for i, track := range tracks {
+		var err error
+		if i < 2 {
+			_, _, err = InsertTrackWithLyrics(ctx, metadataDB, lyricsDB, track, Lyrics{PlainLyrics: "shared words"})
+		} else {
+			_, err = UpsertTrackMetadata(ctx, metadataDB, track)
+		}
+		if err != nil {
+			t.Fatalf("seed track %d: %v", i, err)
+		}
+	}
+
+	metadataCount, err = CountTracks(ctx, metadataDB)
+	assertCount("count tracks", metadataCount, err, 3)
+	nameCount, err = CountDistinctTrackNames(ctx, metadataDB)
+	assertCount("count distinct names", nameCount, err, 2)
+	lyricsCount, err = CountLyricsTracks(ctx, lyricsDB)
+	assertCount("count lyrics associations", lyricsCount, err, 2)
+	songCovers, err := CountCovers(ctx, metadataDB, nil)
+	assertCount("count song covers", songCovers.Songs, err, 2)
+	if songCovers.Total() != 2 {
+		t.Fatalf("expected song-only cover total 2, got %+v", songCovers)
+	}
+}
+
+func TestCountCoversIncludesAlbumAndArtist(t *testing.T) {
+	metadataDB, _ := testDatabases(t)
+	coverDB, err := Open(":memory:", Config{MmapSize: 512 * 1024 * 1024, CacheSizeKB: -64000, MaxOpenConns: 1})
+	if err != nil {
+		t.Fatalf("open cover test database: %v", err)
+	}
+	t.Cleanup(func() { _ = coverDB.Close() })
+	ctx := context.Background()
+	if err := MigrateCover(ctx, coverDB); err != nil {
+		t.Fatalf("migrate cover test database: %v", err)
+	}
+
+	// A bare track carrying a song cover URL.
+	if _, err := UpsertTrackMetadata(ctx, metadataDB, Track{Name: "Hits", ArtistName: "Artist", Duration: 200, CoverURL: "http://cover/song"}); err != nil {
+		t.Fatalf("insert track: %v", err)
+	}
+	// One positive album cover and one positive artist cover, plus a negative
+	// album cover (checked miss) that must not count.
+	if err := UpsertCoverArt(ctx, coverDB, CoverAlbum, "Artist", "Album One", "http://cover/album", "deezer"); err != nil {
+		t.Fatalf("insert album cover: %v", err)
+	}
+	if err := UpsertCoverArt(ctx, coverDB, CoverArtist, "Artist", "", "http://cover/artist", "deezer"); err != nil {
+		t.Fatalf("insert artist cover: %v", err)
+	}
+	if err := UpsertCoverArt(ctx, coverDB, CoverAlbum, "Artist", "Missing Album", "", ""); err != nil {
+		t.Fatalf("insert negative album cover: %v", err)
+	}
+
+	counts, err := CountCovers(ctx, metadataDB, coverDB)
+	if err != nil {
+		t.Fatalf("count covers: %v", err)
+	}
+	if counts.Songs != 1 || counts.Albums != 1 || counts.Artists != 1 || counts.Total() != 3 {
+		t.Fatalf("unexpected cover counts: %+v", counts)
+	}
+}
+
+func TestCountHelpersRequireDatabase(t *testing.T) {
+	ctx := context.Background()
+	if _, err := CountTracks(ctx, nil); err == nil {
+		t.Fatal("expected CountTracks(nil) to fail")
+	}
+	if _, err := CountDistinctTrackNames(ctx, nil); err == nil {
+		t.Fatal("expected CountDistinctTrackNames(nil) to fail")
+	}
+	if _, err := CountLyricsTracks(ctx, nil); err == nil {
+		t.Fatal("expected CountLyricsTracks(nil) to fail")
+	}
+	if _, err := CountCovers(ctx, nil, nil); err == nil {
+		t.Fatal("expected CountCovers(nil, nil) to fail")
+	}
+}

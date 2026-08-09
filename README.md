@@ -193,10 +193,11 @@ cold-lookup latency and has been removed.
 | `PREFETCH_ARTIST_COVER` | `true` | Prefetch artist artwork once the song's artist is known. |
 | `REQUEST_LOG_ENABLED` | `true` | Record every request (when, endpoint, params, outcome, split cache/upstream timings) into the request log database. |
 | `REQUEST_LOG_DB_PATH` | `./data/request_log.db` | Storage-optimized request log database. |
-| `REQUEST_LOG_RETENTION_DAYS` | `30` | Prune request log rows older than this daily; `0` keeps everything. |
+| `REQUEST_LOG_RETENTION_DAYS` | `30` | Prune request log rows older than this daily; `0` or `-1` keeps everything forever. |
 | `REQUEST_LOG_UA_OPTIMIZE` | `true` | Collapse well-known client User-Agents (curl, wget, browsers, ...) to short tokens in the request log to save storage. |
 | `REQUEST_LOG_UA_SAVE_UNKNOWN` | `true` | When UA optimization is on and a User-Agent is unrecognized, save the full string (`true`) or drop it as empty (`false`). |
 | `REQUESTS_TODAY_ENABLED` | `false` | Serve `GET /api/stats/requests-today`, reporting requests logged since the local start of day (seeded from the request log; its own polls excluded). |
+| `STATS_ENDPOINTS` | *(empty)* | Serve the `GET /api/stats/*` cache-count endpoints: a comma-separated subset of `metadata`, `lyrics`, `covers`, `total`, `songs`, or `all` for every endpoint. Empty enables none. Stats requests are never written to the request log database. |
 | `LRCLIB_FALLBACK_ENABLED` | `true` | Enable LRCLIB fallback. |
 | `LRCLIB_BASE_URL` | `https://lrclib.net/api` | LRCLIB API base URL. |
 | `LRCLIB_USER_AGENT` | `music-utils/v0.6.0 (+https://gru0.dev)` | LRCLIB User-Agent. |
