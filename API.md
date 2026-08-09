@@ -260,19 +260,22 @@ Example response:
 ```json
 {
   "id": 42,
+  "name": "No Surprises",
   "trackName": "No Surprises",
   "artistName": "Radiohead",
   "albumName": "OK Computer",
   "duration": 229,
   "instrumental": false,
   "plainLyrics": "A heart that's full up like a landfill…",
-  "syncedLyrics": "[00:00.00] A heart that's full up like a landfill…"
+  "syncedLyrics": "[00:00.00] A heart that's full up like a landfill…",
+  "lyricsfile": "version: '1.0'\nmetadata:\n  title: No Surprises…"
 }
 ```
 
 | Field | Type | Description |
 | --- | --- | --- |
 | `id` | integer | Local track ID. |
+| `name` | string | Display name; always mirrors `trackName`. |
 | `trackName` | string | Song title. |
 | `artistName` | string | Artist name. |
 | `albumName` | string | Album/release title. |
@@ -280,6 +283,12 @@ Example response:
 | `instrumental` | boolean | True for instrumental tracks (lyrics fields empty). |
 | `plainLyrics` | string | Plain-text lyrics. |
 | `syncedLyrics` | string | Timestamped LRC lyrics, when available. |
+| `lyricsfile` | string | LRCLIB-style YAML lyrics payload, generated from the cached row (`lines` from LRC timestamps, `plain` block when lyrics exist). |
+
+The `name` and `lyricsfile` fields match the object LRCLIB returns, so
+LRCLIB clients can consume this endpoint without adaptation. Both are
+derived at serialization time from the cached row — no extra storage is
+needed.
 
 Responses: `200` lyrics object · `400` invalid/missing input · `404` not
 found (memoized for 24 hours) · `429` rate limited · `503` upstream busy ·
@@ -288,9 +297,11 @@ found (memoized for 24 hours) · `429` rate limited · `503` upstream busy ·
 ## `GET /api/lyrics/search`
 
 Searches the local catalog and merges it with LRCLIB's `/api/search`
-results. LRCLIB returns a JSON array containing fields such as `id`,
+results. Each result carries the fields LRCLIB returns — `id`, `name`,
 `trackName`, `artistName`, `albumName`, `duration`, `instrumental`,
-`plainLyrics`, and `syncedLyrics`.
+`plainLyrics`, `syncedLyrics`, and `lyricsfile` (the YAML payload). The
+`name` and `lyricsfile` fields are derived locally from the cached row so
+upstream search results and local hits return the same shape.
 
 Query parameters: `q`, or one or more of `track_name`, `artist_name`,
 `album_name`; optional `limit` from `1–50`, default `20`. `q` is passed to

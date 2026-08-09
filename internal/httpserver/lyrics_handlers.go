@@ -19,8 +19,14 @@ const (
 	maxSearchLimit     = 50
 )
 
+// lyricsResponse mirrors the object shape LRCLIB returns for lyrics lookups
+// and search results. Name and LyricsFile are derived from the stored row at
+// serialization time (name always equals the track name; lyricsfile is the
+// generated YAML payload), so the API stays drop-in compatible with LRCLIB
+// clients without storing extra data.
 type lyricsResponse struct {
 	ID           int64   `json:"id"`
+	Name         string  `json:"name"`
 	TrackName    string  `json:"trackName"`
 	ArtistName   string  `json:"artistName"`
 	AlbumName    string  `json:"albumName"`
@@ -28,6 +34,7 @@ type lyricsResponse struct {
 	Instrumental bool    `json:"instrumental"`
 	PlainLyrics  string  `json:"plainLyrics"`
 	SyncedLyrics string  `json:"syncedLyrics"`
+	LyricsFile   string  `json:"lyricsfile"`
 }
 
 type apiError struct {
@@ -406,6 +413,7 @@ func lyricsAvailable(lyrics *db.Lyrics) bool {
 func toLyricsResponse(track *db.Track, lyrics *db.Lyrics) lyricsResponse {
 	return lyricsResponse{
 		ID:           track.ID,
+		Name:         track.Name,
 		TrackName:    track.Name,
 		ArtistName:   track.ArtistName,
 		AlbumName:    track.AlbumName,
@@ -413,6 +421,7 @@ func toLyricsResponse(track *db.Track, lyrics *db.Lyrics) lyricsResponse {
 		Instrumental: lyrics.Instrumental,
 		PlainLyrics:  lyrics.PlainLyrics,
 		SyncedLyrics: lyrics.SyncedLyrics,
+		LyricsFile:   buildLyricsFile(track, lyrics),
 	}
 }
 

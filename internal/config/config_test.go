@@ -1,6 +1,10 @@
 package config
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/sillygru/music-utils/internal/version"
+)
 
 func clearRateLimitEnv(t *testing.T) {
 	t.Helper()
@@ -20,7 +24,7 @@ func TestLoadLRCLIBDefaults(t *testing.T) {
 	if !cfg.LRCLIBFallbackEnabled || cfg.LRCLIBBaseURL != "https://lrclib.net/api" || cfg.LRCLIBTimeoutMS != 5000 {
 		t.Fatalf("unexpected LRCLIB defaults: %+v", cfg)
 	}
-	if cfg.LRCLIBUserAgent != "music-utils/v0.6.0 (+https://gru0.dev)" {
+	if cfg.LRCLIBUserAgent != "music-utils/"+version.Version+" (+https://gru0.dev)" {
 		t.Fatalf("unexpected default LRCLIB user agent: %q", cfg.LRCLIBUserAgent)
 	}
 }

@@ -93,6 +93,26 @@ func TestGetLyrics(t *testing.T) {
 	if got.Duration != 203.5 || got.PlainLyrics != "These are the words" || got.SyncedLyrics == "" {
 		t.Fatalf("unexpected lyrics response: %+v", got)
 	}
+	// LRCLIB compatibility: name mirrors the track name and lyricsfile is
+	// generated from the cached row without any extra storage.
+	if got.Name != got.TrackName {
+		t.Fatalf("expected name to mirror trackName, got %q", got.Name)
+	}
+	wantLyricsFile := "version: '1.0'\n" +
+		"metadata:\n" +
+		"  title: Example Song\n" +
+		"  artist: Example Artist\n" +
+		"  album: Example Album\n" +
+		"  duration_ms: 203500\n" +
+		"  instrumental: false\n" +
+		"lines:\n" +
+		"- text: These are the words\n" +
+		"  start_ms: 1000\n" +
+		"plain: |-\n" +
+		"  These are the words\n"
+	if got.LyricsFile != wantLyricsFile {
+		t.Fatalf("unexpected lyricsfile:\ngot:\n%q\nwant:\n%q", got.LyricsFile, wantLyricsFile)
+	}
 }
 
 func TestGetLyricsValidationAndMiss(t *testing.T) {
