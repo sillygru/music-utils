@@ -13,8 +13,10 @@ import (
 
 // getEntityCoverSearchHandler is the public artist/album route contract: the
 // legacy top-level fields remain available, while Results exposes every
-// configured provider result. A cached row is used when fallback is disabled;
-// otherwise providers are queried so a warm cache cannot hide them.
+// configured provider result. A cached positive row is served immediately so
+// repeat lookups never spend upstream budget; providers are only consulted on
+// a genuine miss (no cached URL, or a negative result older than the
+// negative-cache window).
 func getEntityCoverSearchHandler(database *sql.DB, resolver *cover.Resolver, fallbacks *fallbackGuard, entityType db.CoverEntity, fallbackEnabled bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		artist := strings.TrimSpace(r.URL.Query().Get("artist_name"))
@@ -37,6 +39,14 @@ func getEntityCoverSearchHandler(database *sql.DB, resolver *cover.Resolver, fal
 			writeJSON(w, http.StatusInternalServerError, apiError{Code: http.StatusInternalServerError, Message: "Internal server error"})
 			return
 		}
+		if cacheErr == nil && cached.CoverURL != "" {
+			// Positive cache hit: serve the saved cover immediately and never
+			// consult upstream. Staleness and dead URLs are handled in the
+			// background by the cover refresh job.
+			setOutcome(r, "local_hit")
+			writeJSON(w, http.StatusOK, albumArtistCoverFromRow(cached, entityType, artist, album))
+			return
+		}
 		if cacheErr == nil && cached.CoverURL == "" && checkedRecently(cached.CheckedAt) {
 			// Fresh negative cache: do not spend upstream budget again.
 			setOutcome(r, "miss")
@@ -44,11 +54,6 @@ func getEntityCoverSearchHandler(database *sql.DB, resolver *cover.Resolver, fal
 			return
 		}
 		if !fallbackEnabled || resolver == nil {
-			if cacheErr == nil && cached.CoverURL != "" {
-				setOutcome(r, "local_hit")
-				writeJSON(w, http.StatusOK, albumArtistCoverFromRow(cached, entityType, artist, album))
-				return
-			}
 			setOutcome(r, "miss")
 			writeJSON(w, http.StatusNotFound, apiError{Code: http.StatusNotFound, Message: "Cover not found"})
 			return
@@ -65,11 +70,6 @@ func getEntityCoverSearchHandler(database *sql.DB, resolver *cover.Resolver, fal
 			results = filterCoverResults(toKind(entityType), cover.Input{ArtistName: artist, AlbumName: album}, results)
 		}
 		if lookupErr != nil || len(results) == 0 {
-			if cacheErr == nil && cached.CoverURL != "" {
-				setOutcome(r, "local_partial_hit")
-				writeJSON(w, http.StatusOK, albumArtistCoverFromRow(cached, entityType, artist, album))
-				return
-			}
 			// Persist a negative result so repeat lookups stop spending upstream
 			// budget for the negative-cache window.
 			_ = db.UpsertCoverArt(r.Context(), database, entityType, artist, album, "", "")
