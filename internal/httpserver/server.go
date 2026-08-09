@@ -174,10 +174,16 @@ func NewWithLogger(cfg config.Config, metadataDB, lyricsDB, coverDB *sql.DB, log
 	mux.HandleFunc("GET /api/cover/search", searchCoverHandler(metadataResolver, coverResolver, fallbacks, cfg.CoverFallbackEnabled))
 
 	limiter := newRateLimiter(cfg)
+	// The response cache replays identical requests (by method, path, and query)
+	// without re-touching the database or upstream, so a burst of identical
+	// messages from one client cannot hammer the DB. It is registered for
+	// shutdown below so its sweeper goroutine cannot leak.
+	replayCache := newResponseCache(responseReplayTTL)
 	// CORS wraps the limiter so every response (including 429/503) carries the
 	// headers browsers need, and preflight requests are answered before they
-	// can consume rate-limit budget.
-	application := recoverMiddleware(corsMiddleware(limiter.Handler(mux)), logger)
+	// can consume rate-limit budget. The replay cache sits inside the limiter
+	// and peers the mux's handlers so real API responses are deduplicated.
+	application := recoverMiddleware(corsMiddleware(limiter.Handler(replayCache.middleware(mux))), logger)
 	server := &http.Server{
 		Addr:              ":" + normalizedPort(cfg.Port),
 		Handler:           requestLogger(application, logger, requestLogs),
@@ -192,6 +198,7 @@ func NewWithLogger(cfg config.Config, metadataDB, lyricsDB, coverDB *sql.DB, log
 		MaxHeaderBytes:    1 << 20,
 	}
 	server.RegisterOnShutdown(limiter.Stop)
+	server.RegisterOnShutdown(replayCache.Stop)
 	server.RegisterOnShutdown(fallbacks.Stop)
 	server.RegisterOnShutdown(coverRefresher.Stop)
 	if prefetcher != nil {

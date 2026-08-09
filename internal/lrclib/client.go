@@ -20,10 +20,10 @@ var ErrNotFound = errors.New("lrclib track not found")
 const (
 	maxResponseBytes = 2 << 20
 	maxIdleConns     = 100
-	// requestInterval paces LRCLIB to one request per second process-wide.
+	// requestInterval paces LRCLIB to five requests per second process-wide.
 	// LRCLIB is community-run with no documented quota; a gentle shared rate
 	// keeps the server's IP welcome regardless of client traffic.
-	requestInterval = time.Second
+	requestInterval = time.Second / 5
 )
 
 // RemoteResult is the response shape returned by LRCLIB search and exact
