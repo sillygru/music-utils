@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -102,6 +103,49 @@ func (c *ITunes) Lookup(ctx context.Context, kind Kind, input Input) (*Result, e
 		}
 	}
 	return nil, ErrNotFound
+}
+
+// Search returns up to limit album cover candidates so callers can pick the
+// one that best matches the request. Artist and song kinds are left to Lookup
+// (signaled via ErrNotFound) because their single top result is unambiguous.
+func (c *ITunes) Search(ctx context.Context, kind Kind, input Input, limit int) ([]Result, error) {
+	if limit < 1 {
+		return []Result{}, nil
+	}
+	if limit > 25 {
+		limit = 25
+	}
+	switch kind {
+	case Album:
+		album := CleanAlbum(input.AlbumName)
+		if album == "" {
+			return nil, ErrNotFound
+		}
+		params := url.Values{}
+		params.Set("entity", "album")
+		params.Set("limit", strconv.Itoa(limit))
+		params.Set("term", strings.TrimSpace(CleanArtist(input.ArtistName)+" "+album))
+		endpoint, err := encodeQuery(c.base, "/search", params)
+		if err != nil {
+			return nil, err
+		}
+		var response itunesSearchResponse
+		if err := c.client.get(ctx, endpoint, &response); err != nil {
+			return nil, err
+		}
+		results := make([]Result, 0, limit)
+		for _, result := range response.Results {
+			if len(results) >= limit {
+				break
+			}
+			if value := upgradeITunes(result.ArtworkURL100); value != "" {
+				results = append(results, Result{URL: value, Source: c.Name(), TrackName: result.TrackName, ArtistName: result.ArtistName, AlbumName: result.CollectionName})
+			}
+		}
+		return results, nil
+	default:
+		return nil, ErrNotFound
+	}
 }
 
 // upgradeITunes rewrites a 100x100 artwork URL to 600x600. Empty inputs are

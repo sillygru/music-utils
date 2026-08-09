@@ -99,12 +99,25 @@ func getCoverTopHandler(metadataDB, coverDB *sql.DB, resolver *cover.Resolver, f
 		}
 		defer release()
 		started := time.Now()
-		result, lookupErr := resolver.Lookup(r.Context(), kind, input)
-		setUpstreamDuration(r, time.Since(started))
-		if kind != cover.Song && lookupErr == nil && result != nil && result.URL != "" && !coverResultMatches(kind, input, *result) {
-			result = nil
-			lookupErr = cover.ErrNotFound
+		var result *cover.Result
+		var lookupErr error
+		if kind == cover.Song {
+			result, lookupErr = resolver.Lookup(r.Context(), kind, input)
+		} else {
+			// Album and artist names can be ambiguous, so gather every provider's
+			// candidates and keep the first that plausibly matches the request
+			// instead of trusting each provider's single top result.
+			results, err := resolver.Search(r.Context(), kind, input, 50)
+			lookupErr = err
+			if err == nil {
+				results = filterCoverResults(kind, input, results)
+			}
+			if len(results) > 0 {
+				top := results[0]
+				result = &top
+			}
 		}
+		setUpstreamDuration(r, time.Since(started))
 		if lookupErr != nil || result == nil || result.URL == "" {
 			if kind != cover.Song && coverDB != nil {
 				_ = db.UpsertCoverArt(r.Context(), coverDB, coverEntityForKind(kind), input.ArtistName, input.AlbumName, "", "")

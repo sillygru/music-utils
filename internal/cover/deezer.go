@@ -19,10 +19,11 @@ type deezerArtist struct {
 }
 
 type deezerAlbum struct {
-	Title       string `json:"title"`
-	CoverXL     string `json:"cover_xl"`
-	CoverBig    string `json:"cover_big"`
-	CoverMedium string `json:"cover_medium"`
+	Title       string       `json:"title"`
+	Artist      deezerArtist `json:"artist"`
+	CoverXL     string       `json:"cover_xl"`
+	CoverBig    string       `json:"cover_big"`
+	CoverMedium string       `json:"cover_medium"`
 }
 
 type deezerArtistResponse struct {
@@ -123,7 +124,7 @@ func (c *Deezer) Lookup(ctx context.Context, kind Kind, input Input) (*Result, e
 			return nil, ErrNotFound
 		}
 		params := url.Values{}
-		params.Set("q", `"`+strings.TrimSpace(artist+" "+album)+`"`)
+		params.Set("q", strings.TrimSpace(artist+" "+album))
 		endpoint, err := encodeQuery(c.base, "/search/album", params)
 		if err != nil {
 			return nil, err
@@ -134,10 +135,51 @@ func (c *Deezer) Lookup(ctx context.Context, kind Kind, input Input) (*Result, e
 		}
 		for _, result := range response.Data {
 			if value := firstNonEmpty(result.CoverXL, result.CoverBig, result.CoverMedium); value != "" {
-				return &Result{URL: value, Source: c.Name(), AlbumName: result.Title}, nil
+				return &Result{URL: value, Source: c.Name(), ArtistName: result.Artist.Name, AlbumName: result.Title}, nil
 			}
 		}
 		return nil, ErrNotFound
+	default:
+		return nil, ErrNotFound
+	}
+}
+
+// Search returns up to limit album cover candidates so callers can pick the
+// one that best matches the request. Artist and song kinds are left to Lookup
+// (signaled via ErrNotFound) because their single top result is unambiguous.
+func (c *Deezer) Search(ctx context.Context, kind Kind, input Input, limit int) ([]Result, error) {
+	if limit < 1 {
+		return []Result{}, nil
+	}
+	if limit > 25 {
+		limit = 25
+	}
+	switch kind {
+	case Album:
+		album := CleanAlbum(input.AlbumName)
+		if album == "" {
+			return nil, ErrNotFound
+		}
+		params := url.Values{}
+		params.Set("q", strings.TrimSpace(CleanArtist(input.ArtistName)+" "+album))
+		endpoint, err := encodeQuery(c.base, "/search/album", params)
+		if err != nil {
+			return nil, err
+		}
+		var response deezerAlbumResponse
+		if err := c.client.get(ctx, endpoint, &response); err != nil {
+			return nil, err
+		}
+		results := make([]Result, 0, limit)
+		for _, result := range response.Data {
+			if len(results) >= limit {
+				break
+			}
+			if value := firstNonEmpty(result.CoverXL, result.CoverBig, result.CoverMedium); value != "" {
+				results = append(results, Result{URL: value, Source: c.Name(), ArtistName: result.Artist.Name, AlbumName: result.Title})
+			}
+		}
+		return results, nil
 	default:
 		return nil, ErrNotFound
 	}

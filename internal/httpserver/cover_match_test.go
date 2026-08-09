@@ -18,6 +18,8 @@ func TestCoverResultMatchesAlbum(t *testing.T) {
 		{"unrelated album", cover.Input{ArtistName: "Radiohead", AlbumName: "six seven"}, cover.Result{ArtistName: "Fleetwood Mac", AlbumName: "Live (Deluxe Edition)"}, false},
 		{"artist mismatch tolerated on exact album", cover.Input{ArtistName: "Radiohead", AlbumName: "OK Computer"}, cover.Result{ArtistName: "Various Artists", AlbumName: "OK Computer"}, true},
 		{"artist mismatch rejected on fuzzy album", cover.Input{ArtistName: "Radiohead", AlbumName: "OK Computer"}, cover.Result{ArtistName: "Various Artists", AlbumName: "OK Computer Remix"}, false},
+		{"near-miss artist rejected on exact album", cover.Input{ArtistName: "Eagles", AlbumName: "Imagine"}, cover.Result{ArtistName: "Wings On Eagles", AlbumName: "Imagine"}, false},
+		{"near-miss artist rejected on fuzzy album", cover.Input{ArtistName: "Eagles", AlbumName: "Imagine"}, cover.Result{ArtistName: "Wings On Eagles", AlbumName: "Imagine - Single"}, false},
 		{"empty artist input", cover.Input{ArtistName: "", AlbumName: "OK Computer"}, cover.Result{ArtistName: "Radiohead", AlbumName: "OK Computer"}, true},
 		{"empty album", cover.Input{ArtistName: "Radiohead"}, cover.Result{ArtistName: "Radiohead", AlbumName: "OK Computer"}, false},
 	}

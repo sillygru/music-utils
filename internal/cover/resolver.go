@@ -74,14 +74,23 @@ func (r *Resolver) Search(ctx context.Context, kind Kind, input Input, limit int
 		if provider == nil {
 			continue
 		}
-		result, err := provider.Lookup(ctx, kind, input)
-		if err != nil || result == nil || result.URL == "" {
-			continue
+		got, searched := r.searchProvider(provider, ctx, kind, input, limit)
+		if !searched {
+			result, err := provider.Lookup(ctx, kind, input)
+			if err != nil || result == nil || result.URL == "" {
+				continue
+			}
+			got = []Result{*result}
 		}
-		result.TrackName = firstNonEmpty(result.TrackName, input.TrackName)
-		result.ArtistName = firstNonEmpty(result.ArtistName, input.ArtistName)
-		result.AlbumName = firstNonEmpty(result.AlbumName, input.AlbumName)
-		results = append(results, *result)
+		for _, result := range got {
+			if result.URL == "" {
+				continue
+			}
+			result.TrackName = firstNonEmpty(result.TrackName, input.TrackName)
+			result.ArtistName = firstNonEmpty(result.ArtistName, input.ArtistName)
+			result.AlbumName = firstNonEmpty(result.AlbumName, input.AlbumName)
+			results = append(results, result)
+		}
 	}
 	r.mu.Lock()
 	r.search[key] = searchCacheEntry{results: append([]Result(nil), results...), expiresAt: time.Now().Add(positiveCacheTTL)}
@@ -90,6 +99,27 @@ func (r *Resolver) Search(ctx context.Context, kind Kind, input Input, limit int
 		results = results[:limit]
 	}
 	return results, nil
+}
+
+// searchProvider collects a provider's multi-candidate results. It returns
+// searched=false when the provider has no SearchProvider for this kind, in
+// which case the caller falls back to Lookup. SearchProviders that return
+// ErrNotFound signal the kind is not supported by their multi-result search.
+func (r *Resolver) searchProvider(provider Provider, ctx context.Context, kind Kind, input Input, limit int) ([]Result, bool) {
+	sp, ok := provider.(SearchProvider)
+	if !ok || sp == nil {
+		return nil, false
+	}
+	got, err := sp.Search(ctx, kind, input, limit)
+	if err == nil {
+		return got, true
+	}
+	if errors.Is(err, ErrNotFound) {
+		// Kind unsupported by multi-result search: fall back to Lookup.
+		return nil, false
+	}
+	// Transient/provider error: skip this provider entirely.
+	return nil, true
 }
 
 // Lookup walks the providers in order and returns the first non-empty URL. A

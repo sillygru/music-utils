@@ -45,12 +45,54 @@ func coverNameSimilar(a, b string) bool {
 	return a == b || strings.Contains(a, b) || strings.Contains(b, a)
 }
 
+// coverArtistSame reports whether two artist names refer to the same artist:
+// equal token sets after ignoring a leading "the". Unlike coverNameSimilar it
+// never accepts a bare substring match, so "Wings On Eagles" is not the same
+// artist as "Eagles" and unrelated names sharing a word do not slip through.
+func coverArtistSame(a, b string) bool {
+	a = strings.TrimPrefix(coverNormalize(a), "the ")
+	b = strings.TrimPrefix(coverNormalize(b), "the ")
+	at, bt := coverTokenSet(a), coverTokenSet(b)
+	if len(at) == 0 || len(bt) == 0 {
+		return false
+	}
+	for token := range at {
+		if !bt[token] {
+			return false
+		}
+	}
+	for token := range bt {
+		if !at[token] {
+			return false
+		}
+	}
+	return true
+}
+
+// coverArtistsShareToken reports whether two artist names have any token in
+// common after ignoring a leading "the". A result artist that shares a word
+// with the requested artist is a near-miss that only looks plausible (for
+// example "Wings On Eagles" for "Eagles"); it must never be treated as the
+// compilation-artist case, where the credited artist shares nothing.
+func coverArtistsShareToken(a, b string) bool {
+	a = strings.TrimPrefix(coverNormalize(a), "the ")
+	b = strings.TrimPrefix(coverNormalize(b), "the ")
+	at, bt := coverTokenSet(a), coverTokenSet(b)
+	for token := range at {
+		if bt[token] {
+			return true
+		}
+	}
+	return false
+}
+
 // coverResultMatches reports whether a provider result plausibly corresponds to
 // the requested entity. Artist results must share the artist name. Album
 // results must cover every requested album token; an artist mismatch is
-// tolerated only when the album name matches exactly (soundtracks and
-// various-artist releases). Song results are not filtered because track
-// matching is intentionally fuzzy.
+// tolerated only when the album name matches exactly and the credited artist
+// does not merely resemble the requested one (soundtracks and various-artist
+// releases credit a different entity entirely). Song results are not filtered
+// because track matching is intentionally fuzzy.
 func coverResultMatches(kind cover.Kind, input cover.Input, result cover.Result) bool {
 	switch kind {
 	case cover.Artist:
@@ -59,8 +101,11 @@ func coverResultMatches(kind cover.Kind, input cover.Input, result cover.Result)
 		if !coverTokensCover(input.AlbumName, result.AlbumName) {
 			return false
 		}
-		if coverNameSimilar(input.ArtistName, result.ArtistName) {
+		if coverArtistSame(input.ArtistName, result.ArtistName) {
 			return true
+		}
+		if coverArtistsShareToken(input.ArtistName, result.ArtistName) {
+			return false
 		}
 		return coverNormalize(input.AlbumName) == coverNormalize(result.AlbumName)
 	default:

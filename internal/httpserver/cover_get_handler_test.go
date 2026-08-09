@@ -103,6 +103,31 @@ func TestCoverGetSongTitleOnlyResolves(t *testing.T) {
 	}
 }
 
+// TestCoverGetAlbumTitleOnlyResolves proves an artist-less album cover resolves
+// through the provider chain, picking the exact-title match over a top result
+// that only loosely contains the album name.
+func TestCoverGetAlbumTitleOnlyResolves(t *testing.T) {
+	handler := getCoverTopHandler(nil, nil, cover.NewResolver(&coverSearchStub{
+		name: "itunes",
+		results: []cover.Result{
+			{URL: "http://img/wrong.jpg", Source: "itunes", ArtistName: "NIFANA", AlbumName: "Imagine (Reggae Version) - Single"},
+			{URL: "http://img/imagine.jpg", Source: "itunes", ArtistName: "John Lennon", AlbumName: "Imagine"},
+		},
+	}), testFallbackGuard(), true)
+
+	response := performRequest(t, handler, "/?type=album&album_name=Imagine")
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected album cover to resolve (200), got %d: %s", response.Code, response.Body.String())
+	}
+	var got coverSearchResponse
+	if err := json.NewDecoder(response.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.CoverURL != "http://img/imagine.jpg" || got.AlbumName != "Imagine" {
+		t.Fatalf("unexpected cover response: %+v", got)
+	}
+}
+
 // metadataStubProvider is a metadata provider stub for handler tests.
 type metadataStubProvider struct {
 	name   string

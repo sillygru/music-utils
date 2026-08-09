@@ -228,7 +228,10 @@ results. Use `/api/cover/search` when you only want the array.
 Album artwork, with the same enrichment and caching behavior as
 `/api/cover/artist`.
 
-Query parameters: required `artist_name` and `album_name`.
+Query parameters: required `album_name`; `artist_name` is optional. When the
+artist is omitted the album is searched on its own as a best-effort lookup
+(Last.fm still needs an artist, so name-only results come from iTunes and
+Deezer); the first exact-title match wins.
 
 Example response:
 

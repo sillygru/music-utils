@@ -43,6 +43,28 @@ var lastfmDummyHashes = []string{
 	" placeholder",
 }
 
+// lastfmAlbumCoverRe matches the album cover <img> inside the page's
+// album-overview-cover-art container. Last.fm returns HTTP 200 for albums that
+// do not exist (unlike artists and tracks, which 404), so the container's
+// presence is the existence check: it only renders on real album pages and
+// never on the fallback page that shows the artist avatar and unrelated
+// covers.
+var lastfmAlbumCoverRe = regexp.MustCompile(`(?s)class="album-overview-cover-art[^"]*"[^>]*>.*?<img\b[^>]*?\bsrc="([^"]+)"`)
+
+// extractLastfmAlbumCover returns the album cover URL when the page is a real
+// album page, or "" for pages Last.fm renders for albums that do not exist.
+func extractLastfmAlbumCover(body string) string {
+	match := lastfmAlbumCoverRe.FindStringSubmatch(body)
+	if len(match) < 2 {
+		return ""
+	}
+	value := match[1]
+	if isLastfmDummy(value) || !strings.Contains(value, "/i/u/") {
+		return ""
+	}
+	return value
+}
+
 // NewLastfm builds a Last.fm scraping cover provider.
 func NewLastfm(baseURL, userAgent string, timeout time.Duration) (*Lastfm, error) {
 	baseURL = strings.TrimSpace(baseURL)
@@ -71,8 +93,10 @@ func (c *Lastfm) Lookup(ctx context.Context, kind Kind, input Input) (*Result, e
 		return nil, ErrNotFound
 	}
 	var pages []string
+	var extract func(string) string
 	switch kind {
 	case Artist:
+		extract = extractLastfmImageURL
 		pages = []string{
 			"/music/" + lastfmPath(artist) + "/+images",
 			"/music/" + lastfmPath(artist),
@@ -82,15 +106,19 @@ func (c *Lastfm) Lookup(ctx context.Context, kind Kind, input Input) (*Result, e
 		if album == "" {
 			return nil, ErrNotFound
 		}
+		extract = extractLastfmAlbumCover
+		// The main album page renders the album-overview-cover-art container;
+		// the gallery page does not, so it is tried only as a fallback.
 		pages = []string{
-			"/music/" + lastfmPath(artist) + "/" + lastfmPath(album) + "/+images",
 			"/music/" + lastfmPath(artist) + "/" + lastfmPath(album),
+			"/music/" + lastfmPath(artist) + "/" + lastfmPath(album) + "/+images",
 		}
 	case Song:
 		track := strings.TrimSpace(input.TrackName)
 		if track == "" {
 			return nil, ErrNotFound
 		}
+		extract = extractLastfmImageURL
 		pages = []string{
 			"/music/" + lastfmPath(artist) + "/_" + lastfmPath(track) + "/+images",
 			"/music/" + lastfmPath(artist) + "/_" + lastfmPath(track),
@@ -99,7 +127,7 @@ func (c *Lastfm) Lookup(ctx context.Context, kind Kind, input Input) (*Result, e
 		return nil, ErrNotFound
 	}
 	for _, page := range pages {
-		value, err := c.searchPage(ctx, page)
+		value, err := c.searchPage(ctx, page, extract)
 		if err != nil {
 			continue
 		}
@@ -111,8 +139,8 @@ func (c *Lastfm) Lookup(ctx context.Context, kind Kind, input Input) (*Result, e
 	return nil, ErrNotFound
 }
 
-// searchPage fetches a Last.fm page and returns the first valid image URL.
-func (c *Lastfm) searchPage(ctx context.Context, page string) (string, error) {
+// searchPage fetches a Last.fm page and runs extract over its body.
+func (c *Lastfm) searchPage(ctx context.Context, page string, extract func(string) string) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+page, nil)
 	if err != nil {
 		return "", err
@@ -133,7 +161,7 @@ func (c *Lastfm) searchPage(ctx context.Context, page string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return extractLastfmImageURL(string(body)), nil
+	return extract(string(body)), nil
 }
 
 // lastfmPath percent-encodes a path segment, using '+' as the space separator

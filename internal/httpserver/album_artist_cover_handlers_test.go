@@ -29,6 +29,34 @@ func (c *coverStubProvider) Lookup(_ context.Context, _ cover.Kind, _ cover.Inpu
 	return c.result, nil
 }
 
+// coverSearchStub is a cover provider stub that returns multiple candidates so
+// handler tests exercise the multi-result filter path.
+type coverSearchStub struct {
+	name    string
+	results []cover.Result
+	calls   int
+}
+
+func (c *coverSearchStub) Name() string { return c.name }
+func (c *coverSearchStub) Lookup(_ context.Context, _ cover.Kind, _ cover.Input) (*cover.Result, error) {
+	c.calls++
+	if len(c.results) == 0 {
+		return nil, cover.ErrNotFound
+	}
+	return &c.results[0], nil
+}
+func (c *coverSearchStub) Search(_ context.Context, _ cover.Kind, _ cover.Input, limit int) ([]cover.Result, error) {
+	c.calls++
+	out := make([]cover.Result, 0, len(c.results))
+	for _, result := range c.results {
+		if len(out) >= limit {
+			break
+		}
+		out = append(out, result)
+	}
+	return out, nil
+}
+
 // testFallbackGuard returns a guard with generous limits so handler-level
 // tests never trip the per-IP budget or the queue gate.
 func testFallbackGuard() *fallbackGuard {
@@ -76,6 +104,30 @@ func TestArtistCoverProviderFallbackHitAndCaches(t *testing.T) {
 	// Second hit is served locally, so the resolver is only consulted once.
 	if stub.calls != 0 {
 		t.Fatalf("expected cached local hit without upstream, got %d calls", stub.calls)
+	}
+}
+
+func TestAlbumCoverTitleOnlyResolvesBestMatch(t *testing.T) {
+	database := testCoverDB(t)
+	stub := &coverSearchStub{name: "itunes", results: []cover.Result{
+		{URL: "http://img/wrong.jpg", Source: "itunes", ArtistName: "NIFANA", AlbumName: "Imagine (Reggae Version) - Single"},
+		{URL: "http://img/imagine.jpg", Source: "itunes", ArtistName: "John Lennon", AlbumName: "Imagine"},
+	}}
+	handler := getAlbumCoverHandler(database, cover.NewResolver(stub), testFallbackGuard(), 0, true)
+
+	response := performRequest(t, handler, "/?album_name=Imagine")
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", response.Code, response.Body.String())
+	}
+	var got albumArtistCoverResponse
+	if err := json.NewDecoder(response.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.CoverURL != "http://img/imagine.jpg" || got.CoverSource != "itunes" {
+		t.Fatalf("expected the matching album cover, got %+v", got)
+	}
+	if len(got.Results) != 1 {
+		t.Fatalf("expected 1 filtered result, got %d: %+v", len(got.Results), got.Results)
 	}
 }
 
