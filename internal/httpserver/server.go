@@ -160,14 +160,15 @@ func NewWithLogger(cfg config.Config, metadataDB, lyricsDB, coverDB *sql.DB, log
 	lyricsMisses := newLyricsMissCache()
 	fallbacks := newFallbackGuard(cfg)
 	coverRefresher := newCoverRefreshJob(cfg, coverDB, coverResolver, logger)
+	prefetcher := newPrefetcher(cfg, metadataDB, lyricsDB, coverDB, coverResolver, client, lyricsMisses, logger)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", healthz)
 	mux.HandleFunc("GET /version", versionHandler)
-	mux.HandleFunc("GET /api/lyrics/get", getLyricsHandler(metadataDB, lyricsDB, client, lyricsMisses, fallbacks, cfg.LRCLIBFallbackEnabled))
+	mux.HandleFunc("GET /api/lyrics/get", getLyricsHandler(metadataDB, lyricsDB, client, lyricsMisses, fallbacks, cfg.LRCLIBFallbackEnabled, prefetcher))
 	mux.HandleFunc("GET /api/lyrics/search", searchLyricsHandlerWithUpstream(metadataDB, lyricsDB, client, fallbacks, cfg.LRCLIBFallbackEnabled))
-	mux.HandleFunc("GET /api/metadata/get", getMetadataHandler(metadataDB, metadataResolver, fallbacks, cfg.MetadataFallbackEnabled))
+	mux.HandleFunc("GET /api/metadata/get", getMetadataHandler(metadataDB, metadataResolver, fallbacks, cfg.MetadataFallbackEnabled, prefetcher))
 	mux.HandleFunc("GET /api/metadata/search", searchMetadataHandlerWithUpstream(metadataDB, metadataResolver, fallbacks, cfg.MetadataFallbackEnabled))
-	mux.HandleFunc("GET /api/cover/get", getCoverTopHandler(metadataDB, coverDB, coverResolver, fallbacks, cfg.CoverFallbackEnabled))
+	mux.HandleFunc("GET /api/cover/get", getCoverTopHandler(metadataDB, coverDB, coverResolver, fallbacks, cfg.CoverFallbackEnabled, prefetcher))
 	mux.HandleFunc("GET /api/cover/artist", getEntityCoverSearchHandler(coverDB, coverResolver, fallbacks, db.CoverArtist, cfg.CoverFallbackEnabled))
 	mux.HandleFunc("GET /api/cover/album", getEntityCoverSearchHandler(coverDB, coverResolver, fallbacks, db.CoverAlbum, cfg.CoverFallbackEnabled))
 	mux.HandleFunc("GET /api/cover/search", searchCoverHandler(metadataResolver, coverResolver, fallbacks, cfg.CoverFallbackEnabled))
@@ -193,6 +194,9 @@ func NewWithLogger(cfg config.Config, metadataDB, lyricsDB, coverDB *sql.DB, log
 	server.RegisterOnShutdown(limiter.Stop)
 	server.RegisterOnShutdown(fallbacks.Stop)
 	server.RegisterOnShutdown(coverRefresher.Stop)
+	if prefetcher != nil {
+		server.RegisterOnShutdown(prefetcher.Stop)
+	}
 	if requestLogs != nil {
 		server.RegisterOnShutdown(func() { _ = requestLogs.Close() })
 	}

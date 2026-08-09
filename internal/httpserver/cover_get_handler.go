@@ -11,7 +11,7 @@ import (
 	"github.com/sillygru/music-utils/internal/db"
 )
 
-func getCoverTopHandler(metadataDB, coverDB *sql.DB, resolver *cover.Resolver, fallbacks *fallbackGuard, fallbackEnabled bool) http.HandlerFunc {
+func getCoverTopHandler(metadataDB, coverDB *sql.DB, resolver *cover.Resolver, fallbacks *fallbackGuard, fallbackEnabled bool, prefetcher *prefetcher) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
 		kind := cover.Song
@@ -79,6 +79,7 @@ func getCoverTopHandler(metadataDB, coverDB *sql.DB, resolver *cover.Resolver, f
 			setCacheDuration(r, time.Since(cacheStart))
 			if lookupErr == nil && track.CoverURL != "" {
 				setOutcome(r, "local_hit")
+				prefetcher.Enqueue(track.Name, track.ArtistName, track.AlbumName, track.Duration)
 				writeJSON(w, http.StatusOK, coverSearchResponse{EntityType: kind.String(), TrackName: track.Name, ArtistName: track.ArtistName, AlbumName: track.AlbumName, CoverURL: track.CoverURL, CoverSource: track.CoverURLSource})
 				return
 			}
@@ -130,6 +131,9 @@ func getCoverTopHandler(metadataDB, coverDB *sql.DB, resolver *cover.Resolver, f
 			_ = db.UpsertCoverArt(r.Context(), coverDB, coverEntityForKind(kind), input.ArtistName, input.AlbumName, result.URL, result.Source)
 		}
 		setOutcome(r, "provider_fallback_hit")
+		if kind == cover.Song {
+			prefetcher.Enqueue(result.TrackName, result.ArtistName, result.AlbumName, 0)
+		}
 		writeJSON(w, http.StatusOK, coverSearchResponse{EntityType: kind.String(), TrackName: result.TrackName, ArtistName: result.ArtistName, AlbumName: result.AlbumName, CoverURL: result.URL, CoverSource: result.Source})
 	}
 }

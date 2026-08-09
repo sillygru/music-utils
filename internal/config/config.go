@@ -44,6 +44,13 @@ const (
 	defaultCoverFallbackEnabled    = true
 	defaultLastfmBaseURL           = "https://www.last.fm"
 	defaultCoverTimeoutMS          = 10000
+	defaultPrefetchEnabled         = true
+	defaultPrefetchPerMin          = 10
+	defaultPrefetchConcurrency     = 4
+	defaultPrefetchQueueSize       = 64
+	defaultPrefetchLyrics          = true
+	defaultPrefetchAlbumCover      = true
+	defaultPrefetchArtistCover     = true
 )
 
 // Config contains the settings needed to start the server.
@@ -85,6 +92,14 @@ type Config struct {
 	LastfmBaseURL        string
 	CoverTimeoutMS       int
 	CoverUserAgent       string
+
+	PrefetchEnabled       bool
+	PrefetchPerMin        int
+	PrefetchConcurrency   int
+	PrefetchQueueSize     int
+	PrefetchLyrics        bool
+	PrefetchAlbumCover    bool
+	PrefetchArtistCover   bool
 }
 
 // Load reads configuration from the environment and applies defaults when a
@@ -128,6 +143,14 @@ func Load() Config {
 		LastfmBaseURL:        valueOrDefault("LASTFM_BASE_URL", defaultLastfmBaseURL),
 		CoverTimeoutMS:       intOrDefault("COVER_TIMEOUT_MS", defaultCoverTimeoutMS),
 		CoverUserAgent:       valueOrDefault("COVER_USER_AGENT", defaultCoverUserAgent()),
+
+		PrefetchEnabled:       boolOrDefault("PREFETCH_ENABLED", defaultPrefetchEnabled),
+		PrefetchPerMin:        intOrDefault("PREFETCH_PER_MIN", defaultPrefetchPerMin),
+		PrefetchConcurrency:   intOrDefault("PREFETCH_CONCURRENCY", defaultPrefetchConcurrency),
+		PrefetchQueueSize:     intOrDefault("PREFETCH_QUEUE_SIZE", defaultPrefetchQueueSize),
+		PrefetchLyrics:        boolOrDefault("PREFETCH_LYRICS", defaultPrefetchLyrics),
+		PrefetchAlbumCover:    boolOrDefault("PREFETCH_ALBUM_COVER", defaultPrefetchAlbumCover),
+		PrefetchArtistCover:   boolOrDefault("PREFETCH_ARTIST_COVER", defaultPrefetchArtistCover),
 	}
 }
 
@@ -204,6 +227,15 @@ func (c Config) Validate() error {
 	if c.LRCLIBTimeoutMS < 1 || c.MetadataTimeoutMS < 1 || c.CoverTimeoutMS < 1 {
 		return fmt.Errorf("upstream timeouts must be positive")
 	}
+	if c.PrefetchPerMin < 1 {
+		return fmt.Errorf("PREFETCH_PER_MIN must be positive")
+	}
+	if c.PrefetchConcurrency < 1 {
+		return fmt.Errorf("PREFETCH_CONCURRENCY must be positive")
+	}
+	if c.PrefetchQueueSize < 1 {
+		return fmt.Errorf("PREFETCH_QUEUE_SIZE must be positive")
+	}
 	if strings.TrimSpace(c.LRCLIBUserAgent) == "" {
 		return fmt.Errorf("LRCLIB_USER_AGENT must not be empty")
 	}
@@ -241,7 +273,7 @@ func validateEnvironment() error {
 	if err := validateIntEnv("DB_CACHE_SIZE_KB"); err != nil {
 		return err
 	}
-	for _, name := range []string{"DB_MAX_OPEN_CONNS", "RATE_LIMIT_PER_SEC", "RATE_LIMIT_PER_MIN", "FALLBACK_PER_MIN", "FALLBACK_MAX_QUEUE", "FALLBACK_QUEUE_WAIT_MS", "COVER_REFRESH_AFTER_DAYS", "COVER_REFRESH_MAX_ROWS", "COVER_REFRESH_MAX_RECHECK", "LRCLIB_TIMEOUT_MS", "METADATA_TIMEOUT_MS", "COVER_TIMEOUT_MS"} {
+	for _, name := range []string{"DB_MAX_OPEN_CONNS", "RATE_LIMIT_PER_SEC", "RATE_LIMIT_PER_MIN", "FALLBACK_PER_MIN", "FALLBACK_MAX_QUEUE", "FALLBACK_QUEUE_WAIT_MS", "COVER_REFRESH_AFTER_DAYS", "COVER_REFRESH_MAX_ROWS", "COVER_REFRESH_MAX_RECHECK", "LRCLIB_TIMEOUT_MS", "METADATA_TIMEOUT_MS", "COVER_TIMEOUT_MS", "PREFETCH_PER_MIN", "PREFETCH_CONCURRENCY", "PREFETCH_QUEUE_SIZE"} {
 		if err := validatePositiveIntEnv(name); err != nil {
 			return err
 		}
@@ -255,7 +287,7 @@ func validateEnvironment() error {
 			return fmt.Errorf("REQUEST_LOG_RETENTION_DAYS must be a non-negative integer")
 		}
 	}
-	for _, name := range []string{"TRUST_PROXY", "LRCLIB_FALLBACK_ENABLED", "METADATA_FALLBACK_ENABLED", "COVER_FALLBACK_ENABLED", "COVER_REFRESH_ENABLED", "REQUEST_LOG_ENABLED"} {
+	for _, name := range []string{"TRUST_PROXY", "LRCLIB_FALLBACK_ENABLED", "METADATA_FALLBACK_ENABLED", "COVER_FALLBACK_ENABLED", "COVER_REFRESH_ENABLED", "REQUEST_LOG_ENABLED", "PREFETCH_ENABLED", "PREFETCH_LYRICS", "PREFETCH_ALBUM_COVER", "PREFETCH_ARTIST_COVER"} {
 		if value := strings.TrimSpace(os.Getenv(name)); value != "" {
 			if _, err := strconv.ParseBool(value); err != nil {
 				return fmt.Errorf("%s must be a boolean", name)

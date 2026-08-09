@@ -88,7 +88,7 @@ func TestCoverGetSongTitleOnlyResolves(t *testing.T) {
 	handler := getCoverTopHandler(metadataDB, nil, cover.NewResolver(&coverStubProvider{
 		name:   "itunes",
 		result: &cover.Result{URL: "http://img/song.jpg", Source: "itunes", TrackName: "Example Song", ArtistName: "Example Artist", AlbumName: "Example Album"},
-	}), testFallbackGuard(), true)
+	}), testFallbackGuard(), true, nil)
 
 	response := performRequest(t, handler, "/?track_name=Example+Song")
 	if response.Code != http.StatusOK {
@@ -113,7 +113,7 @@ func TestCoverGetAlbumTitleOnlyResolves(t *testing.T) {
 			{URL: "http://img/wrong.jpg", Source: "itunes", ArtistName: "NIFANA", AlbumName: "Imagine (Reggae Version) - Single"},
 			{URL: "http://img/imagine.jpg", Source: "itunes", ArtistName: "John Lennon", AlbumName: "Imagine"},
 		},
-	}), testFallbackGuard(), true)
+	}), testFallbackGuard(), true, nil)
 
 	response := performRequest(t, handler, "/?type=album&album_name=Imagine")
 	if response.Code != http.StatusOK {

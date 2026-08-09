@@ -131,6 +131,14 @@ cold-lookup latency and has been removed.
   dead URLs are re-resolved through the provider chain, capped per run). Stale
   positives are also re-resolved on demand when requested, so cover URL rot
   never leaves a permanent dead link.
+- **Background prefetch** — after a successful song lookup (metadata, lyrics,
+  or song cover), the server quietly fetches and caches the song's lyrics,
+  album cover, and artist cover (`PREFETCH_ENABLED`, default on) so later
+  requests are local hits. Each target first checks the local caches and only
+  spends upstream budget when something is genuinely missing; all calls flow
+  through the same per-provider pacing as live traffic and a dedicated
+  `PREFETCH_PER_MIN` budget (separate from client limits) caps background
+  spend, so prefetching can never exhaust an upstream API.
 - **Request logging** — every request is logged (when, endpoint, params,
   status, cached-or-upstream outcome, and split cache/upstream timings) into a
   dedicated, storage-optimized SQLite database (`REQUEST_LOG_ENABLED`, default
@@ -176,6 +184,13 @@ cold-lookup latency and has been removed.
 | `COVER_REFRESH_END_HOUR` | `5` | Refresh window end hour (exclusive; lower than start wraps across midnight). |
 | `COVER_REFRESH_MAX_ROWS` | `2000` | Max cover rows checked per refresh sweep. |
 | `COVER_REFRESH_MAX_RECHECK` | `200` | Max dead URLs re-resolved through providers per sweep. |
+| `PREFETCH_ENABLED` | `true` | Background prefetch of related content after successful song lookups. |
+| `PREFETCH_PER_MIN` | `10` | Cap on background upstream calls per minute (separate from client budgets). |
+| `PREFETCH_CONCURRENCY` | `4` | Max prefetch jobs processed at once. |
+| `PREFETCH_QUEUE_SIZE` | `64` | Pending prefetch queue; jobs beyond it are dropped. |
+| `PREFETCH_LYRICS` | `true` | Prefetch LRCLIB lyrics for looked-up songs. |
+| `PREFETCH_ALBUM_COVER` | `true` | Prefetch album artwork once the song's album is known. |
+| `PREFETCH_ARTIST_COVER` | `true` | Prefetch artist artwork once the song's artist is known. |
 | `REQUEST_LOG_ENABLED` | `true` | Record every request (when, endpoint, params, outcome, split cache/upstream timings) into the request log database. |
 | `REQUEST_LOG_DB_PATH` | `./data/request_log.db` | Storage-optimized request log database. |
 | `REQUEST_LOG_RETENTION_DAYS` | `30` | Prune request log rows older than this daily; `0` keeps everything. |

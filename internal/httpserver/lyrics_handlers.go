@@ -42,7 +42,7 @@ type apiError struct {
 	Message string `json:"message"`
 }
 
-func getLyricsHandler(metadataDB, lyricsDB *sql.DB, client *lrclib.Client, lyricsMisses *lyricsMissCache, fallbacks *fallbackGuard, fallbackEnabled bool) http.HandlerFunc {
+func getLyricsHandler(metadataDB, lyricsDB *sql.DB, client *lrclib.Client, lyricsMisses *lyricsMissCache, fallbacks *fallbackGuard, fallbackEnabled bool, prefetcher *prefetcher) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
 		trackName := strings.TrimSpace(query.Get("track_name"))
@@ -68,6 +68,7 @@ func getLyricsHandler(metadataDB, lyricsDB *sql.DB, client *lrclib.Client, lyric
 		existingTrack := track
 		if err == nil && lyricsAvailable(lyrics) {
 			setOutcome(r, "local_hit")
+			prefetcher.Enqueue(track.Name, track.ArtistName, track.AlbumName, track.Duration)
 			writeJSON(w, http.StatusOK, toLyricsResponse(track, lyrics))
 			return
 		}
@@ -177,6 +178,7 @@ func getLyricsHandler(metadataDB, lyricsDB *sql.DB, client *lrclib.Client, lyric
 			Instrumental: remote.Instrumental,
 		}
 		setOutcome(r, "lrclib_fallback_hit")
+		prefetcher.Enqueue(cacheTrack.Name, cacheTrack.ArtistName, cacheTrack.AlbumName, cacheTrack.Duration)
 		writeJSON(w, http.StatusOK, toLyricsResponse(track, lyrics))
 	}
 }
