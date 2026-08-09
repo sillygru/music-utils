@@ -133,7 +133,7 @@ func TestHealthzIsExemptFromRateLimit(t *testing.T) {
 			rejected++
 		}
 
-		healthResponse := requestFromIP(t, server.Handler, http.MethodGet, "/healthz", "192.0.2.30:1234")
+		healthResponse := requestFromIP(t, server.Handler, http.MethodGet, "/api/healthz", "192.0.2.30:1234")
 		if healthResponse.Code != http.StatusOK {
 			t.Fatalf("health endpoint was throttled: got %d", healthResponse.Code)
 		}

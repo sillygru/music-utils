@@ -13,7 +13,7 @@ func TestVersionEndpoint(t *testing.T) {
 	server := New("8080", metadataDB, lyricsDB)
 	cleanupHTTPServer(t, server)
 
-	response := performRequest(t, server.Handler, "/version")
+	response := performRequest(t, server.Handler, "/api/version")
 	if response.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", response.Code, response.Body.String())
 	}
@@ -28,7 +28,7 @@ func TestVersionEndpoint(t *testing.T) {
 		t.Fatalf("expected version %q, got %q", version.Version, body.Version)
 	}
 
-	health := performRequest(t, server.Handler, "/healthz")
+	health := performRequest(t, server.Handler, "/api/healthz")
 	if health.Code != http.StatusOK || health.Body.String() != "{\"status\":\"ok\"}\n" {
 		t.Fatalf("health endpoint contract changed: status=%d body=%q", health.Code, health.Body.String())
 	}

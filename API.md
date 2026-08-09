@@ -42,8 +42,8 @@ console.log(data.plainLyrics);
 
 | Endpoint | Description |
 | --- | --- |
-| `GET /healthz` | Health check (not rate limited) |
-| `GET /version` | Server version (not rate limited) |
+| `GET /api/healthz` | Health check (not rate limited) |
+| `GET /api/version` | Server version (not rate limited) |
 | `GET /api/metadata/get` | Exact metadata lookup; resolves upstream on a miss |
 | `GET /api/metadata/search` | Multi-provider metadata search; returns several results |
 | `GET /api/metadata/get` | Top metadata result; returns one object |
@@ -53,11 +53,32 @@ console.log(data.plainLyrics);
 | `GET /api/cover/album` | Album cover top result, with provider results included |
 | `GET /api/lyrics/get` | Exact/top lyrics lookup; returns one object |
 | `GET /api/lyrics/search` | LRCLIB-compatible multi-result lyrics search |
+| `GET /api/stats/requests-today` | Requests served since the local start of day (opt-in) |
 
-## `GET /healthz` and `GET /version`
+## `GET /api/healthz` and `GET /api/version`
 
-- `GET /healthz` → `{"status":"ok"}` — liveness probe; never rate limited.
-- `GET /version` → `{"version":"v0.6.0"}` — never rate limited.
+- `GET /api/healthz` → `{"status":"ok"}` — liveness probe; never rate limited.
+- `GET /api/version` → `{"version":"v0.6.0"}` — never rate limited.
+
+## `GET /api/stats/requests-today`
+
+How many requests the instance has served since the local start of day. The
+count is seeded from the request log at startup and updates live, so it
+survives restarts. Its own requests are excluded, so polling it does not
+inflate the number.
+
+Example response:
+
+```json
+{
+  "requestsToday": 4123
+}
+```
+
+This endpoint is **opt-in** (`REQUESTS_TODAY_ENABLED=true`) and defaults to
+off; when disabled it returns `404`. It depends on the request log
+(`REQUEST_LOG_ENABLED`) for a real count and reports `0` when logging is
+turned off. Subject to the same per-IP rate limits as the rest of `/api/*`.
 
 ## `GET /api/metadata/get`
 
@@ -332,7 +353,7 @@ Current public policy, applied per client IP:
   (up to `FALLBACK_QUEUE_WAIT_MS`) and then fail fast with `503` instead of
   queueing indefinitely — retry after the `Retry-After` interval.
 
-`/healthz` and `/version` are never rate limited. Limit values are current
+`/api/healthz` and `/api/version` are never rate limited. Limit values are current
 policy and may be adjusted; always honor `Retry-After` rather than assuming
 fixed numbers.
 

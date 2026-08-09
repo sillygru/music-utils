@@ -230,15 +230,15 @@ For nginx, obtain certificates with certbot. The proxy must overwrite
 ## Verifying the install
 
 ```sh
-curl http://localhost:8080/healthz      # {"status":"ok"}  (not rate limited)
-curl http://localhost:8080/version      # {"version":"v0.6.0"}
+curl http://localhost:8080/api/healthz      # {"status":"ok"}  (not rate limited)
+curl http://localhost:8080/api/version      # {"version":"v0.6.0"}
 curl 'http://localhost:8080/api/metadata/get?track_name=Example%20Song&artist_name=Example%20Artist'
 ```
 
 Through the proxy:
 
 ```sh
-curl https://example.com/healthz
+curl https://example.com/api/healthz
 ```
 
 ## Backups
@@ -303,7 +303,7 @@ GitHub release. Upgrading:
 2. Download the new `bin/music-utils` and install it over the old one.
 3. `sudo systemctl restart music-utils`.
 4. Check `journalctl -u music-utils -e` for the startup log and migration
-   messages, then confirm `/healthz`.
+   messages, then confirm `/api/healthz`.
 
 Schema migrations run automatically at startup and are idempotent. Keep the
 previous binary (e.g. `music-utils.old`) for an instant rollback:
@@ -343,7 +343,7 @@ instance:
    fast with `503` when the upstream layer is saturated. Together these keep
    upstream spend bounded no matter how many clients call.
 
-4. **Monitor:** `/healthz` is unauthenticated and unthrottled — point your
+4. **Monitor:** `/api/healthz` is unauthenticated and unthrottled — point your
    uptime checker at it. Watch journald for `rate_limited` and `503`
    outcomes; those counters are the signal for tuning the limits.
 

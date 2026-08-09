@@ -86,7 +86,9 @@ func (l *rateLimiter) Stop() {
 
 func (l *rateLimiter) Handler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasPrefix(r.URL.Path, "/api/") {
+		// Health and version probes are never rate limited; keep that
+		// guarantee even though they now live under /api/.
+		if !strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/api/healthz" || r.URL.Path == "/api/version" {
 			next.ServeHTTP(w, r)
 			return
 		}

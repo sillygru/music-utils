@@ -62,6 +62,10 @@ type Options struct {
 	// as empty to minimize storage. A nil pointer means the default (true)
 	// applies; the flag only matters when UAOptimize is enabled.
 	UASaveUnknown *bool
+	// ExcludeCountPath is an endpoint path whose own requests are not counted
+	// toward RequestsToday, so a stats endpoint can report traffic without
+	// counting its own polls. Empty means every request is counted.
+	ExcludeCountPath string
 }
 
 // retention returns the configured retention window, defaulting to "kept
@@ -107,6 +111,15 @@ type Writer struct {
 	endpoints map[string]int64
 	outcomes  map[string]int64
 
+	// Requests-today counter: an in-memory tally kept exact across restarts by
+	// seeding from the stored rows at open. todayDay is the unix seconds of the
+	// local start of day that todayCount describes; when it no longer matches
+	// the current day the counter lazily resets to zero.
+	todayMu          sync.Mutex
+	todayDay         int64
+	todayCount       int64
+	excludeCountPath string
+
 	dropped       atomic.Int64
 	writeFailures atomic.Int64
 }
@@ -120,6 +133,7 @@ func Open(path string, opts *Options, logger *slog.Logger) (*Writer, error) {
 	}
 	uaOptimize := true
 	uaSaveUnknown := true
+	excludeCountPath := ""
 	if opts != nil {
 		if opts.UAOptimize != nil {
 			uaOptimize = *opts.UAOptimize
@@ -127,6 +141,7 @@ func Open(path string, opts *Options, logger *slog.Logger) (*Writer, error) {
 		if opts.UASaveUnknown != nil {
 			uaSaveUnknown = *opts.UASaveUnknown
 		}
+		excludeCountPath = opts.ExcludeCountPath
 	}
 	if strings.TrimSpace(path) == "" {
 		return nil, fmt.Errorf("request log database path is empty")
@@ -172,19 +187,21 @@ func Open(path string, opts *Options, logger *slog.Logger) (*Writer, error) {
 		}
 	}
 	w := &Writer{
-		db:            database,
-		ch:            make(chan Record, channelCapacity),
-		logger:        logger,
-		retention:     retention(opts),
-		uaOptimize:    uaOptimize,
-		uaSaveUnknown: uaSaveUnknown,
-		stop:          make(chan struct{}),
-		done:          make(chan struct{}),
-		pruneDone:     make(chan struct{}),
-		methods:       make(map[string]int64),
-		endpoints:     make(map[string]int64),
-		outcomes:      make(map[string]int64),
+		db:               database,
+		ch:               make(chan Record, channelCapacity),
+		logger:           logger,
+		retention:        retention(opts),
+		uaOptimize:       uaOptimize,
+		uaSaveUnknown:    uaSaveUnknown,
+		excludeCountPath: excludeCountPath,
+		stop:             make(chan struct{}),
+		done:             make(chan struct{}),
+		pruneDone:        make(chan struct{}),
+		methods:          make(map[string]int64),
+		endpoints:        make(map[string]int64),
+		outcomes:         make(map[string]int64),
 	}
+	w.seedToday()
 	go w.run()
 	go w.pruneLoop()
 	return w, nil
@@ -211,7 +228,7 @@ func dsn(path string) string {
 
 // Log queues one request record. It never blocks: when the queue is full the
 // record is dropped and counted, so request-handling latency never depends on
-// log persistence.
+// log persistence. The request also advances the requests-today tally.
 func (w *Writer) Log(rec Record) {
 	select {
 	case w.ch <- rec:
@@ -221,6 +238,65 @@ func (w *Writer) Log(rec Record) {
 			w.logger.Warn("request log queue full, dropping records", "dropped", dropped)
 		}
 	}
+	w.tally(rec)
+}
+
+// RequestsToday reports how many requests have been logged since the local
+// start of day, including those already persisted to the database before this
+// process started. The count lazily resets when a new day begins.
+func (w *Writer) RequestsToday() int64 {
+	now := time.Now()
+	start := startOfDay(now).Unix()
+	w.todayMu.Lock()
+	defer w.todayMu.Unlock()
+	if w.todayDay != start {
+		w.todayDay = start
+		w.todayCount = 0
+	}
+	return w.todayCount
+}
+
+// tally advances the requests-today counter. Endpoints matching
+// excludeCountPath (a self-referencing stats endpoint) are skipped so the
+// counter never counts its own polls.
+func (w *Writer) tally(rec Record) {
+	if w.excludeCountPath != "" && rec.Endpoint == w.excludeCountPath {
+		return
+	}
+	start := startOfDay(rec.TS).Unix()
+	w.todayMu.Lock()
+	defer w.todayMu.Unlock()
+	if w.todayDay != start {
+		w.todayDay = start
+		w.todayCount = 0
+	}
+	w.todayCount++
+}
+
+// seedToday initializes the requests-today counter from the rows already
+// stored for the current day, so the count survives a restart. It is a one-time
+// bounded scan of today's window at startup; best effort on failure.
+func (w *Writer) seedToday() {
+	ctx, cancel := context.WithTimeout(context.Background(), writeTimeout)
+	defer cancel()
+	cutoff := startOfDay(time.Now()).UnixMilli()
+	var count int64
+	if err := w.db.QueryRowContext(ctx,
+		"SELECT count(*) FROM request_log WHERE ts >= ?", cutoff,
+	).Scan(&count); err != nil {
+		w.logger.Warn("seed requests-today counter failed", "error", err)
+		return
+	}
+	w.todayMu.Lock()
+	w.todayDay = cutoff / 1000
+	w.todayCount = count
+	w.todayMu.Unlock()
+}
+
+// startOfDay returns midnight of t's local day.
+func startOfDay(t time.Time) time.Time {
+	year, month, day := t.Date()
+	return time.Date(year, month, day, 0, 0, 0, 0, t.Location())
 }
 
 func (w *Writer) run() {

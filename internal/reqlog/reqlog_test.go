@@ -341,3 +341,88 @@ func TestOpenMigratesExistingDatabaseWithUserAgent(t *testing.T) {
 		t.Fatalf("expected the legacy row to survive migration, got %d rows", count)
 	}
 }
+
+func TestRequestsTodayCountsLoggedRequests(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "request_log.db")
+	w, err := Open(path, &Options{Retention: 0}, testLogger())
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() { _ = w.Close() }()
+
+	if got := w.RequestsToday(); got != 0 {
+		t.Fatalf("expected 0 before any requests, got %d", got)
+	}
+	rec := Record{TS: time.Now(), Method: "GET", Endpoint: "/api/lyrics/get", Status: 200, Outcome: "local_hit"}
+	w.Log(rec)
+	w.Log(rec)
+	w.Log(rec)
+	if got := w.RequestsToday(); got != 3 {
+		t.Fatalf("expected 3 counted requests, got %d", got)
+	}
+}
+
+func TestRequestsTodayExcludesConfiguredPath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "request_log.db")
+	w, err := Open(path, &Options{Retention: 0, ExcludeCountPath: "/api/stats/requests-today"}, testLogger())
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() { _ = w.Close() }()
+
+	now := time.Now()
+	w.Log(Record{TS: now, Endpoint: "/api/stats/requests-today"})
+	w.Log(Record{TS: now, Endpoint: "/api/stats/requests-today"})
+	w.Log(Record{TS: now, Endpoint: "/api/lyrics/get"})
+	w.Log(Record{TS: now, Endpoint: "/api/lyrics/get"})
+	if got := w.RequestsToday(); got != 2 {
+		t.Fatalf("expected only non-stats requests counted, got %d", got)
+	}
+}
+
+func TestRequestsTodaySeedsFromPersistedRows(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "request_log.db")
+	w, err := Open(path, &Options{Retention: 0}, testLogger())
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	w.Log(Record{TS: time.Now(), Endpoint: "/api/lyrics/get"})
+	w.Log(Record{TS: time.Now(), Endpoint: "/api/lyrics/get"})
+	if err := w.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	// A fresh process must recover today's count from the stored rows.
+	w2, err := Open(path, &Options{Retention: 0}, testLogger())
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer func() { _ = w2.Close() }()
+	if got := w2.RequestsToday(); got != 2 {
+		t.Fatalf("expected 2 recovered requests today, got %d", got)
+	}
+	w2.Log(Record{TS: time.Now(), Endpoint: "/api/lyrics/get"})
+	if got := w2.RequestsToday(); got != 3 {
+		t.Fatalf("expected 3 after a live request, got %d", got)
+	}
+}
+
+func TestRequestsTodayResetsOnNewDay(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "request_log.db")
+	w, err := Open(path, &Options{Retention: 0}, testLogger())
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() { _ = w.Close() }()
+
+	yesterday := time.Now().AddDate(0, 0, -1)
+	w.Log(Record{TS: yesterday, Endpoint: "/api/lyrics/get"})
+	// The counter holds yesterday's day; reading it for today resets to zero.
+	if got := w.RequestsToday(); got != 0 {
+		t.Fatalf("expected stale-day counter to read 0, got %d", got)
+	}
+	w.Log(Record{TS: time.Now(), Endpoint: "/api/lyrics/get"})
+	if got := w.RequestsToday(); got != 1 {
+		t.Fatalf("expected 1 for today's request, got %d", got)
+	}
+}

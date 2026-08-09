@@ -36,6 +36,7 @@ const (
 	defaultRequestLogRetentionDays = 30
 	defaultRequestLogUAOptimize    = true
 	defaultRequestLogUASaveUnknown = true
+	defaultRequestsTodayEnabled    = false
 	defaultLRCLIBFallbackEnabled   = true
 	defaultLRCLIBBaseURL           = "https://lrclib.net/api"
 	defaultLRCLIBTimeoutMS         = 5000
@@ -81,6 +82,7 @@ type Config struct {
 	RequestLogRetentionDays int
 	RequestLogUAOptimize    bool
 	RequestLogUASaveUnknown bool
+	RequestsTodayEnabled    bool
 	LRCLIBFallbackEnabled   bool
 	LRCLIBBaseURL           string
 	LRCLIBUserAgent         string
@@ -134,6 +136,7 @@ func Load() Config {
 		RequestLogRetentionDays: nonNegativeIntOrDefault("REQUEST_LOG_RETENTION_DAYS", defaultRequestLogRetentionDays),
 		RequestLogUAOptimize:    boolOrDefault("REQUEST_LOG_UA_OPTIMIZE", defaultRequestLogUAOptimize),
 		RequestLogUASaveUnknown: boolOrDefault("REQUEST_LOG_UA_SAVE_UNKNOWN", defaultRequestLogUASaveUnknown),
+		RequestsTodayEnabled:    boolOrDefault("REQUESTS_TODAY_ENABLED", defaultRequestsTodayEnabled),
 		LRCLIBFallbackEnabled:   boolOrDefault("LRCLIB_FALLBACK_ENABLED", defaultLRCLIBFallbackEnabled),
 		LRCLIBBaseURL:           valueOrDefault("LRCLIB_BASE_URL", defaultLRCLIBBaseURL),
 		LRCLIBUserAgent:         valueOrDefault("LRCLIB_USER_AGENT", defaultLRCLIBUserAgent()),
@@ -293,7 +296,7 @@ func validateEnvironment() error {
 			return fmt.Errorf("REQUEST_LOG_RETENTION_DAYS must be a non-negative integer")
 		}
 	}
-	for _, name := range []string{"TRUST_PROXY", "LRCLIB_FALLBACK_ENABLED", "METADATA_FALLBACK_ENABLED", "COVER_FALLBACK_ENABLED", "COVER_REFRESH_ENABLED", "REQUEST_LOG_ENABLED", "REQUEST_LOG_UA_OPTIMIZE", "REQUEST_LOG_UA_SAVE_UNKNOWN", "PREFETCH_ENABLED", "PREFETCH_LYRICS", "PREFETCH_ALBUM_COVER", "PREFETCH_ARTIST_COVER"} {
+	for _, name := range []string{"TRUST_PROXY", "LRCLIB_FALLBACK_ENABLED", "METADATA_FALLBACK_ENABLED", "COVER_FALLBACK_ENABLED", "COVER_REFRESH_ENABLED", "REQUEST_LOG_ENABLED", "REQUEST_LOG_UA_OPTIMIZE", "REQUEST_LOG_UA_SAVE_UNKNOWN", "REQUESTS_TODAY_ENABLED", "PREFETCH_ENABLED", "PREFETCH_LYRICS", "PREFETCH_ALBUM_COVER", "PREFETCH_ARTIST_COVER"} {
 		if value := strings.TrimSpace(os.Getenv(name)); value != "" {
 			if _, err := strconv.ParseBool(value); err != nil {
 				return fmt.Errorf("%s must be a boolean", name)

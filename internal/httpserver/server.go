@@ -23,6 +23,12 @@ import (
 
 type requestStateKey struct{}
 
+// requestsTodayPath is the API path that reports how many requests have been
+// served since the local start of day. It is registered only when the feature
+// is enabled (REQUESTS_TODAY_ENABLED), and its own requests are excluded from
+// the count so the endpoint never inflates the number it reports.
+const requestsTodayPath = "/api/stats/requests-today"
+
 type requestState struct {
 	outcome    string
 	level      slog.Level
@@ -138,9 +144,10 @@ func NewWithLogger(cfg config.Config, metadataDB, lyricsDB, coverDB *sql.DB, log
 	if cfg.RequestLogEnabled {
 		var err error
 		requestLogs, err = reqlog.Open(cfg.RequestLogDBPath, &reqlog.Options{
-			Retention:     time.Duration(cfg.RequestLogRetentionDays) * 24 * time.Hour,
-			UAOptimize:    boolptr(cfg.RequestLogUAOptimize),
-			UASaveUnknown: boolptr(cfg.RequestLogUASaveUnknown),
+			Retention:        time.Duration(cfg.RequestLogRetentionDays) * 24 * time.Hour,
+			UAOptimize:       boolptr(cfg.RequestLogUAOptimize),
+			UASaveUnknown:    boolptr(cfg.RequestLogUASaveUnknown),
+			ExcludeCountPath: requestsTodayPath,
 		}, logger)
 		if err != nil {
 			logger.Error("open request log database", "error", err)
@@ -166,8 +173,11 @@ func NewWithLogger(cfg config.Config, metadataDB, lyricsDB, coverDB *sql.DB, log
 	coverRefresher := newCoverRefreshJob(cfg, coverDB, coverResolver, logger)
 	prefetcher := newPrefetcher(cfg, metadataDB, lyricsDB, coverDB, coverResolver, client, lyricsMisses, logger)
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", healthz)
-	mux.HandleFunc("GET /version", versionHandler)
+	mux.HandleFunc("GET /api/healthz", healthz)
+	mux.HandleFunc("GET /api/version", versionHandler)
+	if cfg.RequestsTodayEnabled {
+		mux.HandleFunc("GET "+requestsTodayPath, requestsTodayHandler(requestLogs))
+	}
 	mux.HandleFunc("GET /api/lyrics/get", getLyricsHandler(metadataDB, lyricsDB, client, lyricsMisses, fallbacks, cfg.LRCLIBFallbackEnabled, prefetcher))
 	mux.HandleFunc("GET /api/lyrics/search", searchLyricsHandlerWithUpstream(metadataDB, lyricsDB, client, fallbacks, cfg.LRCLIBFallbackEnabled))
 	mux.HandleFunc("GET /api/metadata/get", getMetadataHandler(metadataDB, metadataResolver, fallbacks, cfg.MetadataFallbackEnabled, prefetcher))
@@ -308,6 +318,12 @@ func boolptr(v bool) *bool { return &v }
 
 func requestLogger(next http.Handler, logger *slog.Logger, logs *reqlog.Writer) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Liveness and version probes are polled by uptime checks and deploy
+		// scripts, so keep them out of the application and request logs.
+		if r.URL.Path == "/api/healthz" || r.URL.Path == "/api/version" {
+			next.ServeHTTP(w, r)
+			return
+		}
 		state := &requestState{outcome: "error", level: slog.LevelInfo}
 		ctx := contextWithRequestState(r, state)
 		started := time.Now()
@@ -397,6 +413,22 @@ func versionHandler(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, struct {
 		Version string `json:"version"`
 	}{Version: version.Version})
+}
+
+// requestsTodayHandler reports the number of requests logged since the local
+// start of day. It returns zero when request logging is disabled (no writer),
+// so the endpoint stays consistent even if REQUEST_LOG_ENABLED is turned off.
+func requestsTodayHandler(logs *reqlog.Writer) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var count int64
+		if logs != nil {
+			count = logs.RequestsToday()
+		}
+		setOutcome(r, "local_hit")
+		writeJSON(w, http.StatusOK, struct {
+			RequestsToday int64 `json:"requestsToday"`
+		}{RequestsToday: count})
+	}
 }
 
 func healthz(w http.ResponseWriter, r *http.Request) {

@@ -41,8 +41,8 @@ URL dumps (see [Seed dumps](#seed-dumps)) contain only factual data and links.
 
 | Endpoint | Description |
 | --- | --- |
-| `GET /healthz` | Health check|
-| `GET /version` | Running application version.|
+| `GET /api/healthz` | Health check|
+| `GET /api/version` | Running application version.|
 | `GET /api/metadata/get` | Exact song metadata lookup; local-first with iTunes + Deezer provider fallback. |
 | `GET /api/metadata/search` | Multi-provider metadata search across the local catalog, iTunes, and Deezer. |
 | `GET /api/cover/get` | Song/album/artist cover URL; local-first, resolves iTunes/Deezer on a miss (songs and albums work without an artist). |
@@ -58,7 +58,7 @@ There are no aliases or compatibility redirects.
 Examples:
 
 ```sh
-curl http://localhost:8080/healthz
+curl http://localhost:8080/api/healthz
 curl 'http://localhost:8080/api/metadata/get?track_name=Example%20Song&artist_name=Example%20Artist'
 curl 'http://localhost:8080/api/metadata/search?q=example&limit=20'
 curl 'http://localhost:8080/api/cover/get?track_name=Example%20Song&artist_name=Example%20Artist'
@@ -196,6 +196,7 @@ cold-lookup latency and has been removed.
 | `REQUEST_LOG_RETENTION_DAYS` | `30` | Prune request log rows older than this daily; `0` keeps everything. |
 | `REQUEST_LOG_UA_OPTIMIZE` | `true` | Collapse well-known client User-Agents (curl, wget, browsers, ...) to short tokens in the request log to save storage. |
 | `REQUEST_LOG_UA_SAVE_UNKNOWN` | `true` | When UA optimization is on and a User-Agent is unrecognized, save the full string (`true`) or drop it as empty (`false`). |
+| `REQUESTS_TODAY_ENABLED` | `false` | Serve `GET /api/stats/requests-today`, reporting requests logged since the local start of day (seeded from the request log; its own polls excluded). |
 | `LRCLIB_FALLBACK_ENABLED` | `true` | Enable LRCLIB fallback. |
 | `LRCLIB_BASE_URL` | `https://lrclib.net/api` | LRCLIB API base URL. |
 | `LRCLIB_USER_AGENT` | `music-utils/v0.6.0 (+https://gru0.dev)` | LRCLIB User-Agent. |

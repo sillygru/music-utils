@@ -151,6 +151,27 @@ func TestLoadRequestLogDisabled(t *testing.T) {
 	}
 }
 
+func TestLoadRequestsTodayDefaultsAndFlags(t *testing.T) {
+	clearRateLimitEnv(t)
+	t.Setenv("REQUEST_LOG_ENABLED", "")
+	t.Setenv("REQUESTS_TODAY_ENABLED", "")
+
+	cfg := Load()
+	if cfg.RequestsTodayEnabled {
+		t.Fatal("expected REQUESTS_TODAY_ENABLED to default to false")
+	}
+
+	t.Setenv("REQUESTS_TODAY_ENABLED", "true")
+	if cfg := Load(); !cfg.RequestsTodayEnabled {
+		t.Fatal("expected REQUESTS_TODAY_ENABLED=true to be honored")
+	}
+
+	t.Setenv("REQUESTS_TODAY_ENABLED", "false")
+	if cfg := Load(); cfg.RequestsTodayEnabled {
+		t.Fatal("expected REQUESTS_TODAY_ENABLED=false to be honored")
+	}
+}
+
 func TestLoadRateLimitValuesAndFallbacks(t *testing.T) {
 	t.Setenv("RATE_LIMIT_PER_SEC", "7")
 	t.Setenv("RATE_LIMIT_PER_MIN", "91")

@@ -28,15 +28,19 @@ func TestRequestLogRecordsEveryRequest(t *testing.T) {
 		t.Fatal("expected a request log writer when enabled")
 	}
 
-	// A cache hit, a miss, and a health probe: every request must be logged.
+	// A cache hit, a miss, and exempt probes: API requests are logged, but
+	// liveness/version probes are kept out of the request log.
 	if response := performRequest(t, server.Handler, "/api/lyrics/search?q=example&limit=5"); response.Code != http.StatusOK {
 		t.Fatalf("search failed: %d", response.Code)
 	}
 	if response := performRequest(t, server.Handler, "/api/lyrics/get?track_name=Unknown&artist_name=Artist"); response.Code != http.StatusNotFound {
 		t.Fatalf("miss failed: %d", response.Code)
 	}
-	if response := performRequest(t, server.Handler, "/healthz"); response.Code != http.StatusOK {
+	if response := performRequest(t, server.Handler, "/api/healthz"); response.Code != http.StatusOK {
 		t.Fatalf("healthz failed: %d", response.Code)
+	}
+	if response := performRequest(t, server.Handler, "/api/version"); response.Code != http.StatusOK {
+		t.Fatalf("version failed: %d", response.Code)
 	}
 
 	// Shut down, then flush the request log synchronously: Shutdown does not
@@ -55,8 +59,22 @@ func TestRequestLogRecordsEveryRequest(t *testing.T) {
 	if err := logged.QueryRowContext(context.Background(), "SELECT count(*) FROM request_log").Scan(&count); err != nil {
 		t.Fatalf("count request log: %v", err)
 	}
-	if count != 3 {
-		t.Fatalf("expected 3 logged requests, got %d", count)
+	if count != 2 {
+		t.Fatalf("expected 2 logged requests, got %d", count)
+	}
+
+	// The health and version probes above must not have been logged.
+	for _, probe := range []string{"/api/healthz", "/api/version"} {
+		var probeRows int
+		err := logged.QueryRowContext(context.Background(),
+			"SELECT count(*) FROM request_log WHERE endpoint_id = (SELECT id FROM endpoints WHERE name = ?)",
+			probe).Scan(&probeRows)
+		if err != nil {
+			t.Fatalf("count %s log rows: %v", probe, err)
+		}
+		if probeRows != 0 {
+			t.Fatalf("expected no log rows for %s, got %d", probe, probeRows)
+		}
 	}
 
 	// The search hit must carry its params, outcome, status, cache timing,
