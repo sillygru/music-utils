@@ -47,7 +47,7 @@ func NewResolver(providers ...Provider) *Resolver {
 }
 
 func cacheKey(kind Kind, input Input) string {
-	return kind.String() + "\x00" + normalize(input.ArtistName) + "\x00" + normalize(input.AlbumName)
+	return kind.String() + "\x00" + normalize(input.TrackName) + "\x00" + normalize(input.ArtistName) + "\x00" + normalize(input.AlbumName)
 }
 
 // Search asks every configured provider for its top result and returns those

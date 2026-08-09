@@ -49,6 +49,12 @@ func TestFallbackBudgetLimitsUniqueMissesPerIP(t *testing.T) {
 	}
 }
 
+func TestUpstreamGateWaitsLongerThanOldTwoSeconds(t *testing.T) {
+	if upstreamQueueWait <= 2*time.Second {
+		t.Fatalf("expected upstream queue wait to be much longer than the old 2s, got %s", upstreamQueueWait)
+	}
+}
+
 func TestUpstreamGateFailsFastWhenQueueSaturated(t *testing.T) {
 	hold := make(chan struct{})
 	var releaseOnce sync.Once
@@ -66,6 +72,9 @@ func TestUpstreamGateFailsFastWhenQueueSaturated(t *testing.T) {
 	cfg := fallbackConfig(upstream.URL + "/api")
 	cfg.FallbackPerMin = 100
 	cfg.FallbackMaxQueue = 1
+	// Keep the wait well below the 5s upstream hold so the queued requests
+	// deterministically fail fast instead of outliving the held request.
+	cfg.FallbackQueueWaitMS = 1000
 	cfg.LRCLIBTimeoutMS = 5000
 	metadataDB, lyricsDB := testHTTPDatabases(t)
 	server := NewWithConfig(cfg, metadataDB, lyricsDB)

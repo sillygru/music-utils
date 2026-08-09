@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sillygru/music-utils/internal/db"
+	"github.com/sillygru/music-utils/internal/lrclib"
 )
 
 func testHTTPDatabases(t *testing.T) (*sql.DB, *sql.DB) {
@@ -113,8 +114,8 @@ func TestGetLyricsValidationAndMiss(t *testing.T) {
 	}
 
 	missing = performRequest(t, server.Handler, "/api/lyrics/get?track_name=track")
-	if missing.Code != http.StatusBadRequest {
-		t.Fatalf("expected missing artist_name to return 400, got %d", missing.Code)
+	if missing.Code != http.StatusNotFound {
+		t.Fatalf("expected artist-less unknown track to be a miss (404), got %d", missing.Code)
 	}
 
 	invalidDuration := performRequest(t, server.Handler, "/api/lyrics/get?track_name=track&artist_name=artist&duration=not-a-number")
@@ -187,5 +188,50 @@ func TestSearchLyricsReturnsArrayAndHonorsLimit(t *testing.T) {
 	byFields := performRequest(t, server.Handler, "/api/lyrics/search?track_name=midnight&artist_name=m83")
 	if byFields.Code != http.StatusOK {
 		t.Fatalf("expected field search to return 200, got %d", byFields.Code)
+	}
+}
+
+func TestGetLyricsArtistOptional(t *testing.T) {
+	metadataDB, lyricsDB := testHTTPDatabases(t)
+	seedHTTPTrack(t, metadataDB, lyricsDB)
+	server := New("8080", metadataDB, lyricsDB)
+	cleanupHTTPServer(t, server)
+
+	response := performRequest(t, server.Handler, "/api/lyrics/get?track_name=EXAMPLE+SONG")
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected artist-less lookup to return 200, got %d: %s", response.Code, response.Body.String())
+	}
+	var got lyricsResponse
+	if err := json.NewDecoder(response.Body).Decode(&got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got.TrackName != "Example Song" || got.ArtistName != "Example Artist" || got.PlainLyrics != "These are the words" {
+		t.Fatalf("unexpected artist-less result: %+v", got)
+	}
+}
+
+func TestSynthesizedLyricsResultFiltered(t *testing.T) {
+	synthesized := lrclib.RemoteResult{TrackName: "radiohead  creep", ArtistName: "radiohead  creep", AlbumName: "radiohead  creep", PlainLyrics: "words"}
+	if !synthesizedLyricsResult(synthesized) {
+		t.Fatal("expected synthesized row to be flagged")
+	}
+	real := lrclib.RemoteResult{TrackName: "Radiohead - Creep", ArtistName: "Radiohead", AlbumName: "Radiohead - Creep", PlainLyrics: "words"}
+	if synthesizedLyricsResult(real) {
+		t.Fatal("expected real row not to be flagged")
+	}
+	nameless := lrclib.RemoteResult{ArtistName: "Radiohead", PlainLyrics: "words"}
+	if !synthesizedLyricsResult(nameless) {
+		t.Fatal("expected nameless row to be flagged")
+	}
+}
+
+func TestMatchLyricsByNameSkipsSynthesized(t *testing.T) {
+	results := []lrclib.RemoteResult{
+		{TrackName: "radiohead creep", ArtistName: "radiohead creep", AlbumName: "radiohead creep", PlainLyrics: "garbage"},
+		{TrackName: "Radiohead - Creep", ArtistName: "Radiohead", AlbumName: "Radiohead - Creep", PlainLyrics: "real lyrics"},
+	}
+	match := matchLyricsByName(results, "creep", "")
+	if match == nil || match.ArtistName != "Radiohead" {
+		t.Fatalf("expected real match, got %+v", match)
 	}
 }

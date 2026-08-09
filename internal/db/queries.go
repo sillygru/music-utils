@@ -32,8 +32,12 @@ func FindTrackMetadataExact(ctx context.Context, database *sql.DB, name, artist,
 	if database == nil {
 		return nil, errors.New("metadata database is nil")
 	}
-	query := "SELECT " + trackColumns("tracks") + " FROM tracks WHERE name_lower = ? AND artist_name_lower = ?"
-	args := []any{normalize(name), normalize(artist)}
+	query := "SELECT " + trackColumns("tracks") + " FROM tracks WHERE name_lower = ?"
+	args := []any{normalize(name)}
+	if artist = normalize(artist); artist != "" {
+		query += " AND artist_name_lower = ?"
+		args = append(args, artist)
+	}
 	if value := normalize(album); value != "" {
 		query += " AND album_name_lower = ?"
 		args = append(args, value)

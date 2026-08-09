@@ -45,7 +45,7 @@ distribution without any packages installed.
 
 ### Option A — download a release binary (recommended)
 
-Each release tags `internal/version/version.go` (e.g. `v0.5.1`) and attaches a
+Each release tags `internal/version/version.go` (e.g. `v0.6.0`) and attaches a
 single `bin/music-utils` artifact to the GitHub release.
 
 ```sh
@@ -119,10 +119,11 @@ METADATA_DB_PATH=/opt/music-utils/data/metadata.db
 LYRICS_DB_PATH=/opt/music-utils/data/lyrics.db
 COVER_DB_PATH=/opt/music-utils/data/cover.db
 REQUEST_LOG_DB_PATH=/opt/music-utils/data/request_log.db
-RATE_LIMIT_PER_SEC=10
-RATE_LIMIT_PER_MIN=180
-FALLBACK_PER_MIN=5
-FALLBACK_MAX_QUEUE=3
+RATE_LIMIT_PER_SEC=20
+RATE_LIMIT_PER_MIN=600
+FALLBACK_PER_MIN=60
+FALLBACK_MAX_QUEUE=50
+FALLBACK_QUEUE_WAIT_MS=10000
 TRUST_PROXY=true
 ```
 
@@ -230,7 +231,7 @@ For nginx, obtain certificates with certbot. The proxy must overwrite
 
 ```sh
 curl http://localhost:8080/healthz      # {"status":"ok"}  (not rate limited)
-curl http://localhost:8080/version      # {"version":"v0.5.1"}
+curl http://localhost:8080/version      # {"version":"v0.6.0"}
 curl 'http://localhost:8080/api/metadata/get?track_name=Example%20Song&artist_name=Example%20Artist'
 ```
 
@@ -295,7 +296,7 @@ permanent store.
 
 ## Upgrades
 
-Releases are version-tagged (e.g. `v0.5.1`) and attach the binary to the
+Releases are version-tagged (e.g. `v0.6.0`) and attach the binary to the
 GitHub release. Upgrading:
 
 1. Back up the databases (see [Backups](#backups)) — always before an upgrade.
@@ -323,14 +324,15 @@ instance:
    sudo ufw enable
    ```
 
-2. **Tighten the per-IP limits** in `/etc/music-utils/env` (see the README's
+2. **Set the per-IP limits** in `/etc/music-utils/env` (see the README's
    "Running a public instance" section for the rationale):
 
    ```sh
-   RATE_LIMIT_PER_SEC=2
-   RATE_LIMIT_PER_MIN=60
-   FALLBACK_PER_MIN=5
-   FALLBACK_MAX_QUEUE=3
+   RATE_LIMIT_PER_SEC=20
+   RATE_LIMIT_PER_MIN=600
+   FALLBACK_PER_MIN=60
+   FALLBACK_MAX_QUEUE=50
+   FALLBACK_QUEUE_WAIT_MS=10000
    TRUST_PROXY=true
    # optionally: LRCLIB_FALLBACK_ENABLED=false (serve only cached lyrics)
    ```

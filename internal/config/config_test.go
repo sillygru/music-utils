@@ -20,7 +20,7 @@ func TestLoadLRCLIBDefaults(t *testing.T) {
 	if !cfg.LRCLIBFallbackEnabled || cfg.LRCLIBBaseURL != "https://lrclib.net/api" || cfg.LRCLIBTimeoutMS != 5000 {
 		t.Fatalf("unexpected LRCLIB defaults: %+v", cfg)
 	}
-	if cfg.LRCLIBUserAgent != "music-utils/v0.5.1 (+https://gru0.dev)" {
+	if cfg.LRCLIBUserAgent != "music-utils/v0.6.0 (+https://gru0.dev)" {
 		t.Fatalf("unexpected default LRCLIB user agent: %q", cfg.LRCLIBUserAgent)
 	}
 }
@@ -41,11 +41,11 @@ func TestLoadRateLimitDefaults(t *testing.T) {
 	clearRateLimitEnv(t)
 
 	cfg := Load()
-	if cfg.RateLimitPerSec != 10 {
-		t.Fatalf("expected default per-second limit 10, got %d", cfg.RateLimitPerSec)
+	if cfg.RateLimitPerSec != 20 {
+		t.Fatalf("expected default per-second limit 20, got %d", cfg.RateLimitPerSec)
 	}
-	if cfg.RateLimitPerMin != 180 {
-		t.Fatalf("expected default per-minute limit 180, got %d", cfg.RateLimitPerMin)
+	if cfg.RateLimitPerMin != 600 {
+		t.Fatalf("expected default per-minute limit 600, got %d", cfg.RateLimitPerMin)
 	}
 	if cfg.TrustProxy {
 		t.Fatal("expected TRUST_PROXY to default to false")
@@ -56,9 +56,10 @@ func TestLoadFallbackDefaults(t *testing.T) {
 	clearRateLimitEnv(t)
 	t.Setenv("FALLBACK_PER_MIN", "")
 	t.Setenv("FALLBACK_MAX_QUEUE", "")
+	t.Setenv("FALLBACK_QUEUE_WAIT_MS", "")
 
 	cfg := Load()
-	if cfg.FallbackPerMin != 10 || cfg.FallbackMaxQueue != 5 {
+	if cfg.FallbackPerMin != 60 || cfg.FallbackMaxQueue != 50 || cfg.FallbackQueueWaitMS != 10000 {
 		t.Fatalf("unexpected fallback defaults: %+v", cfg)
 	}
 }
@@ -140,7 +141,7 @@ func TestLoadRateLimitValuesAndFallbacks(t *testing.T) {
 	t.Setenv("RATE_LIMIT_PER_MIN", "not-a-number")
 	t.Setenv("TRUST_PROXY", "not-a-boolean")
 	cfg = Load()
-	if cfg.RateLimitPerSec != 10 || cfg.RateLimitPerMin != 180 || cfg.TrustProxy {
+	if cfg.RateLimitPerSec != 20 || cfg.RateLimitPerMin != 600 || cfg.TrustProxy {
 		t.Fatalf("invalid values did not fall back to defaults: %+v", cfg)
 	}
 }

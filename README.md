@@ -45,7 +45,8 @@ URL dumps (see [Seed dumps](#seed-dumps)) contain only factual data and links.
 | `GET /version` | Running application version.|
 | `GET /api/metadata/get` | Exact song metadata lookup; local-first with iTunes + Deezer provider fallback. |
 | `GET /api/metadata/search` | Multi-provider metadata search across the local catalog, iTunes, and Deezer. |
-| `GET /api/cover/get` | Cached song cover URL and cover source. |
+| `GET /api/cover/get` | Song/album/artist cover URL; local-first, resolves iTunes/Deezer on a miss (songs and albums work without an artist). |
+| `GET /api/cover/search` | Free-text cover search across artists, albums, and songs, plus typed per-type search. |
 | `GET /api/cover/artist` | Artist cover URL; resolves Last.fm → iTunes → Deezer on a miss and caches. |
 | `GET /api/cover/album` | Album cover URL; resolves Last.fm → iTunes → Deezer on a miss and caches. |
 | `GET /api/lyrics/get` | Exact lyrics lookup; local-first with optional LRCLIB fallback. |
@@ -61,6 +62,7 @@ curl http://localhost:8080/healthz
 curl 'http://localhost:8080/api/metadata/get?track_name=Example%20Song&artist_name=Example%20Artist'
 curl 'http://localhost:8080/api/metadata/search?q=example&limit=20'
 curl 'http://localhost:8080/api/cover/get?track_name=Example%20Song&artist_name=Example%20Artist'
+curl 'http://localhost:8080/api/cover/search?q=hotel%20california&limit=10'
 curl 'http://localhost:8080/api/cover/artist?artist_name=Radiohead'
 curl 'http://localhost:8080/api/cover/album?artist_name=Radiohead&album_name=OK%20Computer'
 curl 'http://localhost:8080/api/lyrics/get?track_name=Example%20Song&artist_name=Example%20Artist'
@@ -85,9 +87,11 @@ Metadata responses expose provenance:
   URL for free.
 - lyrics retain their existing `source` in the database.
 
-The song cover endpoint checks the metadata cache before resolving upstream;
-artist and album cover routes return the top result plus provider results. Use
-`/api/cover/search` when you want an array of provider cover results.
+The song and album cover endpoints check local caches before resolving
+upstream; songs and albums resolve on title/album alone when the artist is
+omitted. Artist and album cover routes return the top result plus provider
+results. Use `/api/cover/search` when you want an array of provider cover
+results (free-text `q` searches artists, albums, and songs at once).
 
 ## Provider research decision
 
@@ -151,19 +155,20 @@ cold-lookup latency and has been removed.
 | `DB_MMAP_SIZE` | `536870912` | SQLite mmap size in bytes. |
 | `DB_CACHE_SIZE_KB` | `-64000` | SQLite page cache size. |
 | `DB_MAX_OPEN_CONNS` | `16` | SQLite connection pool limit. |
-| `RATE_LIMIT_PER_SEC` | `10` | Per-IP token-bucket rate. |
-| `RATE_LIMIT_PER_MIN` | `180` | Per-IP rolling-minute cap. |
-| `FALLBACK_PER_MIN` | `10` | Per-IP cap on cache-missing requests that trigger provider fallback. |
-| `FALLBACK_MAX_QUEUE` | `5` | Max cache-missing requests inside the upstream layer; new misses fail fast with `503` when saturated. |
+| `RATE_LIMIT_PER_SEC` | `20` | Per-IP token-bucket rate. |
+| `RATE_LIMIT_PER_MIN` | `600` | Per-IP rolling-minute cap. |
+| `FALLBACK_PER_MIN` | `60` | Per-IP cap on cache-missing requests that trigger provider fallback. |
+| `FALLBACK_MAX_QUEUE` | `50` | Max cache-missing requests inside the upstream layer; new misses fail fast with `503` when saturated. |
+| `FALLBACK_QUEUE_WAIT_MS` | `10000` | How long a cache-missing request waits for an upstream queue slot before failing fast with `503`. |
 | `TRUST_PROXY` | `false` | Trust the first `X-Forwarded-For` address. |
 | `METADATA_FALLBACK_ENABLED` | `true` | Enable iTunes + Deezer metadata fallback. |
 | `ITUNES_BASE_URL` | `https://itunes.apple.com` | iTunes Search API base URL. |
 | `DEEZER_BASE_URL` | `https://api.deezer.com` | Deezer API base URL. |
-| `METADATA_USER_AGENT` | `music-utils/v0.5.1 (+https://gru0.dev)` | Descriptive upstream User-Agent. |
+| `METADATA_USER_AGENT` | `music-utils/v0.6.0 (+https://gru0.dev)` | Descriptive upstream User-Agent. |
 | `METADATA_TIMEOUT_MS` | `5000` | Metadata provider timeout. |
 | `COVER_FALLBACK_ENABLED` | `true` | Enable Last.fm + iTunes + Deezer album/artist cover resolution. |
 | `COVER_TIMEOUT_MS` | `10000` | Album/artist cover provider timeout. |
-| `COVER_USER_AGENT` | `music-utils/v0.5.1 (+https://gru0.dev)` | Cover upstream User-Agent. |
+| `COVER_USER_AGENT` | `music-utils/v0.6.0 (+https://gru0.dev)` | Cover upstream User-Agent. |
 | `LASTFM_BASE_URL` | `https://www.last.fm` | Last.fm scraping base URL. |
 | `COVER_REFRESH_ENABLED` | `true` | Background refresh of aged positive cover rows. |
 | `COVER_REFRESH_AFTER_DAYS` | `30` | Revalidate cached positive cover URLs older than this. |
@@ -176,7 +181,7 @@ cold-lookup latency and has been removed.
 | `REQUEST_LOG_RETENTION_DAYS` | `30` | Prune request log rows older than this daily; `0` keeps everything. |
 | `LRCLIB_FALLBACK_ENABLED` | `true` | Enable LRCLIB fallback. |
 | `LRCLIB_BASE_URL` | `https://lrclib.net/api` | LRCLIB API base URL. |
-| `LRCLIB_USER_AGENT` | `music-utils/v0.5.1 (+https://gru0.dev)` | LRCLIB User-Agent. |
+| `LRCLIB_USER_AGENT` | `music-utils/v0.6.0 (+https://gru0.dev)` | LRCLIB User-Agent. |
 | `LRCLIB_TIMEOUT_MS` | `5000` | LRCLIB timeout. |
 
 ## Database migration
@@ -223,15 +228,17 @@ cache seed, not a permanent store.
 
 ## Running a public instance
 
-The server ships no authentication by design. For a rate-limited public
-instance, tighten the per-IP limits, trust your reverse proxy, and consider
-limiting the lyrics fallback:
+The server ships no authentication by design. For a public instance behind a
+trusted proxy, relax the per-IP limits to comfortable UX levels (cache hits
+are cheap; the fallback budget and queue guard below still bound upstream
+spend), trust your reverse proxy, and consider limiting the lyrics fallback:
 
 ```sh
-RATE_LIMIT_PER_SEC=2
-RATE_LIMIT_PER_MIN=60
-FALLBACK_PER_MIN=5
-FALLBACK_MAX_QUEUE=3
+RATE_LIMIT_PER_SEC=20
+RATE_LIMIT_PER_MIN=600
+FALLBACK_PER_MIN=60
+FALLBACK_MAX_QUEUE=50
+FALLBACK_QUEUE_WAIT_MS=10000
 TRUST_PROXY=true
 # optionally: LRCLIB_FALLBACK_ENABLED=false (serve only cached lyrics)
 ```

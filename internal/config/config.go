@@ -19,11 +19,12 @@ const (
 	defaultDBMmapSize              = int64(512 * 1024 * 1024)
 	defaultDBCacheSizeKB           = int64(-64000)
 	defaultDBMaxOpenConns          = 16
-	defaultRateLimitPerSec         = 10
-	defaultRateLimitPerMin         = 180
+	defaultRateLimitPerSec         = 20
+	defaultRateLimitPerMin         = 600
 	defaultTrustProxy              = false
-	defaultFallbackPerMin          = 10
-	defaultFallbackMaxQueue        = 5
+	defaultFallbackPerMin          = 60
+	defaultFallbackMaxQueue        = 50
+	defaultFallbackQueueWaitMS     = 10000
 	defaultCoverRefreshEnabled     = true
 	defaultCoverRefreshAfterDays   = 30
 	defaultCoverRefreshStartHour   = 2
@@ -59,6 +60,7 @@ type Config struct {
 	TrustProxy              bool
 	FallbackPerMin          int
 	FallbackMaxQueue        int
+	FallbackQueueWaitMS     int
 	CoverRefreshEnabled     bool
 	CoverRefreshAfterDays   int
 	CoverRefreshStartHour   int
@@ -101,6 +103,7 @@ func Load() Config {
 		TrustProxy:              boolOrDefault("TRUST_PROXY", defaultTrustProxy),
 		FallbackPerMin:          intOrDefault("FALLBACK_PER_MIN", defaultFallbackPerMin),
 		FallbackMaxQueue:        intOrDefault("FALLBACK_MAX_QUEUE", defaultFallbackMaxQueue),
+		FallbackQueueWaitMS:     intOrDefault("FALLBACK_QUEUE_WAIT_MS", defaultFallbackQueueWaitMS),
 		CoverRefreshEnabled:     boolOrDefault("COVER_REFRESH_ENABLED", defaultCoverRefreshEnabled),
 		CoverRefreshAfterDays:   intOrDefault("COVER_REFRESH_AFTER_DAYS", defaultCoverRefreshAfterDays),
 		CoverRefreshStartHour:   hourOrDefault("COVER_REFRESH_START_HOUR", defaultCoverRefreshStartHour),
@@ -177,6 +180,9 @@ func (c Config) Validate() error {
 	if c.FallbackMaxQueue < 1 {
 		return fmt.Errorf("FALLBACK_MAX_QUEUE must be positive")
 	}
+	if c.FallbackQueueWaitMS < 1000 {
+		return fmt.Errorf("FALLBACK_QUEUE_WAIT_MS must be at least 1000")
+	}
 	if c.CoverRefreshAfterDays < 1 {
 		return fmt.Errorf("COVER_REFRESH_AFTER_DAYS must be positive")
 	}
@@ -235,7 +241,7 @@ func validateEnvironment() error {
 	if err := validateIntEnv("DB_CACHE_SIZE_KB"); err != nil {
 		return err
 	}
-	for _, name := range []string{"DB_MAX_OPEN_CONNS", "RATE_LIMIT_PER_SEC", "RATE_LIMIT_PER_MIN", "FALLBACK_PER_MIN", "FALLBACK_MAX_QUEUE", "COVER_REFRESH_AFTER_DAYS", "COVER_REFRESH_MAX_ROWS", "COVER_REFRESH_MAX_RECHECK", "LRCLIB_TIMEOUT_MS", "METADATA_TIMEOUT_MS", "COVER_TIMEOUT_MS"} {
+	for _, name := range []string{"DB_MAX_OPEN_CONNS", "RATE_LIMIT_PER_SEC", "RATE_LIMIT_PER_MIN", "FALLBACK_PER_MIN", "FALLBACK_MAX_QUEUE", "FALLBACK_QUEUE_WAIT_MS", "COVER_REFRESH_AFTER_DAYS", "COVER_REFRESH_MAX_ROWS", "COVER_REFRESH_MAX_RECHECK", "LRCLIB_TIMEOUT_MS", "METADATA_TIMEOUT_MS", "COVER_TIMEOUT_MS"} {
 		if err := validatePositiveIntEnv(name); err != nil {
 			return err
 		}

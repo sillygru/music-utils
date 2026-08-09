@@ -62,6 +62,58 @@ func TestITunesAlbumQueryConcatenatedTerm(t *testing.T) {
 	}
 }
 
+func TestITunesSongTitleOnly(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("entity"); got != "song" {
+			t.Fatalf("unexpected entity: %q", got)
+		}
+		if got := r.URL.Query().Get("term"); got != "Hotel California" {
+			t.Fatalf("expected title-only term without a leading artist, got %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"resultCount":1,"results":[{"trackName":"Hotel California","artistName":"Eagles","collectionName":"Hotel California","artworkUrl100":"http://img/100x100.jpg"}]}`))
+	}))
+	defer server.Close()
+
+	client, err := NewITunes(server.URL, "test-agent", time.Second, nil)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	result, err := client.Lookup(context.Background(), Song, Input{TrackName: "Hotel California"})
+	if err != nil {
+		t.Fatalf("lookup: %v", err)
+	}
+	if result.URL != "http://img/600x600.jpg" {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+}
+
+func TestDeezerSongTitleOnly(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/search" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("q"); got != `track:"Hotel California"` {
+			t.Fatalf("expected title-only deezer query, got %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"title":"Hotel California","artist":{"name":"Eagles"},"album":{"title":"Hotel California","cover_xl":"http://img/xl.jpg"}}]}`))
+	}))
+	defer server.Close()
+
+	client, err := NewDeezer(server.URL, "test-agent", time.Second)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	result, err := client.Lookup(context.Background(), Song, Input{TrackName: "Hotel California"})
+	if err != nil {
+		t.Fatalf("lookup: %v", err)
+	}
+	if result.URL != "http://img/xl.jpg" {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+}
+
 func TestDeezerArtistImagePrecedence(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/search/artist" {

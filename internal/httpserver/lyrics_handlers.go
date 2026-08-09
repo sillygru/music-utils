@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"log/slog"
@@ -42,11 +43,6 @@ func getLyricsHandler(metadataDB, lyricsDB *sql.DB, client *lrclib.Client, lyric
 		if trackName == "" {
 			setOutcome(r, "bad_request")
 			writeJSON(w, http.StatusBadRequest, apiError{Code: http.StatusBadRequest, Message: "track_name is required"})
-			return
-		}
-		if artistName == "" {
-			setOutcome(r, "bad_request")
-			writeJSON(w, http.StatusBadRequest, apiError{Code: http.StatusBadRequest, Message: "artist_name is required"})
 			return
 		}
 
@@ -100,7 +96,7 @@ func getLyricsHandler(metadataDB, lyricsDB *sql.DB, client *lrclib.Client, lyric
 		defer release()
 
 		upstreamStart := time.Now()
-		remote, remoteErr := client.GetExact(r.Context(), trackName, artistName, query.Get("album_name"), duration)
+		remote, remoteErr := lookupRemoteLyrics(r.Context(), client, trackName, artistName, query.Get("album_name"), duration)
 		setUpstreamDuration(r, time.Since(upstreamStart))
 		if remoteErr != nil && !errors.Is(remoteErr, lrclib.ErrNotFound) {
 			setRequestIssue(r, slog.LevelWarn, remoteErr.Error())
@@ -115,7 +111,7 @@ func getLyricsHandler(metadataDB, lyricsDB *sql.DB, client *lrclib.Client, lyric
 			// supplied. Broaden that lookup through search by track and artist;
 			// leave album-less 404s as genuine misses to preserve the fallback
 			// budget and avoid an unnecessary second upstream request.
-			if errors.Is(remoteErr, lrclib.ErrNotFound) && strings.TrimSpace(query.Get("album_name")) != "" {
+			if artistName != "" && errors.Is(remoteErr, lrclib.ErrNotFound) && strings.TrimSpace(query.Get("album_name")) != "" {
 				searchStart := time.Now()
 				searchResults, searchErr := client.Search(r.Context(), strings.Join(nonEmpty(trackName, artistName), " "))
 				setUpstreamDuration(r, time.Since(searchStart))
@@ -229,6 +225,9 @@ func searchLyricsHandlerWithUpstream(metadataDB, lyricsDB *sql.DB, client *lrcli
 			setUpstreamDuration(r, time.Since(upstreamStart))
 			if remoteErr == nil {
 				for _, result := range remote {
+					if synthesizedLyricsResult(result) {
+						continue
+					}
 					appendResult(result)
 				}
 			}
@@ -303,6 +302,86 @@ func remoteLyricsAvailable(result *lrclib.RemoteResult) bool {
 		return false
 	}
 	return result.Instrumental || result.PlainLyrics != "" || result.SyncedLyrics != ""
+}
+
+// lookupRemoteLyrics resolves lyrics upstream. LRCLIB's exact endpoint requires
+// an artist, so an artist-less request resolves through search and selects the
+// best result instead.
+func lookupRemoteLyrics(ctx context.Context, client *lrclib.Client, trackName, artistName, albumName string, duration float64) (*lrclib.RemoteResult, error) {
+	if artistName == "" {
+		searchResults, err := client.Search(ctx, strings.Join(nonEmpty(trackName, albumName), " "))
+		if err != nil {
+			return nil, err
+		}
+		if remote := matchLyricsByName(searchResults, trackName, albumName); remote != nil {
+			return remote, nil
+		}
+		return nil, lrclib.ErrNotFound
+	}
+	return client.GetExact(ctx, trackName, artistName, albumName, duration)
+}
+
+// matchLyricsByName selects the best search result for an artist-less request:
+// a result whose track name contains the requested track, preferring one that
+// also matches the album hint. Synthesized rows (where LRCLIB fills every
+// field with the query) are never selected.
+func matchLyricsByName(results []lrclib.RemoteResult, trackName, albumName string) *lrclib.RemoteResult {
+	var best *lrclib.RemoteResult
+	for i := range results {
+		result := &results[i]
+		if synthesizedLyricsResult(*result) || !remoteLyricsAvailable(result) {
+			continue
+		}
+		if !lyricsNameContains(result.TrackName, trackName) {
+			continue
+		}
+		if best == nil {
+			best = result
+		}
+		if albumName != "" && lyricsNameContains(result.AlbumName, albumName) {
+			return result
+		}
+	}
+	return best
+}
+
+// lyricsNameContains reports whether candidate contains want after
+// normalization, requiring every requested token to appear as a whole token or
+// a prefix of one. This matches "radiohead - creep" for "creep" without
+// matching "creeper".
+func lyricsNameContains(candidate, want string) bool {
+	candidate = strings.ToLower(strings.TrimSpace(candidate))
+	want = strings.ToLower(strings.TrimSpace(want))
+	if candidate == "" || want == "" {
+		return false
+	}
+	candidateTokens := strings.Fields(candidate)
+	for _, token := range strings.Fields(want) {
+		found := false
+		for _, candidateToken := range candidateTokens {
+			if candidateToken == token || strings.HasPrefix(candidateToken, token) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
+// synthesizedLyricsResult reports whether LRCLIB filled every identity field
+// with the same value, which is the signature of a synthesized placeholder row
+// whose metadata cannot be trusted. Rows without a track name are treated the
+// same way.
+func synthesizedLyricsResult(result lrclib.RemoteResult) bool {
+	track := strings.ToLower(strings.TrimSpace(result.TrackName))
+	if track == "" {
+		return true
+	}
+	return track == strings.ToLower(strings.TrimSpace(result.ArtistName)) &&
+		track == strings.ToLower(strings.TrimSpace(result.AlbumName))
 }
 
 func matchingLyricsResult(results []lrclib.RemoteResult, trackName, artistName string) *lrclib.RemoteResult {

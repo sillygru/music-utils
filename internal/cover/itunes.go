@@ -63,14 +63,14 @@ func (c *ITunes) Name() string { return "itunes" }
 
 func (c *ITunes) Lookup(ctx context.Context, kind Kind, input Input) (*Result, error) {
 	artist := CleanArtist(input.ArtistName)
-	if artist == "" {
-		return nil, ErrNotFound
-	}
 	params := url.Values{}
 	params.Set("entity", "album")
 	params.Set("limit", "5")
 	switch kind {
 	case Artist:
+		if artist == "" {
+			return nil, ErrNotFound
+		}
 		params.Set("term", artist)
 	case Song:
 		track := strings.TrimSpace(input.TrackName)
@@ -78,13 +78,13 @@ func (c *ITunes) Lookup(ctx context.Context, kind Kind, input Input) (*Result, e
 			return nil, ErrNotFound
 		}
 		params.Set("entity", "song")
-		params.Set("term", artist+" "+track)
+		params.Set("term", strings.TrimSpace(artist+" "+track))
 	case Album:
 		album := CleanAlbum(input.AlbumName)
 		if album == "" {
 			return nil, ErrNotFound
 		}
-		params.Set("term", artist+" "+album)
+		params.Set("term", strings.TrimSpace(artist+" "+album))
 	default:
 		return nil, ErrNotFound
 	}

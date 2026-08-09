@@ -37,6 +37,7 @@ func main() {
 		"rate_limit_per_min", cfg.RateLimitPerMin,
 		"fallback_per_min", cfg.FallbackPerMin,
 		"fallback_max_queue", cfg.FallbackMaxQueue,
+		"fallback_queue_wait_ms", cfg.FallbackQueueWaitMS,
 		"trust_proxy", cfg.TrustProxy,
 		"lrclib_fallback_enabled", cfg.LRCLIBFallbackEnabled,
 		"lrclib_base_url", cfg.LRCLIBBaseURL,

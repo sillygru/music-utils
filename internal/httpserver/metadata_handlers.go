@@ -43,11 +43,6 @@ func getMetadataHandler(database *sql.DB, resolver *metadata.Resolver, fallbacks
 			writeJSON(w, http.StatusBadRequest, apiError{Code: http.StatusBadRequest, Message: "track_name is required"})
 			return
 		}
-		if artist == "" {
-			setOutcome(r, "bad_request")
-			writeJSON(w, http.StatusBadRequest, apiError{Code: http.StatusBadRequest, Message: "artist_name is required"})
-			return
-		}
 		duration, err := optionalDuration(query.Get("duration"))
 		if err != nil {
 			setOutcome(r, "bad_request")

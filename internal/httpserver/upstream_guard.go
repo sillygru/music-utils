@@ -12,8 +12,9 @@ import (
 const (
 	// upstreamQueueWait is how long a cache-missing request waits for a slot
 	// in the upstream queue before failing fast with 503 instead of queueing
-	// behind a pile of other misses.
-	upstreamQueueWait = 2 * time.Second
+	// behind a pile of other misses. It is also the default when a
+	// directly-constructed Config in tests leaves the wait at zero.
+	upstreamQueueWait = 10 * time.Second
 	// upstreamQueueRetryAfter is the Retry-After value advertised with 503s.
 	upstreamQueueRetryAfter = upstreamQueueWait / time.Second
 )
@@ -33,11 +34,14 @@ func newUpstreamGate(capacity int) *upstreamGate {
 	return &upstreamGate{sem: make(chan struct{}, capacity)}
 }
 
-// acquire reserves one slot, waiting up to upstreamQueueWait. The returned
-// release must be called exactly once. ok is false when the queue is
-// saturated or the request context is canceled.
-func (g *upstreamGate) acquire(ctx context.Context) (release func(), ok bool) {
-	timer := time.NewTimer(upstreamQueueWait)
+// acquire reserves one slot, waiting up to wait. The returned release must be
+// called exactly once. ok is false when the queue is saturated or the request
+// context is canceled.
+func (g *upstreamGate) acquire(ctx context.Context, wait time.Duration) (release func(), ok bool) {
+	if wait <= 0 {
+		wait = upstreamQueueWait
+	}
+	timer := time.NewTimer(wait)
 	defer timer.Stop()
 	select {
 	case g.sem <- struct{}{}:
@@ -57,6 +61,7 @@ type fallbackGuard struct {
 	budget     *rateLimiter
 	gate       *upstreamGate
 	trustProxy bool
+	queueWait  time.Duration
 }
 
 func newFallbackGuard(cfg config.Config) *fallbackGuard {
@@ -67,10 +72,15 @@ func newFallbackGuard(cfg config.Config) *fallbackGuard {
 	// rate limiter to the default per-minute window, mirroring the main
 	// limiter's behavior.
 	budgetCfg.RateLimitPerMin = cfg.FallbackPerMin
+	queueWait := time.Duration(cfg.FallbackQueueWaitMS) * time.Millisecond
+	if queueWait <= 0 {
+		queueWait = upstreamQueueWait
+	}
 	return &fallbackGuard{
 		budget:     newRateLimiter(budgetCfg),
 		gate:       newUpstreamGate(cfg.FallbackMaxQueue),
 		trustProxy: cfg.TrustProxy,
+		queueWait:  queueWait,
 	}
 }
 
@@ -89,7 +99,7 @@ func (g *fallbackGuard) enter(r *http.Request, w http.ResponseWriter) (release f
 		writeRateLimitResponse(w, retryAfter)
 		return nil, false
 	}
-	release, ok := g.gate.acquire(r.Context())
+	release, ok := g.gate.acquire(r.Context(), g.queueWait)
 	if !ok {
 		w.Header().Set("Retry-After", strconv.Itoa(int(upstreamQueueRetryAfter)))
 		setOutcome(r, "upstream_busy")

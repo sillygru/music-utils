@@ -27,35 +27,43 @@ func getCoverTopHandler(metadataDB, coverDB *sql.DB, resolver *cover.Resolver, f
 		input := cover.Input{
 			TrackName: strings.TrimSpace(query.Get("track_name")), ArtistName: strings.TrimSpace(query.Get("artist_name")), AlbumName: strings.TrimSpace(query.Get("album_name")),
 		}
-		if input.ArtistName == "" {
-			setOutcome(r, "bad_request")
-			writeJSON(w, http.StatusBadRequest, apiError{Code: http.StatusBadRequest, Message: "artist_name is required"})
-			return
-		}
-		if kind == cover.Song && input.TrackName == "" {
-			setOutcome(r, "bad_request")
-			writeJSON(w, http.StatusBadRequest, apiError{Code: http.StatusBadRequest, Message: "track_name is required for song covers"})
-			return
-		}
-		if kind == cover.Album && input.AlbumName == "" {
-			setOutcome(r, "bad_request")
-			writeJSON(w, http.StatusBadRequest, apiError{Code: http.StatusBadRequest, Message: "album_name is required for album covers"})
-			return
+		switch kind {
+		case cover.Artist:
+			if input.ArtistName == "" {
+				setOutcome(r, "bad_request")
+				writeJSON(w, http.StatusBadRequest, apiError{Code: http.StatusBadRequest, Message: "artist_name is required for artist covers"})
+				return
+			}
+		case cover.Album:
+			if input.AlbumName == "" {
+				setOutcome(r, "bad_request")
+				writeJSON(w, http.StatusBadRequest, apiError{Code: http.StatusBadRequest, Message: "album_name is required for album covers"})
+				return
+			}
+		default:
+			if input.TrackName == "" {
+				setOutcome(r, "bad_request")
+				writeJSON(w, http.StatusBadRequest, apiError{Code: http.StatusBadRequest, Message: "track_name is required for song covers"})
+				return
+			}
 		}
 
 		// A song get first uses the existing metadata cache, which is cheaper
 		// and preserves the exact cover URL chosen during metadata enrichment.
 		if (kind == cover.Artist || kind == cover.Album) && coverDB != nil {
-			entity := db.CoverArtist
-			if kind == cover.Album {
-				entity = db.CoverAlbum
-			}
+			entity := coverEntityForKind(kind)
 			cacheStart := time.Now()
 			cached, lookupErr := db.FindCoverArt(r.Context(), coverDB, entity, input.ArtistName, input.AlbumName)
 			setCacheDuration(r, time.Since(cacheStart))
 			if lookupErr == nil && cached.CoverURL != "" {
 				setOutcome(r, "local_hit")
 				writeJSON(w, http.StatusOK, coverSearchResponse{EntityType: kind.String(), ArtistName: input.ArtistName, AlbumName: input.AlbumName, CoverURL: cached.CoverURL, CoverSource: cached.CoverSource})
+				return
+			}
+			if lookupErr == nil && cached.CoverURL == "" && checkedRecently(cached.CheckedAt) {
+				// Fresh negative cache: do not spend upstream budget again.
+				setOutcome(r, "miss")
+				writeJSON(w, http.StatusNotFound, apiError{Code: http.StatusNotFound, Message: "Cover not found"})
 				return
 			}
 			if lookupErr != nil && !errors.Is(lookupErr, sql.ErrNoRows) {
@@ -93,17 +101,20 @@ func getCoverTopHandler(metadataDB, coverDB *sql.DB, resolver *cover.Resolver, f
 		started := time.Now()
 		result, lookupErr := resolver.Lookup(r.Context(), kind, input)
 		setUpstreamDuration(r, time.Since(started))
+		if kind != cover.Song && lookupErr == nil && result != nil && result.URL != "" && !coverResultMatches(kind, input, *result) {
+			result = nil
+			lookupErr = cover.ErrNotFound
+		}
 		if lookupErr != nil || result == nil || result.URL == "" {
+			if kind != cover.Song && coverDB != nil {
+				_ = db.UpsertCoverArt(r.Context(), coverDB, coverEntityForKind(kind), input.ArtistName, input.AlbumName, "", "")
+			}
 			setOutcome(r, "miss")
 			writeJSON(w, http.StatusNotFound, apiError{Code: http.StatusNotFound, Message: "Cover not found"})
 			return
 		}
 		if kind != cover.Song && coverDB != nil {
-			entity := db.CoverArtist
-			if kind == cover.Album {
-				entity = db.CoverAlbum
-			}
-			_ = db.UpsertCoverArt(r.Context(), coverDB, entity, input.ArtistName, input.AlbumName, result.URL, result.Source)
+			_ = db.UpsertCoverArt(r.Context(), coverDB, coverEntityForKind(kind), input.ArtistName, input.AlbumName, result.URL, result.Source)
 		}
 		setOutcome(r, "provider_fallback_hit")
 		writeJSON(w, http.StatusOK, coverSearchResponse{EntityType: kind.String(), TrackName: result.TrackName, ArtistName: result.ArtistName, AlbumName: result.AlbumName, CoverURL: result.URL, CoverSource: result.Source})

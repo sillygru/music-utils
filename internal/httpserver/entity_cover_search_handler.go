@@ -19,7 +19,7 @@ func getEntityCoverSearchHandler(database *sql.DB, resolver *cover.Resolver, fal
 	return func(w http.ResponseWriter, r *http.Request) {
 		artist := strings.TrimSpace(r.URL.Query().Get("artist_name"))
 		album := strings.TrimSpace(r.URL.Query().Get("album_name"))
-		if artist == "" {
+		if entityType == db.CoverArtist && artist == "" {
 			setOutcome(r, "bad_request")
 			writeJSON(w, http.StatusBadRequest, apiError{Code: http.StatusBadRequest, Message: "artist_name is required"})
 			return
@@ -35,6 +35,12 @@ func getEntityCoverSearchHandler(database *sql.DB, resolver *cover.Resolver, fal
 		if cacheErr != nil && !errors.Is(cacheErr, sql.ErrNoRows) {
 			setOutcome(r, "error")
 			writeJSON(w, http.StatusInternalServerError, apiError{Code: http.StatusInternalServerError, Message: "Internal server error"})
+			return
+		}
+		if cacheErr == nil && cached.CoverURL == "" && checkedRecently(cached.CheckedAt) {
+			// Fresh negative cache: do not spend upstream budget again.
+			setOutcome(r, "miss")
+			writeJSON(w, http.StatusNotFound, apiError{Code: http.StatusNotFound, Message: "Cover not found"})
 			return
 		}
 		if !fallbackEnabled || resolver == nil {
@@ -55,12 +61,18 @@ func getEntityCoverSearchHandler(database *sql.DB, resolver *cover.Resolver, fal
 		started := time.Now()
 		results, lookupErr := resolver.Search(r.Context(), toKind(entityType), cover.Input{ArtistName: artist, AlbumName: album}, 50)
 		setUpstreamDuration(r, time.Since(started))
+		if lookupErr == nil {
+			results = filterCoverResults(toKind(entityType), cover.Input{ArtistName: artist, AlbumName: album}, results)
+		}
 		if lookupErr != nil || len(results) == 0 {
 			if cacheErr == nil && cached.CoverURL != "" {
 				setOutcome(r, "local_partial_hit")
 				writeJSON(w, http.StatusOK, albumArtistCoverFromRow(cached, entityType, artist, album))
 				return
 			}
+			// Persist a negative result so repeat lookups stop spending upstream
+			// budget for the negative-cache window.
+			_ = db.UpsertCoverArt(r.Context(), database, entityType, artist, album, "", "")
 			setOutcome(r, "miss")
 			writeJSON(w, http.StatusNotFound, apiError{Code: http.StatusNotFound, Message: "Cover not found"})
 			return

@@ -170,7 +170,7 @@ func NewWithLogger(cfg config.Config, metadataDB, lyricsDB, coverDB *sql.DB, log
 	mux.HandleFunc("GET /api/cover/get", getCoverTopHandler(metadataDB, coverDB, coverResolver, fallbacks, cfg.CoverFallbackEnabled))
 	mux.HandleFunc("GET /api/cover/artist", getEntityCoverSearchHandler(coverDB, coverResolver, fallbacks, db.CoverArtist, cfg.CoverFallbackEnabled))
 	mux.HandleFunc("GET /api/cover/album", getEntityCoverSearchHandler(coverDB, coverResolver, fallbacks, db.CoverAlbum, cfg.CoverFallbackEnabled))
-	mux.HandleFunc("GET /api/cover/search", searchCoverHandler(coverResolver, fallbacks, cfg.CoverFallbackEnabled))
+	mux.HandleFunc("GET /api/cover/search", searchCoverHandler(metadataResolver, coverResolver, fallbacks, cfg.CoverFallbackEnabled))
 
 	limiter := newRateLimiter(cfg)
 	// CORS wraps the limiter so every response (including 429/503) carries the
@@ -182,7 +182,11 @@ func NewWithLogger(cfg config.Config, metadataDB, lyricsDB, coverDB *sql.DB, log
 		Handler:           requestLogger(application, logger, requestLogs),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      15 * time.Second,
+		// WriteTimeout must cover the upstream queue wait (up to
+		// FALLBACK_QUEUE_WAIT_MS) plus the slowest upstream call
+		// (METADATA_TIMEOUT_MS / COVER_TIMEOUT_MS), or queued cache-missing
+		// requests are killed mid-flight before their upstream lookup returns.
+		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       120 * time.Second,
 		MaxHeaderBytes:    1 << 20,
 	}

@@ -47,7 +47,7 @@ console.log(data.plainLyrics);
 | `GET /api/metadata/get` | Exact metadata lookup; resolves upstream on a miss |
 | `GET /api/metadata/search` | Multi-provider metadata search; returns several results |
 | `GET /api/metadata/get` | Top metadata result; returns one object |
-| `GET /api/cover/search` | Multi-provider artist, album, or song cover search |
+| `GET /api/cover/search` | Free-text or typed cover search across artists, albums, and songs |
 | `GET /api/cover/get` | Top cover result; returns one object |
 | `GET /api/cover/artist` | Artist cover top result, with provider results included |
 | `GET /api/cover/album` | Album cover top result, with provider results included |
@@ -57,7 +57,7 @@ console.log(data.plainLyrics);
 ## `GET /healthz` and `GET /version`
 
 - `GET /healthz` → `{"status":"ok"}` — liveness probe; never rate limited.
-- `GET /version` → `{"version":"v0.5.1"}` — never rate limited.
+- `GET /version` → `{"version":"v0.6.0"}` — never rate limited.
 
 ## `GET /api/metadata/get`
 
@@ -139,13 +139,15 @@ invalid input · `429` rate limited · `500` internal error.
 ## `GET /api/cover/get`
 
 Returns the top cover result as one object. Use `type=artist`, `type=album`,
-or `type=song` with `artist_name` and the corresponding optional/required
-name fields. A song request without `type` remains supported for compatibility.
-The endpoint checks local caches before resolving the provider chain.
+or `type=song`. A song request without `type` defaults to `song` for
+compatibility. The endpoint checks local caches before resolving the provider
+chain.
 
-Query parameters: `type` is optional and defaults to `song`; `artist_name` is
-required; `track_name` is required for songs; `album_name` is required for
-albums.
+Query parameters: `type` is optional and defaults to `song`; `track_name` is
+required for songs and `album_name` for albums. `artist_name` is optional for
+songs and albums — when omitted, the title/album is searched on its own
+(iTunes and Deezer resolve name-only lookups; Last.fm still needs an artist).
+`artist_name` is required for `type=artist`.
 
 Example response:
 
@@ -165,15 +167,34 @@ Responses: `200` cached cover · `400` invalid input · `404` not cached ·
 
 ## `GET /api/cover/search`
 
-Searches artwork across Last.fm, iTunes, and Deezer. The response is an array
-with one entry per provider that returned a URL; `coverUrlSource` identifies the
-provider. Set `type=artist`, `type=album`, or `type=song`.
+Two search modes, both returning a JSON array of cover results.
+
+**Free-text search (default when `q` is set):** searches songs, albums, and
+artists for one query and merges the results, interleaved so no type crowds
+out the others. Each result carries an `entityType` (`song`, `album`, or
+`artist`) plus the usual `trackName`/`artistName`/`albumName`,
+`coverUrl`, and `coverUrlSource` fields. Songs come from iTunes and Deezer's
+free-text search; albums and artists from Last.fm, iTunes, and Deezer. Add
+`type=artist`, `type=album`, or `type=song` to narrow the free-text search to
+one kind.
+
+**Structured search (when `q` is omitted):** `type` is required and selects
+which artwork to look up:
 
 ```sh
+# Free-text, mixed: songs + albums + artists
+curl 'https://music.gru0.dev/api/cover/search?q=hotel+california&limit=10'
+# Free-text narrowed to one kind
+curl 'https://music.gru0.dev/api/cover/search?q=radiohead&type=artist'
+# Structured per-type search
 curl 'https://music.gru0.dev/api/cover/search?type=artist&artist_name=Radiohead'
-curl 'https://music.gru0.dev/api/cover/search?type=album&artist_name=Radiohead&album_name=OK%20Computer'
-curl 'https://music.gru0.dev/api/cover/search?type=song&artist_name=Radiohead&track_name=No%20Surprises'
+curl 'https://music.gru0.dev/api/cover/search?type=album&album_name=OK%20Computer'
+curl 'https://music.gru0.dev/api/cover/search?type=song&track_name=No%20Surprises'
 ```
+
+`artist_name` is optional in structured song/album searches, same as
+`/api/cover/get`. `limit` defaults to `10`, range `1–50`; it caps the final
+merged array.`
 
 ## `GET /api/cover/artist`
 
@@ -286,15 +307,16 @@ invalid input · `429` rate limited · `500` internal error.
 
 Current public policy, applied per client IP:
 
-- **2 requests/second** and **60 requests/minute** on all `/api/*` endpoints.
+- **20 requests/second** and **600 requests/minute** on all `/api/*` endpoints.
 - **Cache hits do not consume the stricter upstream budget below**, but every
   `/api/*` request counts toward the per-IP limits above.
 - Only requests that miss the cache and actually fetch from an upstream
-  source count against a separate, stricter cap: **5 upstream-triggering
+  source count against a separate, stricter cap: **60 upstream-triggering
   requests/minute**. A client that repeatedly queries content the API does
   not have will hit this second cap and receive `429`.
-- When the shared upstream queue is saturated, new misses fail fast with
-  `503` instead of waiting — retry after the `Retry-After` interval.
+- When the shared upstream queue is saturated, new misses wait for a slot
+  (up to `FALLBACK_QUEUE_WAIT_MS`) and then fail fast with `503` instead of
+  queueing indefinitely — retry after the `Retry-After` interval.
 
 `/healthz` and `/version` are never rate limited. Limit values are current
 policy and may be adjusted; always honor `Retry-After` rather than assuming

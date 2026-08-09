@@ -97,16 +97,18 @@ func TestAlbumCoverActorCache(t *testing.T) {
 	}
 }
 
-func TestAlbumCoverRequiresArtistAndAlbum(t *testing.T) {
+func TestAlbumCoverRequiresAlbum(t *testing.T) {
 	db := testCoverDB(t)
 	handler := getAlbumCoverHandler(db, nil, testFallbackGuard(), 0, true)
 	first := performArtistRequest(t, handler, "/?artist_name=Radiohead")
 	if first.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 without album_name, got %d", first.Code)
 	}
+	// artist_name is optional for album covers: an album-only request is a miss,
+	// not a validation error.
 	second := performArtistRequest(t, handler, "/?album_name=OK+Computer")
-	if second.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400 without artist_name, got %d", second.Code)
+	if second.Code != http.StatusNotFound {
+		t.Fatalf("expected album-only request to be a miss (404), got %d", second.Code)
 	}
 }
 

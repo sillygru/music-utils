@@ -35,7 +35,7 @@ func handleEntityCover(database *sql.DB, resolver *cover.Resolver, fallbacks *fa
 	return func(w http.ResponseWriter, r *http.Request) {
 		artist := strings.TrimSpace(r.URL.Query().Get("artist_name"))
 		album := strings.TrimSpace(r.URL.Query().Get("album_name"))
-		if artist == "" {
+		if entityType == db.CoverArtist && artist == "" {
 			setOutcome(r, "bad_request")
 			writeJSON(w, http.StatusBadRequest, apiError{Code: http.StatusBadRequest, Message: "artist_name is required"})
 			return
@@ -90,6 +90,9 @@ func handleEntityCover(database *sql.DB, resolver *cover.Resolver, fallbacks *fa
 		upstreamStart := time.Now()
 		results, lookupErr := resolver.Search(r.Context(), toKind(entityType), cover.Input{ArtistName: artist, AlbumName: album}, 50)
 		setUpstreamDuration(r, time.Since(upstreamStart))
+		if lookupErr == nil {
+			results = filterCoverResults(toKind(entityType), cover.Input{ArtistName: artist, AlbumName: album}, results)
+		}
 		if lookupErr != nil || len(results) == 0 {
 			// Persist a negative result so repeat lookups stop spending upstream
 			// budget for the negative-cache window.

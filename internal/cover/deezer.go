@@ -65,9 +65,6 @@ func (c *Deezer) Name() string { return "deezer" }
 
 func (c *Deezer) Lookup(ctx context.Context, kind Kind, input Input) (*Result, error) {
 	artist := CleanArtist(input.ArtistName)
-	if artist == "" {
-		return nil, ErrNotFound
-	}
 	switch kind {
 	case Song:
 		track := strings.TrimSpace(input.TrackName)
@@ -75,7 +72,11 @@ func (c *Deezer) Lookup(ctx context.Context, kind Kind, input Input) (*Result, e
 			return nil, ErrNotFound
 		}
 		params := url.Values{}
-		params.Set("q", `track:"`+track+`" artist:"`+artist+`"`)
+		q := `track:"` + strings.ReplaceAll(track, `"`, `"`) + `"`
+		if artist != "" {
+			q += ` artist:"` + strings.ReplaceAll(artist, `"`, `"`) + `"`
+		}
+		params.Set("q", q)
 		endpoint, err := encodeQuery(c.base, "/search", params)
 		if err != nil {
 			return nil, err
@@ -97,6 +98,9 @@ func (c *Deezer) Lookup(ctx context.Context, kind Kind, input Input) (*Result, e
 		}
 		return nil, ErrNotFound
 	case Artist:
+		if artist == "" {
+			return nil, ErrNotFound
+		}
 		params := url.Values{}
 		params.Set("q", artist)
 		endpoint, err := encodeQuery(c.base, "/search/artist", params)
@@ -119,7 +123,7 @@ func (c *Deezer) Lookup(ctx context.Context, kind Kind, input Input) (*Result, e
 			return nil, ErrNotFound
 		}
 		params := url.Values{}
-		params.Set("q", `"`+artist+" "+album+`"`)
+		params.Set("q", `"`+strings.TrimSpace(artist+" "+album)+`"`)
 		endpoint, err := encodeQuery(c.base, "/search/album", params)
 		if err != nil {
 			return nil, err
