@@ -196,7 +196,7 @@ cold-lookup latency and has been removed.
 | `REQUEST_LOG_RETENTION_DAYS` | `30` | Prune request log rows older than this daily; `0` or `-1` keeps everything forever. |
 | `REQUEST_LOG_UA_OPTIMIZE` | `true` | Collapse well-known client User-Agents (curl, wget, browsers, ...) to short tokens in the request log to save storage. |
 | `REQUEST_LOG_UA_SAVE_UNKNOWN` | `true` | When UA optimization is on and a User-Agent is unrecognized, save the full string (`true`) or drop it as empty (`false`). |
-| `REQUESTS_TODAY_ENABLED` | `false` | Serve `GET /api/stats/requests-today`, reporting requests logged since the local start of day (seeded from the request log; its own polls excluded). |
+| `REQUESTS_TODAY_ENABLED` | `false` | Serve `GET /api/stats/requests-today`, reporting requests logged in the last 24 hours (rolling window, seeded from the request log; its own polls excluded). |
 | `STATS_ENDPOINTS` | *(empty)* | Serve the `GET /api/stats/*` cache-count endpoints: a comma-separated subset of `metadata`, `lyrics`, `covers`, `total`, `songs`, or `all` for every endpoint. Empty enables none. Stats requests are never written to the request log database. |
 | `LRCLIB_FALLBACK_ENABLED` | `true` | Enable LRCLIB fallback. |
 | `LRCLIB_BASE_URL` | `https://lrclib.net/api` | LRCLIB API base URL. |

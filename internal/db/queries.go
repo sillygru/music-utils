@@ -225,10 +225,25 @@ func FindCoverArt(ctx context.Context, database *sql.DB, entityType CoverEntity,
 	return cover, nil
 }
 
-// UpsertCoverArt caches an album or artist cover URL. A hit stores the resolved
-// URL and its source; a miss stores a NULL URL with a set checked_at so the
-// negative result is memoized.
+// UpsertCoverArt caches a single album or artist cover URL (the winner). A hit
+// stores the resolved URL and its source; a miss stores a NULL URL with a set
+// checked_at so the negative result is memoized. The URL is also recorded as
+// the rank-0 variant so the variants table stays consistent for existing call
+// sites.
 func UpsertCoverArt(ctx context.Context, database *sql.DB, entityType CoverEntity, artistName, albumName, coverURL, coverSource string) error {
+	var variants []CoverVariant
+	if coverURL != "" {
+		variants = []CoverVariant{{URL: coverURL, Source: coverSource}}
+	}
+	return UpsertCoverArtVariants(ctx, database, entityType, artistName, albumName, variants)
+}
+
+// UpsertCoverArtVariants stores the full set of cover URLs for an album or
+// artist. The first variant becomes the winner mirrored on the parent
+// cover_urls row, and every variant is kept in the variants table in rank
+// order. A miss (no variants) stores a negative row so the lookup is memoized;
+// the previous variant set is replaced in the same transaction.
+func UpsertCoverArtVariants(ctx context.Context, database *sql.DB, entityType CoverEntity, artistName, albumName string, variants []CoverVariant) error {
 	if database == nil {
 		return errors.New("cover database is nil")
 	}
@@ -239,23 +254,99 @@ func UpsertCoverArt(ctx context.Context, database *sql.DB, entityType CoverEntit
 	// NULLs as distinct in UNIQUE indexes, so NULL would make the ON CONFLICT
 	// never match and every re-upsert would insert a duplicate row.
 	album := albumType(albumName)
-	var urlValue any
-	if coverURL != "" {
-		urlValue = coverURL
+	var winnerURL, winnerSource string
+	if len(variants) > 0 {
+		winnerURL, winnerSource = variants[0].URL, variants[0].Source
 	}
-	var sourceValue any
-	if coverSource != "" {
-		sourceValue = coverSource
+	var urlValue, sourceValue any
+	if winnerURL != "" {
+		urlValue = winnerURL
 	}
-	_, err := database.ExecContext(ctx, `INSERT INTO cover_urls (entity_type,artist_name_lower,album_name_lower,cover_url,cover_source,checked_at,updated_at)
+	if winnerSource != "" {
+		sourceValue = winnerSource
+	}
+	tx, err := database.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin cover upsert: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	var coverURLID int64
+	if err = tx.QueryRowContext(ctx, `INSERT INTO cover_urls (entity_type,artist_name_lower,album_name_lower,cover_url,cover_source,checked_at,updated_at)
 VALUES (?,?,?,?,?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)
 ON CONFLICT(entity_type,artist_name_lower,album_name_lower) DO UPDATE SET
 cover_url=CASE WHEN excluded.cover_url IS NOT NULL THEN excluded.cover_url ELSE cover_url END,
 cover_source=CASE WHEN excluded.cover_url IS NOT NULL THEN excluded.cover_source ELSE cover_source END,
-checked_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP`,
-		string(entityType), normalize(artistName), album, urlValue, sourceValue)
-	if err != nil {
+checked_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP RETURNING id`,
+		string(entityType), normalize(artistName), album, urlValue, sourceValue).Scan(&coverURLID); err != nil {
 		return fmt.Errorf("upsert cover art: %w", err)
+	}
+	if _, err = tx.ExecContext(ctx, `DELETE FROM cover_url_variants WHERE cover_url_id = ?`, coverURLID); err != nil {
+		return fmt.Errorf("clear cover variants: %w", err)
+	}
+	for i, variant := range variants {
+		if strings.TrimSpace(variant.URL) == "" {
+			continue
+		}
+		if _, err = tx.ExecContext(ctx, `INSERT INTO cover_url_variants (cover_url_id,url,source,rank) VALUES (?,?,?,?)`,
+			coverURLID, variant.URL, nullableText(variant.Source), i); err != nil {
+			return fmt.Errorf("insert cover variant: %w", err)
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("commit cover upsert: %w", err)
+	}
+	return nil
+}
+
+// FindCoverVariants returns every cached cover URL for an album or artist in
+// rank order (0 = the winner on the parent row). Empty when the row predates
+// the variants table or was stored as a negative miss.
+func FindCoverVariants(ctx context.Context, database *sql.DB, coverURLID int64) ([]CoverVariant, error) {
+	if database == nil {
+		return nil, errors.New("cover database is nil")
+	}
+	rows, err := database.QueryContext(ctx, `SELECT COALESCE(url,''), COALESCE(source,''), rank FROM cover_url_variants WHERE cover_url_id = ? ORDER BY rank ASC`, coverURLID)
+	if err != nil {
+		return nil, fmt.Errorf("find cover variants: %w", err)
+	}
+	defer rows.Close()
+	variants := []CoverVariant{}
+	for rows.Next() {
+		var variant CoverVariant
+		if err = rows.Scan(&variant.URL, &variant.Source, &variant.Rank); err != nil {
+			return nil, fmt.Errorf("scan cover variant: %w", err)
+		}
+		variants = append(variants, variant)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate cover variants: %w", err)
+	}
+	return variants, nil
+}
+
+// PromoteCoverVariant swaps a live alternate into the winner slot of a cover
+// row: the parent row's cover_url/cover_source become the promoted URL, the
+// two ranks are exchanged so ordering stays consistent, and checked_at is
+// bumped (the promoted URL was just validated).
+func PromoteCoverVariant(ctx context.Context, database *sql.DB, coverURLID int64, url, source string, promotedRank int) error {
+	if database == nil {
+		return errors.New("cover database is nil")
+	}
+	tx, err := database.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin cover promotion: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err = tx.ExecContext(ctx, `UPDATE cover_urls SET cover_url=?, cover_source=?, checked_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=?`,
+		url, nullableText(source), coverURLID); err != nil {
+		return fmt.Errorf("promote cover variant: %w", err)
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE cover_url_variants SET rank = CASE WHEN rank = 0 THEN ? WHEN rank = ? THEN 0 ELSE rank END WHERE cover_url_id = ?`,
+		promotedRank, promotedRank, coverURLID); err != nil {
+		return fmt.Errorf("reorder cover variants: %w", err)
+	}
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("commit cover promotion: %w", err)
 	}
 	return nil
 }

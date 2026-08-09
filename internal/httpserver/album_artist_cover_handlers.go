@@ -40,9 +40,29 @@ func checkedRecently(checkedAt string) bool {
 	return time.Since(checked) < cover.NegativeCacheTTL
 }
 
-func albumArtistCoverFromRow(row *db.CoverArt, entityType db.CoverEntity, artist, album string) albumArtistCoverResponse {
-	return albumArtistCoverResponse{
+func albumArtistCoverFromRow(row *db.CoverArt, entityType db.CoverEntity, artist, album string, variants []db.CoverVariant) albumArtistCoverResponse {
+	response := albumArtistCoverResponse{
 		ID: row.ID, EntityType: string(entityType), ArtistName: artist, AlbumName: album,
 		CoverURL: row.CoverURL, CoverSource: row.CoverSource,
 	}
+	if len(variants) > 0 {
+		response.Results = coverVariantResults(string(entityType), artist, album, variants)
+	}
+	return response
+}
+
+// coverVariantResults maps cached cover variants to the shared response shape,
+// using the requested entity names (variants only persist URL and source).
+func coverVariantResults(entityType, artist, album string, variants []db.CoverVariant) []coverSearchResponse {
+	results := make([]coverSearchResponse, 0, len(variants))
+	for _, variant := range variants {
+		results = append(results, coverSearchResponse{
+			EntityType:  entityType,
+			ArtistName:  artist,
+			AlbumName:   album,
+			CoverURL:    variant.URL,
+			CoverSource: variant.Source,
+		})
+	}
+	return results
 }

@@ -24,9 +24,9 @@ import (
 type requestStateKey struct{}
 
 // requestsTodayPath is the API path that reports how many requests have been
-// served since the local start of day. It is registered only when the feature
-// is enabled (REQUESTS_TODAY_ENABLED), and its own requests are excluded from
-// the count so the endpoint never inflates the number it reports.
+// served in the last 24 hours (a rolling window). It is registered only when
+// the feature is enabled (REQUESTS_TODAY_ENABLED), and its own requests are
+// excluded from the count so the endpoint never inflates the number it reports.
 const requestsTodayPath = "/api/stats/requests-today"
 
 type requestState struct {
@@ -436,9 +436,10 @@ func versionHandler(w http.ResponseWriter, r *http.Request) {
 	}{Version: version.Version})
 }
 
-// requestsTodayHandler reports the number of requests logged since the local
-// start of day. It returns zero when request logging is disabled (no writer),
-// so the endpoint stays consistent even if REQUEST_LOG_ENABLED is turned off.
+// requestsTodayHandler reports the number of requests logged in the last 24
+// hours (a rolling window). It returns zero when request logging is disabled
+// (no writer), so the endpoint stays consistent even if REQUEST_LOG_ENABLED is
+// turned off.
 func requestsTodayHandler(logs *reqlog.Writer) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var count int64

@@ -128,4 +128,67 @@ CREATE TABLE lyrics_tracks (
 	}
 }
 
+func TestMigrateCoverBackfillsVariants(t *testing.T) {
+	ctx := context.Background()
+	database, err := Open(":memory:", Config{MmapSize: 64 * 1024 * 1024, CacheSizeKB: -8000, MaxOpenConns: 1})
+	if err != nil {
+		t.Fatalf("open cover database: %v", err)
+	}
+	defer database.Close()
+
+	// Simulate a deployment predating the variants table: only cover_urls
+	// exists, with positive and negative rows.
+	if _, err = database.ExecContext(ctx, `CREATE TABLE cover_urls (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        entity_type TEXT NOT NULL,
+        artist_name_lower TEXT NOT NULL,
+        album_name_lower TEXT,
+        cover_url TEXT,
+        cover_source TEXT,
+        checked_at DATETIME,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(entity_type, artist_name_lower, album_name_lower)
+    )`); err != nil {
+		t.Fatalf("create legacy cover schema: %v", err)
+	}
+	if _, err = database.ExecContext(ctx, `INSERT INTO cover_urls (entity_type,artist_name_lower,cover_url,cover_source) VALUES
+        ('artist','radiohead','http://img/a.jpg','itunes'),
+        ('artist','muse','http://img/b.jpg','deezer')`); err != nil {
+		t.Fatalf("insert positive rows: %v", err)
+	}
+	if _, err = database.ExecContext(ctx, `INSERT INTO cover_urls (entity_type,artist_name_lower,album_name_lower,cover_url) VALUES
+        ('album','radiohead','ok computer',NULL)`); err != nil {
+		t.Fatalf("insert negative row: %v", err)
+	}
+
+	if err = MigrateCover(ctx, database); err != nil {
+		t.Fatalf("migrate cover database: %v", err)
+	}
+	var count int
+	if err = database.QueryRowContext(ctx, `SELECT count(*) FROM cover_url_variants`).Scan(&count); err != nil {
+		t.Fatalf("count backfilled variants: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("expected 2 backfilled variants (positive rows only), got %d", count)
+	}
+	var winnerVariantRank int
+	if err = database.QueryRowContext(ctx, `SELECT v.rank FROM cover_url_variants v JOIN cover_urls c ON c.id = v.cover_url_id WHERE c.artist_name_lower = 'radiohead' AND c.entity_type = 'artist'`).Scan(&winnerVariantRank); err != nil {
+		t.Fatalf("read backfilled rank: %v", err)
+	}
+	if winnerVariantRank != 0 {
+		t.Fatalf("expected the backfilled variant to be rank 0, got %d", winnerVariantRank)
+	}
+
+	// Idempotent: a second migration adds nothing.
+	if err = MigrateCover(ctx, database); err != nil {
+		t.Fatalf("rerun cover migration: %v", err)
+	}
+	if err = database.QueryRowContext(ctx, `SELECT count(*) FROM cover_url_variants`).Scan(&count); err != nil {
+		t.Fatalf("recount backfilled variants: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("expected the backfill to be idempotent, got %d variants", count)
+	}
+}
+
 var _ *sql.DB

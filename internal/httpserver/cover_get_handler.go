@@ -57,7 +57,13 @@ func getCoverTopHandler(metadataDB, coverDB *sql.DB, resolver *cover.Resolver, f
 			setCacheDuration(r, time.Since(cacheStart))
 			if lookupErr == nil && cached.CoverURL != "" {
 				setOutcome(r, "local_hit")
-				writeJSON(w, http.StatusOK, coverSearchResponse{EntityType: kind.String(), ArtistName: input.ArtistName, AlbumName: input.AlbumName, CoverURL: cached.CoverURL, CoverSource: cached.CoverSource})
+				// Variants are best-effort: a variant read failure still serves
+				// the cached winner.
+				variants, _ := db.FindCoverVariants(r.Context(), coverDB, cached.ID)
+				writeJSON(w, http.StatusOK, coverTopResponse{
+					coverSearchResponse: coverSearchResponse{EntityType: kind.String(), ArtistName: input.ArtistName, AlbumName: input.AlbumName, CoverURL: cached.CoverURL, CoverSource: cached.CoverSource},
+					Results:             coverVariantResults(kind.String(), input.ArtistName, input.AlbumName, variants),
+				})
 				return
 			}
 			if lookupErr == nil && cached.CoverURL == "" && checkedRecently(cached.CheckedAt) {
@@ -102,6 +108,7 @@ func getCoverTopHandler(metadataDB, coverDB *sql.DB, resolver *cover.Resolver, f
 		started := time.Now()
 		var result *cover.Result
 		var lookupErr error
+		variants := make([]db.CoverVariant, 0, 3)
 		if kind == cover.Song {
 			result, lookupErr = resolver.Lookup(r.Context(), kind, input)
 		} else {
@@ -112,6 +119,11 @@ func getCoverTopHandler(metadataDB, coverDB *sql.DB, resolver *cover.Resolver, f
 			lookupErr = err
 			if err == nil {
 				results = filterCoverResults(kind, input, results)
+				// Persist every plausible provider URL, not just the winner, so
+				// the cache can serve alternates (or promote a live one) later.
+				for i := range results {
+					variants = append(variants, db.CoverVariant{URL: results[i].URL, Source: results[i].Source})
+				}
 			}
 			if len(results) > 0 {
 				top := results[0]
@@ -121,19 +133,24 @@ func getCoverTopHandler(metadataDB, coverDB *sql.DB, resolver *cover.Resolver, f
 		setUpstreamDuration(r, time.Since(started))
 		if lookupErr != nil || result == nil || result.URL == "" {
 			if kind != cover.Song && coverDB != nil {
-				_ = db.UpsertCoverArt(r.Context(), coverDB, coverEntityForKind(kind), input.ArtistName, input.AlbumName, "", "")
+				_ = db.UpsertCoverArtVariants(r.Context(), coverDB, coverEntityForKind(kind), input.ArtistName, input.AlbumName, nil)
 			}
 			setOutcome(r, "miss")
 			writeJSON(w, http.StatusNotFound, apiError{Code: http.StatusNotFound, Message: "Cover not found"})
 			return
 		}
 		if kind != cover.Song && coverDB != nil {
-			_ = db.UpsertCoverArt(r.Context(), coverDB, coverEntityForKind(kind), input.ArtistName, input.AlbumName, result.URL, result.Source)
+			_ = db.UpsertCoverArtVariants(r.Context(), coverDB, coverEntityForKind(kind), input.ArtistName, input.AlbumName, variants)
 		}
 		setOutcome(r, "provider_fallback_hit")
 		if kind == cover.Song {
 			prefetcher.Enqueue(result.TrackName, result.ArtistName, result.AlbumName, 0)
+			writeJSON(w, http.StatusOK, coverSearchResponse{EntityType: kind.String(), TrackName: result.TrackName, ArtistName: result.ArtistName, AlbumName: result.AlbumName, CoverURL: result.URL, CoverSource: result.Source})
+			return
 		}
-		writeJSON(w, http.StatusOK, coverSearchResponse{EntityType: kind.String(), TrackName: result.TrackName, ArtistName: result.ArtistName, AlbumName: result.AlbumName, CoverURL: result.URL, CoverSource: result.Source})
+		writeJSON(w, http.StatusOK, coverTopResponse{
+			coverSearchResponse: coverSearchResponse{EntityType: kind.String(), TrackName: result.TrackName, ArtistName: result.ArtistName, AlbumName: result.AlbumName, CoverURL: result.URL, CoverSource: result.Source},
+			Results:             coverVariantResults(kind.String(), input.ArtistName, input.AlbumName, variants),
+		})
 	}
 }

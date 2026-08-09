@@ -63,7 +63,9 @@ func TestCoverRefreshSweepRefreshesStaleRows(t *testing.T) {
 	}))
 	defer artwork.Close()
 
-	stub := &coverStubProvider{name: "itunes", result: &cover.Result{URL: "http://fresh/cover.jpg", Source: "itunes"}}
+	// The recheck path filters provider results for plausibility, so the stub's
+	// re-resolved result must carry the requested artist name.
+	stub := &coverStubProvider{name: "itunes", result: &cover.Result{URL: "http://fresh/cover.jpg", Source: "itunes", ArtistName: "The Beatles"}}
 	coverDB := testCoverDB(t)
 	ctx := context.Background()
 
@@ -102,7 +104,9 @@ func TestCoverRefreshSweepRefreshesStaleRows(t *testing.T) {
 	}
 
 	job := newCoverRefreshJob(refreshJobConfig(), coverDB, cover.NewResolver(stub), slog.Default())
-	job.sweep(ctx, time.Now())
+	// Sweep at a fixed in-window hour so the test is deterministic regardless
+	// of the wall clock (the configured window is 00:00–23:00 local).
+	job.sweep(ctx, time.Date(2026, 8, 8, 3, 30, 0, 0, time.UTC))
 	job.Stop()
 
 	var deadURL string
@@ -133,6 +137,71 @@ func TestCoverRefreshSweepRefreshesStaleRows(t *testing.T) {
 	}
 	if freshAgain != freshChecked {
 		t.Fatalf("expected the fresh row to be untouched, got %q != %q", freshAgain, freshChecked)
+	}
+}
+
+func TestCoverRefreshPromotesLiveVariant(t *testing.T) {
+	artwork := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/alive-variant.jpg":
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer artwork.Close()
+
+	// No provider should ever be consulted: the live alternate is cached.
+	stub := &coverStubProvider{name: "itunes", result: &cover.Result{URL: "http://fresh/cover.jpg", Source: "itunes", ArtistName: "Radiohead"}}
+	coverDB := testCoverDB(t)
+	ctx := context.Background()
+
+	// The winner URL is dead; the alternate is alive.
+	if err := db.UpsertCoverArtVariants(ctx, coverDB, db.CoverArtist, "Radiohead", "", []db.CoverVariant{
+		{URL: artwork.URL + "/dead.jpg", Source: "lastfm"},
+		{URL: artwork.URL + "/alive-variant.jpg", Source: "itunes"},
+	}); err != nil {
+		t.Fatalf("seed variants: %v", err)
+	}
+	if _, err := coverDB.ExecContext(ctx, `UPDATE cover_urls SET checked_at = datetime('now', '-40 days')`); err != nil {
+		t.Fatalf("age cover rows: %v", err)
+	}
+	var before string
+	if err := coverDB.QueryRowContext(ctx, `SELECT COALESCE(checked_at,'') FROM cover_urls WHERE artist_name_lower = 'radiohead'`).Scan(&before); err != nil {
+		t.Fatalf("read pre-sweep checked_at: %v", err)
+	}
+
+	job := newCoverRefreshJob(refreshJobConfig(), coverDB, cover.NewResolver(stub), slog.Default())
+	// Sweep at a fixed in-window hour so the test is deterministic regardless
+	// of the wall clock (the configured window is 00:00–23:00 local).
+	job.sweep(ctx, time.Date(2026, 8, 8, 3, 30, 0, 0, time.UTC))
+	job.Stop()
+
+	var winner, checked string
+	if err := coverDB.QueryRowContext(ctx, `SELECT cover_url, COALESCE(checked_at,'') FROM cover_urls WHERE artist_name_lower = 'radiohead'`).Scan(&winner, &checked); err != nil {
+		t.Fatalf("read promoted row: %v", err)
+	}
+	if winner != artwork.URL+"/alive-variant.jpg" {
+		t.Fatalf("expected the live variant to be promoted to winner, got %q", winner)
+	}
+	if !timeAfter(checked, before) {
+		t.Fatalf("expected checked_at to be bumped after promotion, got %q vs %q", checked, before)
+	}
+	if stub.calls != 0 {
+		t.Fatalf("expected no upstream call when a live variant exists, got %d", stub.calls)
+	}
+
+	// Ranks swap: the promoted URL is now rank 0, the dead former winner 1.
+	var coverURLID int64
+	if err := coverDB.QueryRowContext(ctx, `SELECT id FROM cover_urls WHERE artist_name_lower = 'radiohead'`).Scan(&coverURLID); err != nil {
+		t.Fatalf("read cover row id: %v", err)
+	}
+	variants, err := db.FindCoverVariants(ctx, coverDB, coverURLID)
+	if err != nil {
+		t.Fatalf("read variants after promotion: %v", err)
+	}
+	if len(variants) != 2 || variants[0].Rank != 0 || variants[0].URL != artwork.URL+"/alive-variant.jpg" || variants[1].Rank != 1 || variants[1].URL != artwork.URL+"/dead.jpg" {
+		t.Fatalf("unexpected variant order after promotion: %+v", variants)
 	}
 }
 

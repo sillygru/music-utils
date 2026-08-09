@@ -297,8 +297,13 @@ func (p *prefetcher) prefetchAlbumCover(ctx context.Context, job prefetchJob) {
 		_ = db.UpsertCoverArt(ctx, p.coverDB, db.CoverAlbum, artist, album, "", "")
 		return
 	}
-	top := results[0]
-	_ = db.UpsertCoverArt(ctx, p.coverDB, db.CoverAlbum, artist, album, top.URL, top.Source)
+	// Cache every plausible provider URL, not just the winner, mirroring the
+	// cover handlers.
+	variants := make([]db.CoverVariant, 0, len(results))
+	for _, result := range results {
+		variants = append(variants, db.CoverVariant{URL: result.URL, Source: result.Source})
+	}
+	_ = db.UpsertCoverArtVariants(ctx, p.coverDB, db.CoverAlbum, artist, album, variants)
 }
 
 // prefetchArtistCover caches artist artwork. It skips when a positive or
@@ -330,8 +335,13 @@ func (p *prefetcher) prefetchArtistCover(ctx context.Context, job prefetchJob) {
 		_ = db.UpsertCoverArt(ctx, p.coverDB, db.CoverArtist, artist, "", "", "")
 		return
 	}
-	top := results[0]
-	_ = db.UpsertCoverArt(ctx, p.coverDB, db.CoverArtist, artist, "", top.URL, top.Source)
+	// Cache every plausible provider URL, not just the winner, mirroring the
+	// cover handlers.
+	variants := make([]db.CoverVariant, 0, len(results))
+	for _, result := range results {
+		variants = append(variants, db.CoverVariant{URL: result.URL, Source: result.Source})
+	}
+	_ = db.UpsertCoverArtVariants(ctx, p.coverDB, db.CoverArtist, artist, "", variants)
 }
 
 func prefetchJobKey(job prefetchJob) string {

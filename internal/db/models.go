@@ -47,6 +47,15 @@ type CoverArt struct {
 	CheckedAt       string
 }
 
+// CoverVariant is one alternative cover URL for an album or artist. Rank 0 is
+// the winner mirrored on the parent cover_urls row; higher ranks are the other
+// plausible provider URLs in provider order.
+type CoverVariant struct {
+	URL    string
+	Source string
+	Rank   int
+}
+
 // Lyrics is the database representation of a track's lyrics. TrackID records
 // the original owning track; lyrics_tracks contains every track association
 // when content deduplication shares this row.

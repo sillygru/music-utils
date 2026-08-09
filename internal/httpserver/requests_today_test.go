@@ -45,7 +45,7 @@ func TestRequestsTodayEndpointReportsLiveCount(t *testing.T) {
 		t.Fatalf("decode stats response: %v", err)
 	}
 	if body.RequestsToday != 1 {
-		t.Fatalf("expected 1 request today, got %d", body.RequestsToday)
+		t.Fatalf("expected 1 request in the last 24 hours, got %d", body.RequestsToday)
 	}
 
 	// A further stats poll still must not inflate the count.

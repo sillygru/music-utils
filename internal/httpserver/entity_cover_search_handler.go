@@ -42,9 +42,11 @@ func getEntityCoverSearchHandler(database *sql.DB, resolver *cover.Resolver, fal
 		if cacheErr == nil && cached.CoverURL != "" {
 			// Positive cache hit: serve the saved cover immediately and never
 			// consult upstream. Staleness and dead URLs are handled in the
-			// background by the cover refresh job.
+			// background by the cover refresh job. Variants are best-effort:
+			// a variant read failure still serves the cached winner.
 			setOutcome(r, "local_hit")
-			writeJSON(w, http.StatusOK, albumArtistCoverFromRow(cached, entityType, artist, album))
+			variants, _ := db.FindCoverVariants(r.Context(), database, cached.ID)
+			writeJSON(w, http.StatusOK, albumArtistCoverFromRow(cached, entityType, artist, album, variants))
 			return
 		}
 		if cacheErr == nil && cached.CoverURL == "" && checkedRecently(cached.CheckedAt) {
@@ -85,8 +87,13 @@ func getEntityCoverSearchHandler(database *sql.DB, resolver *cover.Resolver, fal
 				CoverURL: result.URL, CoverSource: result.Source,
 			})
 		}
-		top := results[0]
-		if err := db.UpsertCoverArt(r.Context(), database, entityType, artist, album, top.URL, top.Source); err != nil {
+		// Persist every plausible provider URL, not just the winner, so the
+		// cache can serve alternates (or promote a live one) later.
+		variants := make([]db.CoverVariant, 0, len(results))
+		for _, result := range results {
+			variants = append(variants, db.CoverVariant{URL: result.URL, Source: result.Source})
+		}
+		if err := db.UpsertCoverArtVariants(r.Context(), database, entityType, artist, album, variants); err != nil {
 			setOutcome(r, "error")
 			writeJSON(w, http.StatusInternalServerError, apiError{Code: http.StatusInternalServerError, Message: "Internal server error"})
 			return
@@ -94,7 +101,7 @@ func getEntityCoverSearchHandler(database *sql.DB, resolver *cover.Resolver, fal
 		setOutcome(r, "provider_fallback_hit")
 		writeJSON(w, http.StatusOK, albumArtistCoverResponse{
 			EntityType: string(entityType), ArtistName: artist, AlbumName: album,
-			CoverURL: top.URL, CoverSource: top.Source, Results: providerResults,
+			CoverURL: variants[0].URL, CoverSource: variants[0].Source, Results: providerResults,
 		})
 	}
 }

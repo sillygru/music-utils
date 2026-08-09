@@ -143,6 +143,130 @@ func TestCoverArtReupsertUpdatesNotDuplicates(t *testing.T) {
 	}
 }
 
+func TestCoverArtVariantsUpsertFindAndReplace(t *testing.T) {
+	ctx := context.Background()
+	database, err := Open(":memory:", Config{MmapSize: 512 * 1024 * 1024, CacheSizeKB: -64000, MaxOpenConns: 1})
+	if err != nil {
+		t.Fatalf("open cover database: %v", err)
+	}
+	defer database.Close()
+	if err := MigrateCover(ctx, database); err != nil {
+		t.Fatalf("migrate cover database: %v", err)
+	}
+
+	if err := UpsertCoverArtVariants(ctx, database, CoverArtist, "Radiohead", "", []CoverVariant{
+		{URL: "http://img/lastfm.jpg", Source: "lastfm"},
+		{URL: "http://img/itunes.jpg", Source: "itunes"},
+		{URL: "http://img/deezer.jpg", Source: "deezer"},
+	}); err != nil {
+		t.Fatalf("upsert variants: %v", err)
+	}
+
+	row, err := FindCoverArt(ctx, database, CoverArtist, "Radiohead", "")
+	if err != nil {
+		t.Fatalf("find winner: %v", err)
+	}
+	if row.CoverURL != "http://img/lastfm.jpg" || row.CoverSource != "lastfm" {
+		t.Fatalf("expected the first variant to be the winner, got %+v", row)
+	}
+
+	variants, err := FindCoverVariants(ctx, database, row.ID)
+	if err != nil {
+		t.Fatalf("find variants: %v", err)
+	}
+	if len(variants) != 3 {
+		t.Fatalf("expected 3 variants, got %d", len(variants))
+	}
+	for i, want := range []string{"http://img/lastfm.jpg", "http://img/itunes.jpg", "http://img/deezer.jpg"} {
+		if variants[i].URL != want || variants[i].Rank != i {
+			t.Fatalf("variant %d = %+v, want %s at rank %d", i, variants[i], want, i)
+		}
+	}
+
+	// Re-upserting replaces the whole set, winner included.
+	if err := UpsertCoverArtVariants(ctx, database, CoverArtist, "Radiohead", "", []CoverVariant{
+		{URL: "http://img/new.jpg", Source: "itunes"},
+	}); err != nil {
+		t.Fatalf("replace variants: %v", err)
+	}
+	row, err = FindCoverArt(ctx, database, CoverArtist, "Radiohead", "")
+	if err != nil {
+		t.Fatalf("find replaced winner: %v", err)
+	}
+	if row.CoverURL != "http://img/new.jpg" {
+		t.Fatalf("expected the re-upsert to replace the winner, got %q", row.CoverURL)
+	}
+	variants, err = FindCoverVariants(ctx, database, row.ID)
+	if err != nil {
+		t.Fatalf("find replaced variants: %v", err)
+	}
+	if len(variants) != 1 || variants[0].URL != "http://img/new.jpg" || variants[0].Rank != 0 {
+		t.Fatalf("expected a single replacement variant, got %+v", variants)
+	}
+
+	// A miss (no variants) memoizes a negative row with an empty variant set.
+	if err := UpsertCoverArtVariants(ctx, database, CoverAlbum, "Radiohead", "OK Computer", nil); err != nil {
+		t.Fatalf("upsert negative: %v", err)
+	}
+	negative, err := FindCoverArt(ctx, database, CoverAlbum, "Radiohead", "OK Computer")
+	if err != nil {
+		t.Fatalf("find negative: %v", err)
+	}
+	if negative.CoverURL != "" {
+		t.Fatalf("expected empty cover URL, got %q", negative.CoverURL)
+	}
+	negVariants, err := FindCoverVariants(ctx, database, negative.ID)
+	if err != nil {
+		t.Fatalf("find negative variants: %v", err)
+	}
+	if len(negVariants) != 0 {
+		t.Fatalf("expected no variants on a negative row, got %+v", negVariants)
+	}
+}
+
+func TestPromoteCoverVariant(t *testing.T) {
+	ctx := context.Background()
+	database, err := Open(":memory:", Config{MmapSize: 512 * 1024 * 1024, CacheSizeKB: -64000, MaxOpenConns: 1})
+	if err != nil {
+		t.Fatalf("open cover database: %v", err)
+	}
+	defer database.Close()
+	if err := MigrateCover(ctx, database); err != nil {
+		t.Fatalf("migrate cover database: %v", err)
+	}
+
+	if err := UpsertCoverArtVariants(ctx, database, CoverArtist, "Radiohead", "", []CoverVariant{
+		{URL: "http://img/a.jpg", Source: "lastfm"},
+		{URL: "http://img/b.jpg", Source: "itunes"},
+		{URL: "http://img/c.jpg", Source: "deezer"},
+	}); err != nil {
+		t.Fatalf("upsert variants: %v", err)
+	}
+	row, err := FindCoverArt(ctx, database, CoverArtist, "Radiohead", "")
+	if err != nil {
+		t.Fatalf("find winner: %v", err)
+	}
+
+	if err := PromoteCoverVariant(ctx, database, row.ID, "http://img/b.jpg", "itunes", 1); err != nil {
+		t.Fatalf("promote variant: %v", err)
+	}
+
+	row, err = FindCoverArt(ctx, database, CoverArtist, "Radiohead", "")
+	if err != nil {
+		t.Fatalf("find promoted winner: %v", err)
+	}
+	if row.CoverURL != "http://img/b.jpg" || row.CoverSource != "itunes" {
+		t.Fatalf("expected the promoted URL to become the winner, got %+v", row)
+	}
+	variants, err := FindCoverVariants(ctx, database, row.ID)
+	if err != nil {
+		t.Fatalf("find variants after promotion: %v", err)
+	}
+	if len(variants) != 3 || variants[0].URL != "http://img/b.jpg" || variants[0].Rank != 0 || variants[1].URL != "http://img/a.jpg" || variants[1].Rank != 1 {
+		t.Fatalf("unexpected variant order after promotion: %+v", variants)
+	}
+}
+
 func TestReopenPreservesFTSIndex(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "music.db")
 	cfg := Config{

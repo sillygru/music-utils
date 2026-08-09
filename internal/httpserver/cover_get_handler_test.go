@@ -119,12 +119,50 @@ func TestCoverGetAlbumTitleOnlyResolves(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("expected album cover to resolve (200), got %d: %s", response.Code, response.Body.String())
 	}
-	var got coverSearchResponse
+	var got coverTopResponse
 	if err := json.NewDecoder(response.Body).Decode(&got); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 	if got.CoverURL != "http://img/imagine.jpg" || got.AlbumName != "Imagine" {
 		t.Fatalf("unexpected cover response: %+v", got)
+	}
+	// Album/artist responses expose every plausible provider URL.
+	if len(got.Results) != 1 || got.Results[0].CoverURL != "http://img/imagine.jpg" {
+		t.Fatalf("expected the plausible URL only in results, got %+v", got.Results)
+	}
+}
+
+// TestCoverGetAlbumCacheHitReturnsResults verifies the album/artist cache-hit
+// path serves every cached URL through results without contacting a provider.
+func TestCoverGetAlbumCacheHitReturnsResults(t *testing.T) {
+	coverDB := testCoverDB(t)
+	ctx := context.Background()
+	if err := db.UpsertCoverArtVariants(ctx, coverDB, db.CoverAlbum, "Radiohead", "OK Computer", []db.CoverVariant{
+		{URL: "http://img/lastfm.jpg", Source: "lastfm"},
+		{URL: "http://img/deezer.jpg", Source: "deezer"},
+	}); err != nil {
+		t.Fatalf("seed variants: %v", err)
+	}
+
+	stub := &coverStubProvider{name: "itunes", result: &cover.Result{URL: "http://img/fresh.jpg", Source: "itunes"}}
+	handler := getCoverTopHandler(nil, coverDB, cover.NewResolver(stub), testFallbackGuard(), true, nil)
+
+	response := performRequest(t, handler, "/?type=album&artist_name=Radiohead&album_name=OK+Computer")
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected cached 200, got %d: %s", response.Code, response.Body.String())
+	}
+	var got coverTopResponse
+	if err := json.NewDecoder(response.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.CoverURL != "http://img/lastfm.jpg" {
+		t.Fatalf("expected the cached winner, got %q", got.CoverURL)
+	}
+	if len(got.Results) != 2 || got.Results[1].CoverURL != "http://img/deezer.jpg" {
+		t.Fatalf("expected both cached URLs in results on a hit, got %+v", got.Results)
+	}
+	if stub.calls != 0 {
+		t.Fatalf("expected no upstream call on a cache hit, got %d", stub.calls)
 	}
 }
 

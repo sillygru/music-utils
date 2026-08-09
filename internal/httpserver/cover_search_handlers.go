@@ -19,6 +19,14 @@ type coverSearchResponse struct {
 	CoverSource string `json:"coverUrlSource"`
 }
 
+// coverTopResponse is the top-level object served by /api/cover/get for album
+// and artist types: the selected cover plus every cached provider result. Song
+// responses keep the plain coverSearchResponse shape.
+type coverTopResponse struct {
+	coverSearchResponse
+	Results []coverSearchResponse `json:"results,omitempty"`
+}
+
 // searchCoverHandler searches artwork. A free-text q searches songs, albums,
 // and artists at once and returns a mixed array where each item carries an
 // entityType; q combined with type narrows the search to that kind. Without q

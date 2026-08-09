@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -47,6 +48,9 @@ const (
 	vacuumChunk = 2048
 	// writeTimeout bounds a single flush or prune pass.
 	writeTimeout = 5 * time.Second
+	// requestWindow is the rolling window reported by the requests-today
+	// counter: requests logged in the last 24 hours.
+	requestWindow = 24 * time.Hour
 )
 
 // Options tunes request log persistence and storage costs.
@@ -75,6 +79,14 @@ func retention(opts *Options) time.Duration {
 		return 0
 	}
 	return opts.Retention
+}
+
+// windowBucket counts the requests that arrived within one unix second. The
+// requests-today counter keeps a slice of these in ascending sec order as its
+// rolling 24-hour window, pruning the head as seconds age out of the window.
+type windowBucket struct {
+	sec   int64
+	count int64
 }
 
 // Record describes one HTTP request.
@@ -111,13 +123,13 @@ type Writer struct {
 	endpoints map[string]int64
 	outcomes  map[string]int64
 
-	// Requests-today counter: an in-memory tally kept exact across restarts by
-	// seeding from the stored rows at open. todayDay is the unix seconds of the
-	// local start of day that todayCount describes; when it no longer matches
-	// the current day the counter lazily resets to zero.
-	todayMu          sync.Mutex
-	todayDay         int64
-	todayCount       int64
+	// Requests-today counter: an in-memory tally of the requests logged in the
+	// last 24 hours, kept exact across restarts by seeding from the stored rows
+	// at open. Requests are bucketed by unix second (window); buckets older
+	// than 24 hours are pruned on access, so the count rolls continuously
+	// instead of resetting at a fixed time of day.
+	windowMu         sync.Mutex
+	window           []windowBucket // ascending by sec
 	excludeCountPath string
 
 	dropped       atomic.Int64
@@ -201,7 +213,7 @@ func Open(path string, opts *Options, logger *slog.Logger) (*Writer, error) {
 		endpoints:        make(map[string]int64),
 		outcomes:         make(map[string]int64),
 	}
-	w.seedToday()
+	w.seedWindow()
 	go w.run()
 	go w.pruneLoop()
 	return w, nil
@@ -241,62 +253,95 @@ func (w *Writer) Log(rec Record) {
 	w.tally(rec)
 }
 
-// RequestsToday reports how many requests have been logged since the local
-// start of day, including those already persisted to the database before this
-// process started. The count lazily resets when a new day begins.
+// RequestsToday reports how many requests have been logged in the last 24
+// hours, including those already persisted to the database before this process
+// started. It is a rolling window: requests age out continuously as they pass
+// 24 hours old rather than the count resetting at a fixed time of day.
 func (w *Writer) RequestsToday() int64 {
-	now := time.Now()
-	start := startOfDay(now).Unix()
-	w.todayMu.Lock()
-	defer w.todayMu.Unlock()
-	if w.todayDay != start {
-		w.todayDay = start
-		w.todayCount = 0
+	cutoff := time.Now().Add(-requestWindow).Unix()
+	w.windowMu.Lock()
+	defer w.windowMu.Unlock()
+	w.pruneWindowLocked(cutoff)
+	var total int64
+	for _, bucket := range w.window {
+		total += bucket.count
 	}
-	return w.todayCount
+	return total
 }
 
-// tally advances the requests-today counter. Endpoints matching
+// tally records one request in the rolling window. Endpoints matching
 // excludeCountPath (a self-referencing stats endpoint) are skipped so the
-// counter never counts its own polls.
+// counter never counts its own polls. Records older than the window are
+// dropped, keeping the tally exact as time advances.
 func (w *Writer) tally(rec Record) {
 	if w.excludeCountPath != "" && rec.Endpoint == w.excludeCountPath {
 		return
 	}
-	start := startOfDay(rec.TS).Unix()
-	w.todayMu.Lock()
-	defer w.todayMu.Unlock()
-	if w.todayDay != start {
-		w.todayDay = start
-		w.todayCount = 0
+	sec := rec.TS.Unix()
+	w.windowMu.Lock()
+	defer w.windowMu.Unlock()
+	cutoff := time.Now().Add(-requestWindow).Unix()
+	w.pruneWindowLocked(cutoff)
+	if sec < cutoff {
+		return // outside the rolling window; ignored rather than counted
 	}
-	w.todayCount++
+	w.addLocked(sec)
 }
 
-// seedToday initializes the requests-today counter from the rows already
-// stored for the current day, so the count survives a restart. It is a one-time
-// bounded scan of today's window at startup; best effort on failure.
-func (w *Writer) seedToday() {
+// seedWindow initializes the rolling window from the rows already stored for
+// the last 24 hours, so the count survives a restart. It is a one-time bounded
+// scan of the window at startup; best effort on failure.
+func (w *Writer) seedWindow() {
 	ctx, cancel := context.WithTimeout(context.Background(), writeTimeout)
 	defer cancel()
-	cutoff := startOfDay(time.Now()).UnixMilli()
-	var count int64
-	if err := w.db.QueryRowContext(ctx,
-		"SELECT count(*) FROM request_log WHERE ts >= ?", cutoff,
-	).Scan(&count); err != nil {
+	cutoff := time.Now().Add(-requestWindow).UnixMilli()
+	rows, err := w.db.QueryContext(ctx,
+		"SELECT ts/1000 AS sec, COUNT(*) FROM request_log WHERE ts >= ? GROUP BY ts/1000 ORDER BY sec",
+		cutoff)
+	if err != nil {
 		w.logger.Warn("seed requests-today counter failed", "error", err)
 		return
 	}
-	w.todayMu.Lock()
-	w.todayDay = cutoff / 1000
-	w.todayCount = count
-	w.todayMu.Unlock()
+	defer rows.Close()
+	window := make([]windowBucket, 0, 128)
+	for rows.Next() {
+		var bucket windowBucket
+		if err := rows.Scan(&bucket.sec, &bucket.count); err != nil {
+			w.logger.Warn("seed requests-today counter failed", "error", err)
+			return
+		}
+		window = append(window, bucket)
+	}
+	if err := rows.Err(); err != nil {
+		w.logger.Warn("seed requests-today counter failed", "error", err)
+		return
+	}
+	w.windowMu.Lock()
+	w.window = window
+	w.windowMu.Unlock()
 }
 
-// startOfDay returns midnight of t's local day.
-func startOfDay(t time.Time) time.Time {
-	year, month, day := t.Date()
-	return time.Date(year, month, day, 0, 0, 0, 0, t.Location())
+// pruneWindowLocked drops the buckets whose second has fallen out of the
+// rolling window, so memory stays bounded by the distinct seconds with traffic
+// in the window. The caller must hold windowMu.
+func (w *Writer) pruneWindowLocked(cutoff int64) {
+	first := sort.Search(len(w.window), func(i int) bool { return w.window[i].sec >= cutoff })
+	if first > 0 {
+		w.window = w.window[first:]
+	}
+}
+
+// addLocked records one request at sec, merging into an existing bucket or
+// inserting to keep the window sorted by second. The caller must hold windowMu.
+func (w *Writer) addLocked(sec int64) {
+	at := sort.Search(len(w.window), func(i int) bool { return w.window[i].sec >= sec })
+	if at < len(w.window) && w.window[at].sec == sec {
+		w.window[at].count++
+		return
+	}
+	w.window = append(w.window, windowBucket{})
+	copy(w.window[at+1:], w.window[at:])
+	w.window[at] = windowBucket{sec: sec, count: 1}
 }
 
 func (w *Writer) run() {

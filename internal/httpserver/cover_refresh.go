@@ -33,10 +33,12 @@ type coverRefreshRow struct {
 // coverRefreshJob proactively revalidates cached positive cover rows that have
 // aged past COVER_REFRESH_AFTER_DAYS, running only inside the configured
 // low-activity window. Rows whose artwork URL still responds are refreshed in
-// place (checked_at bumped); rows whose URL is dead are re-resolved through
-// the provider chain. The job draws from the providers' shared pacing, so it
-// can never exceed upstream rate limits, and it yields to live traffic by
-// running only in the configured window with a bounded batch per tick.
+// place (checked_at bumped); rows whose winner is dead first promote a
+// still-live cached variant (no upstream spend) and are only re-resolved
+// through the provider chain when every variant is dead. The job draws from
+// the providers' shared pacing, so it can never exceed upstream rate limits,
+// and it yields to live traffic by running only in the configured window with
+// a bounded batch per tick.
 type coverRefreshJob struct {
 	database     *sql.DB
 	resolver     *cover.Resolver
@@ -159,6 +161,10 @@ func (j *coverRefreshJob) sweep(ctx context.Context, now time.Time) {
 				j.logger.Error("cover refresh bump failed", "error", err)
 			}
 		case isDead:
+			if j.promoteAliveVariant(ctx, row) {
+				// A live alternate was already cached; no upstream spend.
+				break
+			}
 			if rechecked >= j.maxRecheck {
 				j.logger.Info("cover refresh sweep truncated", "processed", processed, "dead", dead, "rechecked", rechecked)
 				return // leave the rest of the batch for the next run
@@ -209,17 +215,60 @@ func (j *coverRefreshJob) validateURL(ctx context.Context, artworkURL string) (a
 	}
 }
 
+// promoteAliveVariant swaps the first still-live cached alternate into the
+// winner slot when the current winner URL is dead, without contacting any
+// provider. It reports whether a live alternate was found and promoted.
+func (j *coverRefreshJob) promoteAliveVariant(ctx context.Context, row coverRefreshRow) bool {
+	variants, err := db.FindCoverVariants(ctx, j.database, row.id)
+	if err != nil {
+		j.logger.Error("cover refresh variant query failed", "error", err)
+		return false
+	}
+	for _, variant := range variants {
+		if variant.Rank == 0 || variant.URL == "" || variant.URL == row.url {
+			continue
+		}
+		alive, isDead := j.validateURL(ctx, variant.URL)
+		if isDead {
+			// Drop dead alternates so they are not re-validated on every sweep.
+			if _, err := j.database.ExecContext(ctx, `DELETE FROM cover_url_variants WHERE cover_url_id = ? AND url = ?`, row.id, variant.URL); err != nil {
+				j.logger.Error("cover refresh variant cleanup failed", "error", err)
+			}
+			continue
+		}
+		if !alive {
+			// Inconclusive (timeout, 403, 5xx): leave it for the next sweep.
+			continue
+		}
+		if err := db.PromoteCoverVariant(ctx, j.database, row.id, variant.URL, variant.Source, variant.Rank); err != nil {
+			j.logger.Error("cover refresh variant promote failed", "error", err)
+			return false
+		}
+		return true
+	}
+	return false
+}
+
 // recheck re-resolves artwork for a dead URL through the provider chain and
-// stores the fresh URL, or records a negative miss when the artwork is gone.
+// stores the fresh URL set (every plausible provider result, not just the
+// winner), or records a negative miss when the artwork is gone.
 func (j *coverRefreshJob) recheck(ctx context.Context, entity db.CoverEntity, artist, album string) {
-	result, err := j.resolver.Lookup(ctx, toKind(entity), cover.Input{ArtistName: artist, AlbumName: album})
-	if err != nil || result == nil || result.URL == "" {
+	input := cover.Input{ArtistName: artist, AlbumName: album}
+	results, err := j.resolver.Search(ctx, toKind(entity), input, 50)
+	if err == nil {
+		results = filterCoverResults(toKind(entity), input, results)
+	}
+	if err != nil || len(results) == 0 {
 		if upsertErr := db.UpsertCoverArt(ctx, j.database, entity, artist, album, "", ""); upsertErr != nil {
 			j.logger.Error("cover refresh negative upsert failed", "error", upsertErr)
 		}
 		return
 	}
-	if upsertErr := db.UpsertCoverArt(ctx, j.database, entity, artist, album, result.URL, result.Source); upsertErr != nil {
+	variants := make([]db.CoverVariant, 0, len(results))
+	for _, result := range results {
+		variants = append(variants, db.CoverVariant{URL: result.URL, Source: result.Source})
+	}
+	if upsertErr := db.UpsertCoverArtVariants(ctx, j.database, entity, artist, album, variants); upsertErr != nil {
 		j.logger.Error("cover refresh upsert failed", "error", upsertErr)
 	}
 }

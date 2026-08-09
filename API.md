@@ -53,7 +53,7 @@ console.log(data.plainLyrics);
 | `GET /api/cover/album` | Album cover top result, with provider results included |
 | `GET /api/lyrics/get` | Exact/top lyrics lookup; returns one object |
 | `GET /api/lyrics/search` | LRCLIB-compatible multi-result lyrics search |
-| `GET /api/stats/requests-today` | Requests served since the local start of day (opt-in) |
+| `GET /api/stats/requests-today` | Requests served in the last 24 hours (rolling window, opt-in) |
 | `GET /api/stats/metadata` | Songs with cached metadata (opt-in) |
 | `GET /api/stats/lyrics` | Songs with cached lyrics (opt-in) |
 | `GET /api/stats/covers` | Cached cover entries, with song/album/artist breakdown (opt-in) |
@@ -67,10 +67,11 @@ console.log(data.plainLyrics);
 
 ## `GET /api/stats/requests-today`
 
-How many requests the instance has served since the local start of day. The
-count is seeded from the request log at startup and updates live, so it
-survives restarts. Its own requests are excluded, so polling it does not
-inflate the number.
+How many requests the instance has served in the last 24 hours. It is a
+rolling window: requests drop off continuously as they pass 24 hours old,
+rather than the count resetting at a fixed time of day. The count is seeded
+from the request log at startup and updates live, so it survives restarts.
+Its own requests are excluded, so polling it does not inflate the number.
 
 Example response:
 
@@ -217,8 +218,9 @@ invalid input · `429` rate limited · `500` internal error.
 
 Returns the top cover result as one object. Use `type=artist`, `type=album`,
 or `type=song`. A song request without `type` defaults to `song` for
-compatibility. The endpoint checks local caches before resolving the provider
-chain.
+compatibility.The endpoint checks local caches before resolving the provider chain. Album
+and artist responses include a `results` array with every cached provider URL;
+song responses keep the single-object shape.
 
 Query parameters: `type` is optional and defaults to `song`; `track_name` is
 required for songs and `album_name` for albums. `artist_name` is optional for
@@ -271,13 +273,13 @@ curl 'https://music.gru0.dev/api/cover/search?type=song&track_name=No%20Surprise
 
 `artist_name` is optional in structured song/album searches, same as
 `/api/cover/get`. `limit` defaults to `10`, range `1–50`; it caps the final
-merged array.`
+merged array.`## `GET /api/cover/artist`
 
-## `GET /api/cover/artist`
-
-Returns artist artwork as a cover URL. On a miss it resolves the provider
-chain (Last.fm → iTunes → Deezer) in order, caches the winning URL, and
-returns it.
+Returns artist artwork as a cover URL. On a miss it resolves the provider chain
+(Last.fm → iTunes → Deezer) in order, caches **every plausible provider URL**
+(not just the winner) in the cover database, and returns the winner as
+`coverUrl`. If the winner later dies, a still-live cached alternate is served
+without contacting any provider.
 
 Query parameter: required `artist_name`.
 
@@ -289,7 +291,15 @@ Example response:
   "entityType": "artist",
   "artistName": "Radiohead",
   "coverUrl": "https://is1-ssl.mzstatic.com/…/600x600bb.jpg",
-  "coverUrlSource": "itunes"
+  "coverUrlSource": "itunes",
+  "results": [
+    {
+      "entityType": "artist",
+      "artistName": "Radiohead",
+      "coverUrl": "https://is1-ssl.mzstatic.com/…/600x600bb.jpg",
+      "coverUrlSource": "itunes"
+    }
+  ]
 }
 ```
 
@@ -297,13 +307,15 @@ Responses: `200` JSON array (possibly empty) · `400` invalid input · `429` rat
 limited · `503` upstream busy · `500` internal error.
 
 The artist and album endpoints also expose the selected top-level cover for
-backward compatibility and include a `results` array containing the provider
-results. Use `/api/cover/search` when you only want the array.
+backward compatibility and include a `results` array containing every cached
+provider URL — the full list is served from the store on cache hits, not just
+on the first lookup. Use `/api/cover/search` when you only want the array.
 
 ## `GET /api/cover/album`
 
-Album artwork, with the same enrichment and caching behavior as
-`/api/cover/artist`.
+Album artwork, with the same enrichment, variant caching, and `results`
+behavior as `/api/cover/artist`: every plausible provider URL is cached and the
+winner is returned as `coverUrl`.
 
 Query parameters: required `album_name`; `artist_name` is optional. When the
 artist is omitted the album is searched on its own as a best-effort lookup
@@ -319,7 +331,16 @@ Example response:
   "artistName": "Radiohead",
   "albumName": "OK Computer",
   "coverUrl": "https://e-cdns-images.dzcdn.net/…/xl.jpg",
-  "coverUrlSource": "deezer"
+  "coverUrlSource": "deezer",
+  "results": [
+    {
+      "entityType": "album",
+      "artistName": "Radiohead",
+      "albumName": "OK Computer",
+      "coverUrl": "https://e-cdns-images.dzcdn.net/…/xl.jpg",
+      "coverUrlSource": "deezer"
+    }
+  ]
 }
 ```
 
@@ -431,6 +452,10 @@ fixed numbers.
   the CDN over time. If a client renders a broken image, re-request the
   endpoint — stale URLs are re-resolved automatically. The API never serves
   or stores image bytes.
+- **Album and artist covers keep every provider URL.** Lookups cache all
+  plausible results (Last.fm, iTunes, Deezer), serve the best as `coverUrl`,
+  and return the full list in `results` — on cache hits too. If the winner
+  URL dies, a live cached alternate is promoted without an upstream call.
 
 ## Self-hosting
 

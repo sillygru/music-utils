@@ -392,14 +392,14 @@ func TestRequestsTodaySeedsFromPersistedRows(t *testing.T) {
 		t.Fatalf("close: %v", err)
 	}
 
-	// A fresh process must recover today's count from the stored rows.
+	// A fresh process must recover the 24-hour count from the stored rows.
 	w2, err := Open(path, &Options{Retention: 0}, testLogger())
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
 	defer func() { _ = w2.Close() }()
 	if got := w2.RequestsToday(); got != 2 {
-		t.Fatalf("expected 2 recovered requests today, got %d", got)
+		t.Fatalf("expected 2 recovered requests in the window, got %d", got)
 	}
 	w2.Log(Record{TS: time.Now(), Endpoint: "/api/lyrics/get"})
 	if got := w2.RequestsToday(); got != 3 {
@@ -407,7 +407,7 @@ func TestRequestsTodaySeedsFromPersistedRows(t *testing.T) {
 	}
 }
 
-func TestRequestsTodayResetsOnNewDay(t *testing.T) {
+func TestRequestsTodayHandlesOutOfOrderTimestamps(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "request_log.db")
 	w, err := Open(path, &Options{Retention: 0}, testLogger())
 	if err != nil {
@@ -415,14 +415,43 @@ func TestRequestsTodayResetsOnNewDay(t *testing.T) {
 	}
 	defer func() { _ = w.Close() }()
 
-	yesterday := time.Now().AddDate(0, 0, -1)
-	w.Log(Record{TS: yesterday, Endpoint: "/api/lyrics/get"})
-	// The counter holds yesterday's day; reading it for today resets to zero.
+	now := time.Now()
+	// A slow request whose TS was captured at start may be logged after a
+	// faster one that started later: both stay counted, and same-second
+	// records merge into one bucket.
+	w.Log(Record{TS: now, Endpoint: "/api/lyrics/get"})
+	w.Log(Record{TS: now.Add(-2 * time.Hour), Endpoint: "/api/lyrics/get"})
+	w.Log(Record{TS: now.Add(-2 * time.Hour), Endpoint: "/api/lyrics/get"})
+	if got := w.RequestsToday(); got != 3 {
+		t.Fatalf("expected out-of-order requests to be counted, got %d", got)
+	}
+	// A stale record arriving after the others must neither be counted nor
+	// disturb the existing tally.
+	w.Log(Record{TS: now.Add(-25 * time.Hour), Endpoint: "/api/lyrics/get"})
+	if got := w.RequestsToday(); got != 3 {
+		t.Fatalf("expected stale record to be ignored after out-of-order logging, got %d", got)
+	}
+}
+
+func TestRequestsTodayRollsOffRequestsOlderThan24Hours(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "request_log.db")
+	w, err := Open(path, &Options{Retention: 0}, testLogger())
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() { _ = w.Close() }()
+
+	// A request from more than 24 hours ago is outside the rolling window.
+	w.Log(Record{TS: time.Now().Add(-25 * time.Hour), Endpoint: "/api/lyrics/get"})
 	if got := w.RequestsToday(); got != 0 {
-		t.Fatalf("expected stale-day counter to read 0, got %d", got)
+		t.Fatalf("expected a request older than 24h to be ignored, got %d", got)
+	}
+	w.Log(Record{TS: time.Now().Add(-23 * time.Hour), Endpoint: "/api/lyrics/get"})
+	if got := w.RequestsToday(); got != 1 {
+		t.Fatalf("expected 1 for a request within the window, got %d", got)
 	}
 	w.Log(Record{TS: time.Now(), Endpoint: "/api/lyrics/get"})
-	if got := w.RequestsToday(); got != 1 {
-		t.Fatalf("expected 1 for today's request, got %d", got)
+	if got := w.RequestsToday(); got != 2 {
+		t.Fatalf("expected 2 after a live request, got %d", got)
 	}
 }

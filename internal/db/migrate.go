@@ -104,9 +104,39 @@ func MigrateLyrics(ctx context.Context, database *sql.DB) error {
 	return migrateSchema(ctx, database, "lyrics_schema.sql")
 }
 
-// MigrateCover initializes the independent album/artist cover URL database.
+// MigrateCover initializes the independent album/artist cover URL database and
+// backfills variant rows for cover rows that predate the variants table.
 func MigrateCover(ctx context.Context, database *sql.DB) error {
-	return migrateSchema(ctx, database, "covers_schema.sql")
+	if err := migrateSchema(ctx, database, "covers_schema.sql"); err != nil {
+		return err
+	}
+	return backfillCoverVariants(ctx, database)
+}
+
+// backfillCoverVariants seeds a rank-0 variant row for every positive cover
+// row created before the variants table existed, so existing deployments keep
+// serving a complete results list after upgrading. Idempotent: rows that
+// already have any variant are left alone, so re-running the migration is a
+// no-op.
+func backfillCoverVariants(ctx context.Context, database *sql.DB) error {
+	if database == nil {
+		return fmt.Errorf("database is nil")
+	}
+	tx, err := database.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin cover variant backfill: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO cover_url_variants (cover_url_id, url, source, rank)
+SELECT id, cover_url, cover_source, 0 FROM cover_urls cu
+WHERE cover_url IS NOT NULL AND cover_url <> ''
+AND NOT EXISTS (SELECT 1 FROM cover_url_variants v WHERE v.cover_url_id = cu.id)`); err != nil {
+		return fmt.Errorf("backfill cover variants: %w", err)
+	}
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("commit cover variant backfill: %w", err)
+	}
+	return nil
 }
 
 // Migrate remains a metadata-only convenience for package callers that only
