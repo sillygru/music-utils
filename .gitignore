@@ -28,6 +28,10 @@ coverage.out
 !AGENTS.md
 !API.md
 !DEPLOYMENT.md
+
+# shell scripts
+*.sh
+!build.sh
 /data
 cloudflared-config.yml
 music-utils.service
