@@ -81,6 +81,15 @@ func TestMigrateRichLyricsStoresCompactJSON(t *testing.T) {
 	}
 }
 
+func TestCompactRichSyncContentIgnoresLinesWithoutArray(t *testing.T) {
+	if got := compactRichSyncContent(`{"title":"Song","lines":null}`, "json"); got != `{"title":"Song","lines":null}` {
+		t.Fatalf("expected non-array lines payload to remain unchanged, got %v", got)
+	}
+	if got := compactRichSyncContent(`null`, "json"); got != `null` {
+		t.Fatalf("expected JSON null payload to remain unchanged, got %v", got)
+	}
+}
+
 func TestCompactRichSyncContentLeavesUnsupportedPayloadsAlone(t *testing.T) {
 	content := "[00:01.00]line"
 	if got := compactRichSyncContent(content, "lrc"); got != content {

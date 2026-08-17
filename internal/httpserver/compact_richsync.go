@@ -85,12 +85,15 @@ func compactRichSyncContent(content, format string) any {
 	if err != nil || len(parsed.Lines) == 0 {
 		return content
 	}
+	if parsed.Lines == nil {
+		parsed.Lines = make([]compactRichLine, 0)
+	}
 	return parsed
 }
 
 func parseStoredCompactRichSync(content string) (compactRichSync, bool) {
 	var parsed compactRichSync
-	if err := json.Unmarshal([]byte(strings.TrimSpace(content)), &parsed); err != nil || len(parsed.Lines) == 0 {
+	if err := json.Unmarshal([]byte(strings.TrimSpace(content)), &parsed); err != nil || parsed.Lines == nil {
 		return compactRichSync{}, false
 	}
 	return parsed, true
