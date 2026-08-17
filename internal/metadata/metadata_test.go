@@ -30,7 +30,7 @@ func TestITunesLookup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
-	track, err := client.Lookup(context.Background(), Input{TrackName: "Blinding Lights", ArtistName: "The Weeknd"})
+	track, err := client.Lookup(context.Background(), Input{TrackName: "Nightcore - Blinding Lights (Official Music Video).mp3", ArtistName: "The Weeknd"})
 	if err != nil {
 		t.Fatalf("lookup: %v", err)
 	}
@@ -66,7 +66,7 @@ func TestDeezerLookup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
-	track, err := client.Lookup(context.Background(), Input{TrackName: "Blinding Lights", ArtistName: "The Weeknd"})
+	track, err := client.Lookup(context.Background(), Input{TrackName: "Nightcore - Blinding Lights (Official Music Video).mp3", ArtistName: "The Weeknd"})
 	if err != nil {
 		t.Fatalf("lookup: %v", err)
 	}

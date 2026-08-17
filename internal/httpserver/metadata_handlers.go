@@ -12,6 +12,7 @@ import (
 
 	"github.com/sillygru/music-utils/internal/db"
 	"github.com/sillygru/music-utils/internal/metadata"
+	"github.com/sillygru/music-utils/internal/names"
 )
 
 type metadataResponse struct {
@@ -36,8 +37,9 @@ type metadataResponse struct {
 func getMetadataHandler(database *sql.DB, resolver *metadata.Resolver, fallbacks *fallbackGuard, fallbackEnabled bool, prefetcher *prefetcher) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
-		name := strings.TrimSpace(query.Get("track_name"))
-		artist := strings.TrimSpace(query.Get("artist_name"))
+		candidates := names.Candidates(query.Get("track_name"), query.Get("artist_name"), query.Get("album_name"))
+		input := candidates[0]
+		name, album := input.TrackName, input.AlbumName
 		if name == "" {
 			setOutcome(r, "bad_request")
 			writeJSON(w, http.StatusBadRequest, apiError{Code: http.StatusBadRequest, Message: "track_name is required"})
@@ -49,9 +51,14 @@ func getMetadataHandler(database *sql.DB, resolver *metadata.Resolver, fallbacks
 			writeJSON(w, http.StatusBadRequest, apiError{Code: http.StatusBadRequest, Message: "duration must be a non-negative number"})
 			return
 		}
-		album := query.Get("album_name")
 		cacheStart := time.Now()
-		local, err := db.FindTrackMetadataExact(r.Context(), database, name, artist, album, duration)
+		var local *db.Track
+		for _, candidate := range candidates {
+			local, err = db.FindTrackMetadataExact(r.Context(), database, candidate.TrackName, candidate.ArtistName, candidate.AlbumName, duration)
+			if err == nil || !errors.Is(err, sql.ErrNoRows) {
+				break
+			}
+		}
 		setCacheDuration(r, time.Since(cacheStart))
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			setRequestIssue(r, slog.LevelError, err.Error())
@@ -83,7 +90,7 @@ func getMetadataHandler(database *sql.DB, resolver *metadata.Resolver, fallbacks
 		defer release()
 
 		upstreamStart := time.Now()
-		remote, err := resolver.Lookup(r.Context(), metadata.Input{TrackName: name, ArtistName: artist, AlbumName: album, Duration: duration})
+		remote, err := resolver.Lookup(r.Context(), metadata.Input{TrackName: query.Get("track_name"), ArtistName: query.Get("artist_name"), AlbumName: query.Get("album_name"), Duration: duration})
 		setUpstreamDuration(r, time.Since(upstreamStart))
 		if err != nil {
 			if !errors.Is(err, metadata.ErrNotFound) {
@@ -122,9 +129,9 @@ func getMetadataHandler(database *sql.DB, resolver *metadata.Resolver, fallbacks
 func searchMetadataHandlerWithUpstream(database *sql.DB, resolver *metadata.Resolver, fallbacks *fallbackGuard, fallbackEnabled bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
-		searchQuery := strings.TrimSpace(query.Get("q"))
+		searchQuery := names.CleanSearch(query.Get("q"))
 		if searchQuery == "" {
-			searchQuery = strings.Join(nonEmpty(query.Get("track_name"), query.Get("artist_name"), query.Get("album_name"), query.Get("genre")), " ")
+			searchQuery = names.CleanSearch(strings.Join(nonEmpty(query.Get("track_name"), query.Get("artist_name"), query.Get("album_name"), query.Get("genre")), " "))
 		}
 		if searchQuery == "" {
 			setOutcome(r, "bad_request")
@@ -193,9 +200,9 @@ func searchMetadataHandlerWithUpstream(database *sql.DB, resolver *metadata.Reso
 func searchMetadataHandler(database *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
-		searchQuery := strings.TrimSpace(query.Get("q"))
+		searchQuery := names.CleanSearch(query.Get("q"))
 		if searchQuery == "" {
-			searchQuery = strings.Join(nonEmpty(query.Get("track_name"), query.Get("artist_name"), query.Get("album_name"), query.Get("genre")), " ")
+			searchQuery = names.CleanSearch(strings.Join(nonEmpty(query.Get("track_name"), query.Get("artist_name"), query.Get("album_name"), query.Get("genre")), " "))
 		}
 		if searchQuery == "" {
 			setOutcome(r, "bad_request")

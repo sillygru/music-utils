@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/sillygru/music-utils/internal/db"
+	"github.com/sillygru/music-utils/internal/names"
 	"github.com/sillygru/music-utils/internal/pacer"
 )
 
@@ -76,6 +77,7 @@ func (c *ITunes) Name() string { return "itunes" }
 // Search returns up to limit song results from iTunes, preserving the
 // provider's ranking rather than collapsing the response to one match.
 func (c *ITunes) Search(ctx context.Context, query string, limit int) ([]*db.Track, error) {
+	query = names.CleanSearch(query)
 	if limit < 1 {
 		return []*db.Track{}, nil
 	}
@@ -106,6 +108,7 @@ func (c *ITunes) Search(ctx context.Context, query string, limit int) ([]*db.Tra
 }
 
 func (c *ITunes) Lookup(ctx context.Context, input Input) (*db.Track, error) {
+	input = normalizeInput(input)
 	endpoint, err := url.Parse(c.baseURL + "/search")
 	if err != nil {
 		return nil, fmt.Errorf("build iTunes URL: %w", err)

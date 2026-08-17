@@ -63,6 +63,7 @@ func NewITunes(baseURL, userAgent string, timeout time.Duration, pace *pacer.Pac
 func (c *ITunes) Name() string { return "itunes" }
 
 func (c *ITunes) Lookup(ctx context.Context, kind Kind, input Input) (*Result, error) {
+	input = normalizeInput(input)
 	artist := CleanArtist(input.ArtistName)
 	params := url.Values{}
 	params.Set("entity", "album")
@@ -109,6 +110,7 @@ func (c *ITunes) Lookup(ctx context.Context, kind Kind, input Input) (*Result, e
 // one that best matches the request. Artist and song kinds are left to Lookup
 // (signaled via ErrNotFound) because their single top result is unambiguous.
 func (c *ITunes) Search(ctx context.Context, kind Kind, input Input, limit int) ([]Result, error) {
+	input = normalizeInput(input)
 	if limit < 1 {
 		return []Result{}, nil
 	}

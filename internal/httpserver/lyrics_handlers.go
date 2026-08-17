@@ -12,6 +12,7 @@ import (
 
 	"github.com/sillygru/music-utils/internal/db"
 	"github.com/sillygru/music-utils/internal/lrclib"
+	"github.com/sillygru/music-utils/internal/names"
 )
 
 const (
@@ -45,8 +46,9 @@ type apiError struct {
 func getLyricsHandler(metadataDB, lyricsDB *sql.DB, client *lrclib.Client, lyricsMisses *lyricsMissCache, fallbacks *fallbackGuard, fallbackEnabled bool, prefetcher *prefetcher) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
-		trackName := strings.TrimSpace(query.Get("track_name"))
-		artistName := strings.TrimSpace(query.Get("artist_name"))
+		candidates := names.Candidates(query.Get("track_name"), query.Get("artist_name"), query.Get("album_name"))
+		input := candidates[0]
+		trackName, artistName, albumName := input.TrackName, input.ArtistName, input.AlbumName
 		if trackName == "" {
 			setOutcome(r, "bad_request")
 			writeJSON(w, http.StatusBadRequest, apiError{Code: http.StatusBadRequest, Message: "track_name is required"})
@@ -61,9 +63,16 @@ func getLyricsHandler(metadataDB, lyricsDB *sql.DB, client *lrclib.Client, lyric
 		}
 
 		cacheStart := time.Now()
-		track, lyrics, err := db.FindTrackExact(
-			r.Context(), metadataDB, lyricsDB, trackName, artistName, query.Get("album_name"), duration,
-		)
+		var track *db.Track
+		var lyrics *db.Lyrics
+		for _, candidate := range candidates {
+			track, lyrics, err = db.FindTrackExact(
+				r.Context(), metadataDB, lyricsDB, candidate.TrackName, candidate.ArtistName, candidate.AlbumName, duration,
+			)
+			if err == nil || !errors.Is(err, sql.ErrNoRows) {
+				break
+			}
+		}
 		setCacheDuration(r, time.Since(cacheStart))
 		existingTrack := track
 		if err == nil && lyricsAvailable(lyrics) {
@@ -84,7 +93,7 @@ func getLyricsHandler(metadataDB, lyricsDB *sql.DB, client *lrclib.Client, lyric
 			return
 		}
 
-		missKey := lyricsMissKey(trackName, artistName, query.Get("album_name"), duration)
+		missKey := lyricsMissKey(trackName, artistName, albumName, duration)
 		if lyricsMisses.Has(missKey, time.Now()) {
 			setOutcome(r, "miss")
 			writeJSON(w, http.StatusNotFound, apiError{Code: http.StatusNotFound, Message: "Track not found"})
@@ -104,7 +113,7 @@ func getLyricsHandler(metadataDB, lyricsDB *sql.DB, client *lrclib.Client, lyric
 		defer release()
 
 		upstreamStart := time.Now()
-		remote, remoteErr := lookupRemoteLyrics(r.Context(), client, trackName, artistName, query.Get("album_name"), duration)
+		remote, remoteErr := lookupRemoteLyrics(r.Context(), client, query.Get("track_name"), query.Get("artist_name"), query.Get("album_name"), duration)
 		setUpstreamDuration(r, time.Since(upstreamStart))
 		if remoteErr != nil && !errors.Is(remoteErr, lrclib.ErrNotFound) {
 			setRequestIssue(r, slog.LevelWarn, remoteErr.Error())
@@ -119,7 +128,7 @@ func getLyricsHandler(metadataDB, lyricsDB *sql.DB, client *lrclib.Client, lyric
 			// supplied. Broaden that lookup through search by track and artist;
 			// leave album-less 404s as genuine misses to preserve the fallback
 			// budget and avoid an unnecessary second upstream request.
-			if artistName != "" && errors.Is(remoteErr, lrclib.ErrNotFound) && strings.TrimSpace(query.Get("album_name")) != "" {
+			if artistName != "" && errors.Is(remoteErr, lrclib.ErrNotFound) && albumName != "" {
 				searchStart := time.Now()
 				searchResults, searchErr := client.Search(r.Context(), strings.Join(nonEmpty(trackName, artistName), " "))
 				setUpstreamDuration(r, time.Since(searchStart))
@@ -143,7 +152,7 @@ func getLyricsHandler(metadataDB, lyricsDB *sql.DB, client *lrclib.Client, lyric
 		cachedTrack := db.Track{
 			Name:       firstNonEmpty(remote.TrackName, trackName),
 			ArtistName: firstNonEmpty(remote.ArtistName, artistName),
-			AlbumName:  firstNonEmpty(remote.AlbumName, query.Get("album_name")),
+			AlbumName:  firstNonEmpty(remote.AlbumName, albumName),
 			Duration:   remote.Duration,
 			Source:     "lrclib_fallback",
 		}
@@ -186,9 +195,9 @@ func getLyricsHandler(metadataDB, lyricsDB *sql.DB, client *lrclib.Client, lyric
 func searchLyricsHandlerWithUpstream(metadataDB, lyricsDB *sql.DB, client *lrclib.Client, fallbacks *fallbackGuard, fallbackEnabled bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
-		searchQuery := strings.TrimSpace(query.Get("q"))
+		searchQuery := names.CleanSearch(query.Get("q"))
 		if searchQuery == "" {
-			searchQuery = strings.Join(nonEmpty(query.Get("track_name"), query.Get("artist_name"), query.Get("album_name")), " ")
+			searchQuery = names.CleanSearch(strings.Join(nonEmpty(query.Get("track_name"), query.Get("artist_name"), query.Get("album_name")), " "))
 		}
 		if searchQuery == "" {
 			setOutcome(r, "bad_request")
@@ -265,11 +274,11 @@ func searchLyricsHandlerWithUpstream(metadataDB, lyricsDB *sql.DB, client *lrcli
 func searchLyricsHandler(metadataDB, lyricsDB *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
-		searchQuery := strings.TrimSpace(query.Get("q"))
+		searchQuery := names.CleanSearch(query.Get("q"))
 		if searchQuery == "" {
-			searchQuery = strings.Join(nonEmpty(
+			searchQuery = names.CleanSearch(strings.Join(nonEmpty(
 				query.Get("track_name"), query.Get("artist_name"), query.Get("album_name"),
-			), " ")
+			), " "))
 		}
 		if searchQuery == "" {
 			setOutcome(r, "bad_request")
@@ -317,17 +326,30 @@ func remoteLyricsAvailable(result *lrclib.RemoteResult) bool {
 // an artist, so an artist-less request resolves through search and selects the
 // best result instead.
 func lookupRemoteLyrics(ctx context.Context, client *lrclib.Client, trackName, artistName, albumName string, duration float64) (*lrclib.RemoteResult, error) {
-	if artistName == "" {
-		searchResults, err := client.Search(ctx, strings.Join(nonEmpty(trackName, albumName), " "))
-		if err != nil {
-			return nil, err
+	var lastErr error
+	for _, candidate := range names.Candidates(trackName, artistName, albumName) {
+		if candidate.ArtistName == "" {
+			searchResults, err := client.Search(ctx, strings.Join(nonEmpty(candidate.TrackName, candidate.AlbumName), " "))
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			if remote := matchLyricsByName(searchResults, candidate.TrackName, candidate.AlbumName); remote != nil {
+				return remote, nil
+			}
+			lastErr = lrclib.ErrNotFound
+			continue
 		}
-		if remote := matchLyricsByName(searchResults, trackName, albumName); remote != nil {
+		remote, err := client.GetExact(ctx, candidate.TrackName, candidate.ArtistName, candidate.AlbumName, duration)
+		if err == nil {
 			return remote, nil
 		}
-		return nil, lrclib.ErrNotFound
+		lastErr = err
 	}
-	return client.GetExact(ctx, trackName, artistName, albumName, duration)
+	if lastErr == nil {
+		lastErr = lrclib.ErrNotFound
+	}
+	return nil, lastErr
 }
 
 // matchLyricsByName selects the best search result for an artist-less request:

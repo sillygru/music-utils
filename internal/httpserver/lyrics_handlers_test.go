@@ -79,7 +79,7 @@ func TestGetLyrics(t *testing.T) {
 	server := New("8080", metadataDB, lyricsDB)
 	cleanupHTTPServer(t, server)
 
-	response := performRequest(t, server.Handler, "/api/lyrics/get?track_name=+EXAMPLE+SONG+&artist_name=example+artist")
+	response := performRequest(t, server.Handler, "/api/lyrics/get?track_name=Example+Artist+-+Example+Song+(Official+Music+Video).mp3")
 	if response.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", response.Code, response.Body.String())
 	}

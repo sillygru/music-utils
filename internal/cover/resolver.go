@@ -47,6 +47,7 @@ func NewResolver(providers ...Provider) *Resolver {
 }
 
 func cacheKey(kind Kind, input Input) string {
+	input = normalizeInput(input)
 	return kind.String() + "\x00" + normalize(input.TrackName) + "\x00" + normalize(input.ArtistName) + "\x00" + normalize(input.AlbumName)
 }
 
@@ -54,6 +55,7 @@ func cacheKey(kind Kind, input Input) string {
 // results in provider order. Unlike Lookup, it intentionally does not stop at
 // the first provider so callers can show provenance from multiple APIs.
 func (r *Resolver) Search(ctx context.Context, kind Kind, input Input, limit int) ([]Result, error) {
+	input = normalizeInput(input)
 	if limit < 1 {
 		return []Result{}, nil
 	}
@@ -125,6 +127,16 @@ func (r *Resolver) searchProvider(provider Provider, ctx context.Context, kind K
 // Lookup walks the providers in order and returns the first non-empty URL. A
 // miss is memoized as a negative cache entry.
 func (r *Resolver) Lookup(ctx context.Context, kind Kind, input Input) (*Result, error) {
+	for _, candidate := range candidateInputs(input) {
+		if result, err := r.lookupOne(ctx, kind, candidate); err == nil {
+			return result, nil
+		}
+	}
+	return nil, ErrNotFound
+}
+
+func (r *Resolver) lookupOne(ctx context.Context, kind Kind, input Input) (*Result, error) {
+	input = normalizeInput(input)
 	key := cacheKey(kind, input)
 	r.mu.Lock()
 	if entry, ok := r.cache[key]; ok && time.Now().Before(entry.expiresAt) {
@@ -141,9 +153,12 @@ func (r *Resolver) Lookup(ctx context.Context, kind Kind, input Input) (*Result,
 			continue
 		}
 		result, err := provider.Lookup(ctx, kind, input)
-		if err == nil {
+		if err == nil && result != nil && result.URL != "" && (kind != Song || songResultMatches(input, *result)) {
 			r.store(key, result, false)
 			return result, nil
+		}
+		if err == nil {
+			err = ErrNotFound
 		}
 		if errors.Is(err, ErrNotFound) {
 			continue

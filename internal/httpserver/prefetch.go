@@ -13,6 +13,7 @@ import (
 	"github.com/sillygru/music-utils/internal/cover"
 	"github.com/sillygru/music-utils/internal/db"
 	"github.com/sillygru/music-utils/internal/lrclib"
+	"github.com/sillygru/music-utils/internal/names"
 )
 
 // prefetchBudgetKey is the fixed rate-limiter key for background prefetch
@@ -151,9 +152,8 @@ func (p *prefetcher) Enqueue(trackName, artistName, albumName string, duration f
 	if p == nil || !p.enabled {
 		return
 	}
-	trackName = strings.TrimSpace(trackName)
-	artistName = strings.TrimSpace(artistName)
-	albumName = strings.TrimSpace(albumName)
+	cleaned := names.Normalize(trackName, artistName, albumName)
+	trackName, artistName, albumName = cleaned.TrackName, cleaned.ArtistName, cleaned.AlbumName
 	if trackName == "" && artistName == "" && albumName == "" {
 		return
 	}

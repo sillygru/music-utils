@@ -4,10 +4,10 @@ import (
 	"database/sql"
 	"errors"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/sillygru/music-utils/internal/db"
+	"github.com/sillygru/music-utils/internal/names"
 )
 
 type coverResponse struct {
@@ -25,14 +25,15 @@ type coverResponse struct {
 func getCoverHandler(database *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
-		name, artist := strings.TrimSpace(query.Get("track_name")), strings.TrimSpace(query.Get("artist_name"))
+		input := names.Normalize(query.Get("track_name"), query.Get("artist_name"), query.Get("album_name"))
+		name, artist, album := input.TrackName, input.ArtistName, input.AlbumName
 		if name == "" || artist == "" {
 			setOutcome(r, "bad_request")
 			writeJSON(w, http.StatusBadRequest, apiError{Code: http.StatusBadRequest, Message: "track_name and artist_name are required"})
 			return
 		}
 		cacheStart := time.Now()
-		track, err := db.FindTrackMetadataExact(r.Context(), database, name, artist, query.Get("album_name"), 0)
+		track, err := db.FindTrackMetadataExact(r.Context(), database, name, artist, album, 0)
 		setCacheDuration(r, time.Since(cacheStart))
 		if errors.Is(err, sql.ErrNoRows) || err == nil && track.CoverURL == "" {
 			setOutcome(r, "miss")

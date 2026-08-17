@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sillygru/music-utils/internal/db"
+	"github.com/sillygru/music-utils/internal/names"
 )
 
 const (
@@ -39,6 +40,7 @@ func NewResolver(providers ...Provider) *Resolver {
 }
 
 func cacheKey(input Input) string {
+	input = normalizeInput(input)
 	return normalize(input.TrackName) + "\x00" + normalize(input.ArtistName) + "\x00" + normalize(input.AlbumName) + "\x00" + durationKey(input.Duration)
 }
 
@@ -46,6 +48,7 @@ func cacheKey(input Input) string {
 // the responses in provider order. Duplicate tracks are kept once, while the
 // first provider's metadata remains authoritative for the merged item.
 func (r *Resolver) Search(ctx context.Context, query string, limit int) ([]*db.Track, error) {
+	query = names.CleanSearch(query)
 	if limit < 1 {
 		return []*db.Track{}, nil
 	}
@@ -79,6 +82,16 @@ func (r *Resolver) Search(ctx context.Context, query string, limit int) ([]*db.T
 }
 
 func (r *Resolver) Lookup(ctx context.Context, input Input) (*db.Track, error) {
+	for _, candidate := range inputCandidates(input) {
+		if track, err := r.lookupOne(ctx, candidate); err == nil {
+			return track, nil
+		}
+	}
+	return nil, ErrNotFound
+}
+
+func (r *Resolver) lookupOne(ctx context.Context, input Input) (*db.Track, error) {
+	input = normalizeInput(input)
 	key := cacheKey(input)
 	r.mu.Lock()
 	if entry, ok := r.cache[key]; ok && time.Now().Before(entry.expiresAt) {

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/sillygru/music-utils/internal/db"
+	"github.com/sillygru/music-utils/internal/names"
 	"github.com/sillygru/music-utils/internal/pacer"
 )
 
@@ -68,6 +69,7 @@ func (c *Deezer) Name() string { return "deezer" }
 
 // Search returns up to limit song results from Deezer in its native ranking.
 func (c *Deezer) Search(ctx context.Context, query string, limit int) ([]*db.Track, error) {
+	query = names.CleanSearch(query)
 	if limit < 1 {
 		return []*db.Track{}, nil
 	}
@@ -95,6 +97,7 @@ func (c *Deezer) Search(ctx context.Context, query string, limit int) ([]*db.Tra
 }
 
 func (c *Deezer) Lookup(ctx context.Context, input Input) (*db.Track, error) {
+	input = normalizeInput(input)
 	endpoint, err := url.Parse(c.baseURL + "/search")
 	if err != nil {
 		return nil, fmt.Errorf("build Deezer URL: %w", err)

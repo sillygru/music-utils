@@ -34,9 +34,8 @@ console.log(data.plainLyrics);
 - **Etiquette:** send a descriptive `User-Agent` with contact information
   (e.g. `my-app/1.0 (+https://example.com)`). The API proxies keyless upstream
   sources with strict rate caps, so heavy or abusive usage degrades it for
-  everyone.
-- **IDs:** `id` values are local row identifiers. They are stable within an
-  instance but are not guaranteed to match across instances.
+  everyone.- **IDs:** `id` values are local row identifiers. They are stable within an instance but are not guaranteed to match across instances.
+- **Name cleanup:** exact and search lookups remove common media-library filename extensions and source/style labels such as `Official Music Video`, `AMV`, `Visualizer`, `Lyrics`, `Nightcore`, `Hardstyle`, `Sped Up`, and `Slowed`. When `artist_name` is omitted, common `Artist - Song` and `Artist ｜ Song` filenames are split automatically. An explicit artist is authoritative; provider-canonical names are returned in successful responses.
 
 ## Endpoints
 

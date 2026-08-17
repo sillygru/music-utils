@@ -8,6 +8,7 @@ import (
 
 	"github.com/sillygru/music-utils/internal/cover"
 	"github.com/sillygru/music-utils/internal/metadata"
+	"github.com/sillygru/music-utils/internal/names"
 )
 
 type coverSearchResponse struct {
@@ -34,7 +35,7 @@ type coverTopResponse struct {
 func searchCoverHandler(metadataResolver *metadata.Resolver, resolver *cover.Resolver, fallbacks *fallbackGuard, fallbackEnabled bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
-		q := strings.TrimSpace(query.Get("q"))
+		q := names.CleanSearch(query.Get("q"))
 		kindRaw := strings.TrimSpace(query.Get("type"))
 
 		if q == "" {
@@ -44,8 +45,9 @@ func searchCoverHandler(metadataResolver *metadata.Resolver, resolver *cover.Res
 				writeJSON(w, http.StatusBadRequest, apiError{Code: http.StatusBadRequest, Message: "type must be artist, album, or song"})
 				return
 			}
+			cleaned := names.Normalize(query.Get("track_name"), query.Get("artist_name"), query.Get("album_name"))
 			input := cover.Input{
-				TrackName: strings.TrimSpace(query.Get("track_name")), ArtistName: strings.TrimSpace(query.Get("artist_name")), AlbumName: strings.TrimSpace(query.Get("album_name")),
+				TrackName: cleaned.TrackName, ArtistName: cleaned.ArtistName, AlbumName: cleaned.AlbumName,
 			}
 			if kind == cover.Artist && input.ArtistName == "" {
 				setOutcome(r, "bad_request")

@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	"github.com/sillygru/music-utils/internal/db"
+	"github.com/sillygru/music-utils/internal/names"
 )
 
 // ErrNotFound is returned when no provider can resolve a track.
@@ -16,6 +17,20 @@ type Input struct {
 	ArtistName string
 	AlbumName  string
 	Duration   float64
+}
+
+func normalizeInput(input Input) Input {
+	cleaned := names.Normalize(input.TrackName, input.ArtistName, input.AlbumName)
+	return Input{TrackName: cleaned.TrackName, ArtistName: cleaned.ArtistName, AlbumName: cleaned.AlbumName, Duration: input.Duration}
+}
+
+func inputCandidates(input Input) []Input {
+	candidates := names.Candidates(input.TrackName, input.ArtistName, input.AlbumName)
+	result := make([]Input, 0, len(candidates))
+	for _, candidate := range candidates {
+		result = append(result, Input{TrackName: candidate.TrackName, ArtistName: candidate.ArtistName, AlbumName: candidate.AlbumName, Duration: input.Duration})
+	}
+	return result
 }
 
 // Provider resolves track metadata from a single upstream source.

@@ -56,7 +56,7 @@ func TestGetExact(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
-	result, err := client.GetExact(context.Background(), "Track Name", "Artist", "Album", 123.5)
+	result, err := client.GetExact(context.Background(), "Nightcore - Track Name (Official Music Video).mp3", "Artist", "Album (Official Audio)", 123.5)
 	if err != nil {
 		t.Fatalf("get exact: %v", err)
 	}

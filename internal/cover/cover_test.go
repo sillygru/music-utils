@@ -79,7 +79,7 @@ func TestITunesSongTitleOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
-	result, err := client.Lookup(context.Background(), Song, Input{TrackName: "Hotel California"})
+	result, err := client.Lookup(context.Background(), Song, Input{TrackName: "Nightcore - Hotel California (Official Music Video).mp3"})
 	if err != nil {
 		t.Fatalf("lookup: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestDeezerSongTitleOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
-	result, err := client.Lookup(context.Background(), Song, Input{TrackName: "Hotel California"})
+	result, err := client.Lookup(context.Background(), Song, Input{TrackName: "Nightcore - Hotel California (Official Music Video).mp3"})
 	if err != nil {
 		t.Fatalf("lookup: %v", err)
 	}
@@ -347,6 +347,19 @@ func (p *searchStubProvider) Lookup(_ context.Context, _ Kind, _ Input) (*Result
 func (p *searchStubProvider) Search(_ context.Context, _ Kind, _ Input, _ int) ([]Result, error) {
 	p.calls++
 	return p.results, p.err
+}
+
+func TestSongResultMatchesRejectsWrongCandidate(t *testing.T) {
+	input := Input{TrackName: "Falling Faster", ArtistName: "Dylan Espeseth"}
+	if songResultMatches(input, Result{TrackName: "Dylan Espeseth", ArtistName: "Falling Faster"}) {
+		t.Fatal("expected swapped artist/title result to be rejected")
+	}
+	if !songResultMatches(input, Result{TrackName: "Falling Faster", ArtistName: "Dylan Espeseth"}) {
+		t.Fatal("expected matching song result to be accepted")
+	}
+	if !songResultMatches(input, Result{URL: "http://img/unknown.jpg"}) {
+		t.Fatal("expected provider results without names to remain usable")
+	}
 }
 
 func TestResolverSearchPrefersSearchProvider(t *testing.T) {

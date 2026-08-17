@@ -74,6 +74,8 @@ Full request and response reference is in [`API.md`](API.md).
 ## Local-first caching
 
 Metadata and lyrics are stored in independent SQLite files. Metadata and lyrics lookups check their respective local database before making an upstream request.
+
+Before local or upstream lookup, music names are cleaned consistently across metadata, lyrics, and cover endpoints: known media extensions and downloader/source labels (for example `Official Music Video`, `AMV`, `Visualizer`, `Lyrics`, `Nightcore`, `Hardstyle`, `Sped Up`, and `Slowed`) are removed, and `Artist - Song`/`Artist ｜ Song` filenames can supply a missing artist. Explicit `artist_name` values remain authoritative, and provider-returned canonical names are preserved in responses.
 Successful provider responses are upserted transactionally and subsequent
 requests are served locally. Metadata misses are resolved by a provider chain
 that consults iTunes first, then Deezer, and an in-process cache memoizes both

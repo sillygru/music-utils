@@ -65,6 +65,7 @@ func NewDeezer(baseURL, userAgent string, timeout time.Duration) (*Deezer, error
 func (c *Deezer) Name() string { return "deezer" }
 
 func (c *Deezer) Lookup(ctx context.Context, kind Kind, input Input) (*Result, error) {
+	input = normalizeInput(input)
 	artist := CleanArtist(input.ArtistName)
 	switch kind {
 	case Song:
@@ -148,6 +149,7 @@ func (c *Deezer) Lookup(ctx context.Context, kind Kind, input Input) (*Result, e
 // one that best matches the request. Artist and song kinds are left to Lookup
 // (signaled via ErrNotFound) because their single top result is unambiguous.
 func (c *Deezer) Search(ctx context.Context, kind Kind, input Input, limit int) ([]Result, error) {
+	input = normalizeInput(input)
 	if limit < 1 {
 		return []Result{}, nil
 	}

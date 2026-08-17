@@ -88,6 +88,7 @@ func NewLastfm(baseURL, userAgent string, timeout time.Duration) (*Lastfm, error
 func (c *Lastfm) Name() string { return "lastfm" }
 
 func (c *Lastfm) Lookup(ctx context.Context, kind Kind, input Input) (*Result, error) {
+	input = normalizeInput(input)
 	artist := CleanArtist(input.ArtistName)
 	if artist == "" {
 		return nil, ErrNotFound

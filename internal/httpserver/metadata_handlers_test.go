@@ -12,7 +12,7 @@ func TestGetMetadataArtistOptional(t *testing.T) {
 	server := New("8080", metadataDB, lyricsDB)
 	cleanupHTTPServer(t, server)
 
-	response := performRequest(t, server.Handler, "/api/metadata/get?track_name=EXAMPLE+SONG")
+	response := performRequest(t, server.Handler, "/api/metadata/get?track_name=Example+Artist+-+Example+Song+(Official+Music+Video).mp3")
 	if response.Code != http.StatusOK {
 		t.Fatalf("expected artist-less metadata lookup to return 200, got %d: %s", response.Code, response.Body.String())
 	}

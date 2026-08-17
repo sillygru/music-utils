@@ -9,6 +9,7 @@ import (
 
 	"github.com/sillygru/music-utils/internal/cover"
 	"github.com/sillygru/music-utils/internal/db"
+	"github.com/sillygru/music-utils/internal/names"
 )
 
 func getCoverTopHandler(metadataDB, coverDB *sql.DB, resolver *cover.Resolver, fallbacks *fallbackGuard, fallbackEnabled bool, prefetcher *prefetcher) http.HandlerFunc {
@@ -24,8 +25,13 @@ func getCoverTopHandler(metadataDB, coverDB *sql.DB, resolver *cover.Resolver, f
 			writeJSON(w, http.StatusBadRequest, apiError{Code: http.StatusBadRequest, Message: "type must be artist, album, or song"})
 			return
 		}
+		candidates := names.Candidates(query.Get("track_name"), query.Get("artist_name"), query.Get("album_name"))
+		cleaned := candidates[0]
 		input := cover.Input{
-			TrackName: strings.TrimSpace(query.Get("track_name")), ArtistName: strings.TrimSpace(query.Get("artist_name")), AlbumName: strings.TrimSpace(query.Get("album_name")),
+			TrackName: cleaned.TrackName, ArtistName: cleaned.ArtistName, AlbumName: cleaned.AlbumName,
+		}
+		rawInput := cover.Input{
+			TrackName: query.Get("track_name"), ArtistName: query.Get("artist_name"), AlbumName: query.Get("album_name"),
 		}
 		switch kind {
 		case cover.Artist:
@@ -81,7 +87,14 @@ func getCoverTopHandler(metadataDB, coverDB *sql.DB, resolver *cover.Resolver, f
 
 		if kind == cover.Song && metadataDB != nil {
 			cacheStart := time.Now()
-			track, lookupErr := db.FindTrackMetadataExact(r.Context(), metadataDB, input.TrackName, input.ArtistName, input.AlbumName, 0)
+			var track *db.Track
+			var lookupErr error
+			for _, candidate := range candidates {
+				track, lookupErr = db.FindTrackMetadataExact(r.Context(), metadataDB, candidate.TrackName, candidate.ArtistName, candidate.AlbumName, 0)
+				if lookupErr == nil || !errors.Is(lookupErr, sql.ErrNoRows) {
+					break
+				}
+			}
 			setCacheDuration(r, time.Since(cacheStart))
 			if lookupErr == nil && track.CoverURL != "" {
 				setOutcome(r, "local_hit")
@@ -110,7 +123,7 @@ func getCoverTopHandler(metadataDB, coverDB *sql.DB, resolver *cover.Resolver, f
 		var lookupErr error
 		variants := make([]db.CoverVariant, 0, 3)
 		if kind == cover.Song {
-			result, lookupErr = resolver.Lookup(r.Context(), kind, input)
+			result, lookupErr = resolver.Lookup(r.Context(), kind, rawInput)
 		} else {
 			// Album and artist names can be ambiguous, so gather every provider's
 			// candidates and keep the first that plausibly matches the request

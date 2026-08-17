@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sillygru/music-utils/internal/names"
 	"github.com/sillygru/music-utils/internal/pacer"
 )
 
@@ -80,6 +81,7 @@ func New(baseURL, userAgent string, timeout time.Duration) (*Client, error) {
 
 // Search performs a text search and returns the array LRCLIB provides.
 func (c *Client) Search(ctx context.Context, query string) ([]RemoteResult, error) {
+	query = names.CleanSearch(query)
 	if c == nil || c.http == nil {
 		return nil, errors.New("LRCLIB client is nil")
 	}
@@ -99,6 +101,8 @@ func (c *Client) Search(ctx context.Context, query string) ([]RemoteResult, erro
 
 // GetExact performs one request and returns ErrNotFound for a remote 404.
 func (c *Client) GetExact(ctx context.Context, trackName, artistName, albumName string, duration float64) (*RemoteResult, error) {
+	input := names.Normalize(trackName, artistName, albumName)
+	trackName, artistName, albumName = input.TrackName, input.ArtistName, input.AlbumName
 	if c == nil || c.http == nil {
 		return nil, errors.New("LRCLIB client is nil")
 	}

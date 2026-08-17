@@ -4,11 +4,11 @@ import (
 	"database/sql"
 	"errors"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/sillygru/music-utils/internal/cover"
 	"github.com/sillygru/music-utils/internal/db"
+	"github.com/sillygru/music-utils/internal/names"
 )
 
 // getEntityCoverSearchHandler is the public artist/album route contract: the
@@ -19,8 +19,8 @@ import (
 // negative-cache window).
 func getEntityCoverSearchHandler(database *sql.DB, resolver *cover.Resolver, fallbacks *fallbackGuard, entityType db.CoverEntity, fallbackEnabled bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		artist := strings.TrimSpace(r.URL.Query().Get("artist_name"))
-		album := strings.TrimSpace(r.URL.Query().Get("album_name"))
+		artist := names.CleanArtist(r.URL.Query().Get("artist_name"))
+		album := names.CleanAlbum(r.URL.Query().Get("album_name"))
 		if entityType == db.CoverArtist && artist == "" {
 			setOutcome(r, "bad_request")
 			writeJSON(w, http.StatusBadRequest, apiError{Code: http.StatusBadRequest, Message: "artist_name is required"})
