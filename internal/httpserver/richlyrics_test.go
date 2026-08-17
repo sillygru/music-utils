@@ -64,13 +64,19 @@ func TestGetLyricsRichSyncIsOptInAndCached(t *testing.T) {
 		t.Fatalf("expected rich response 200, got %d: %s", rich.Code, rich.Body.String())
 	}
 	var fields struct {
-		RichSync *richSyncResult `json:"richSync"`
+		PlainLyrics  *string         `json:"plainLyrics"`
+		SyncedLyrics *string         `json:"syncedLyrics"`
+		LyricsFile   *string         `json:"lyricsfile"`
+		RichSync     *richSyncResult `json:"richSync"`
 	}
 	if err := json.NewDecoder(rich.Body).Decode(&fields); err != nil {
 		t.Fatalf("decode rich response: %v", err)
 	}
 	if fields.RichSync == nil || fields.RichSync.Format != "ttml" || fields.RichSync.SyncType != "word" || fields.RichSync.Source != "unison" {
 		t.Fatalf("unexpected rich response: %+v", fields.RichSync)
+	}
+	if fields.PlainLyrics != nil || fields.SyncedLyrics != nil || fields.LyricsFile != nil {
+		t.Fatal("rich response unexpectedly included redundant LRCLIB lyrics fields")
 	}
 	if calls.Load() != 1 {
 		t.Fatalf("expected one rich provider call, got %d", calls.Load())
@@ -121,14 +127,16 @@ func TestGetLyricsRichSyncCanResolveWithoutLineLyrics(t *testing.T) {
 		t.Fatalf("expected rich-only response 200, got %d: %s", response.Code, response.Body.String())
 	}
 	var got struct {
-		TrackName string         `json:"trackName"`
-		Plain     string         `json:"plainLyrics"`
-		Rich      *richSyncResult `json:"richSync"`
+		TrackName  string          `json:"trackName"`
+		Plain      *string         `json:"plainLyrics"`
+		Synced     *string         `json:"syncedLyrics"`
+		LyricsFile *string         `json:"lyricsfile"`
+		Rich       *richSyncResult `json:"richSync"`
 	}
 	if err := json.NewDecoder(response.Body).Decode(&got); err != nil {
 		t.Fatalf("decode rich-only response: %v", err)
 	}
-	if got.TrackName != "Rich Only" || got.Plain != "" || got.Rich == nil || got.Rich.Content != "<tt>rich only</tt>" {
+	if got.TrackName != "Rich Only" || got.Plain != nil || got.Synced != nil || got.LyricsFile != nil || got.Rich == nil || got.Rich.Content != "<tt>rich only</tt>" {
 		t.Fatalf("unexpected rich-only response: %+v", got)
 	}
 	if richCalls.Load() != 1 {

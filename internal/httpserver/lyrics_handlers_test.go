@@ -84,9 +84,14 @@ func TestGetLyrics(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", response.Code, response.Body.String())
 	}
 
+	body := append([]byte(nil), response.Body.Bytes()...)
 	var got lyricsResponse
-	if err := json.NewDecoder(response.Body).Decode(&got); err != nil {
+	if err := json.Unmarshal(body, &got); err != nil {
 		t.Fatalf("decode response: %v", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(body, &fields); err != nil {
+		t.Fatalf("decode response fields: %v", err)
 	}
 	if got.TrackName != "Example Song" || got.ArtistName != "Example Artist" || got.AlbumName != "Example Album" {
 		t.Fatalf("unexpected metadata: %+v", got)
@@ -94,25 +99,11 @@ func TestGetLyrics(t *testing.T) {
 	if got.Duration != 203.5 || got.PlainLyrics != "These are the words" || got.SyncedLyrics == "" {
 		t.Fatalf("unexpected lyrics response: %+v", got)
 	}
-	// LRCLIB compatibility: name mirrors the track name and lyricsfile is
-	// generated from the cached row without any extra storage.
 	if got.Name != got.TrackName {
 		t.Fatalf("expected name to mirror trackName, got %q", got.Name)
 	}
-	wantLyricsFile := "version: '1.0'\n" +
-		"metadata:\n" +
-		"  title: Example Song\n" +
-		"  artist: Example Artist\n" +
-		"  album: Example Album\n" +
-		"  duration_ms: 203500\n" +
-		"  instrumental: false\n" +
-		"lines:\n" +
-		"- text: These are the words\n" +
-		"  start_ms: 1000\n" +
-		"plain: |-\n" +
-		"  These are the words\n"
-	if got.LyricsFile != wantLyricsFile {
-		t.Fatalf("unexpected lyricsfile:\ngot:\n%q\nwant:\n%q", got.LyricsFile, wantLyricsFile)
+	if _, ok := fields["lyricsfile"]; ok {
+		t.Fatal("response unexpectedly contains the redundant lyricsfile field")
 	}
 }
 

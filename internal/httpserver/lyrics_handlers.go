@@ -70,22 +70,19 @@ func (g *lyricsUpstreamGroup) Do(ctx context.Context, key string, callback func(
 	return call.remote, call.err
 }
 
-// lyricsResponse mirrors the object shape LRCLIB returns for lyrics lookups
-// and search results. Name and LyricsFile are derived from the stored row at
-// serialization time (name always equals the track name; lyricsfile is the
-// generated YAML payload), so the API stays drop-in compatible with LRCLIB
-// clients without storing extra data.
+// lyricsResponse is the public lyrics response. Rich responses contain only
+// RichSync; ordinary responses contain the available LRCLIB text fields. The
+// legacy generated lyricsfile YAML payload is intentionally not exposed.
 type lyricsResponse struct {
-	ID           int64   `json:"id"`
-	Name         string  `json:"name"`
-	TrackName    string  `json:"trackName"`
-	ArtistName   string  `json:"artistName"`
-	AlbumName    string  `json:"albumName"`
-	Duration     float64 `json:"duration"`
-	Instrumental bool    `json:"instrumental"`
-	PlainLyrics  string  `json:"plainLyrics"`
-	SyncedLyrics string  `json:"syncedLyrics"`
-	LyricsFile   string          `json:"lyricsfile"`
+	ID           int64           `json:"id"`
+	Name         string          `json:"name"`
+	TrackName    string          `json:"trackName"`
+	ArtistName   string          `json:"artistName"`
+	AlbumName    string          `json:"albumName"`
+	Duration     float64         `json:"duration"`
+	Instrumental bool            `json:"instrumental"`
+	PlainLyrics  string          `json:"plainLyrics,omitempty"`
+	SyncedLyrics string          `json:"syncedLyrics,omitempty"`
 	RichSync     *richSyncResult `json:"richSync,omitempty"`
 }
 
@@ -548,7 +545,7 @@ func tryRichOnlyResponse(r *http.Request, metadataDB, lyricsDB *sql.DB, client *
 	if existingTrack != nil && existingTrack.ID > 0 {
 		if cached, err := db.FindRichLyrics(r.Context(), lyricsDB, existingTrack.ID, requestedRichSyncType(r)); err == nil {
 			response := toLyricsResponse(existingTrack, &db.Lyrics{})
-			response.RichSync = &richSyncResult{Content: cached.Content, Format: cached.Format, SyncType: cached.SyncType, Source: cached.Source}
+			setRichOnlyResponse(&response, cached)
 			return response, true
 		}
 	}
@@ -598,7 +595,7 @@ func tryRichOnlyResponse(r *http.Request, metadataDB, lyricsDB *sql.DB, client *
 		return lyricsResponse{}, false
 	}
 	response := toLyricsResponse(&track, &db.Lyrics{})
-	response.RichSync = &richSyncResult{Content: rich.Content, Format: rich.Format, SyncType: rich.SyncType, Source: rich.Source}
+	setRichOnlyResponse(&response, &rich)
 	return response, true
 }
 
@@ -609,7 +606,7 @@ func enrichLyricsResponse(r *http.Request, track *db.Track, lyrics *db.Lyrics, l
 	}
 	syncType := requestedRichSyncType(r)
 	if cached, err := db.FindRichLyrics(r.Context(), lyricsDB, track.ID, syncType); err == nil {
-		response.RichSync = &richSyncResult{Content: cached.Content, Format: cached.Format, SyncType: cached.SyncType, Source: cached.Source}
+		setRichOnlyResponse(&response, cached)
 		return response
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		setRequestIssue(r, slog.LevelWarn, err.Error())
@@ -641,7 +638,7 @@ func enrichLyricsResponse(r *http.Request, track *db.Track, lyrics *db.Lyrics, l
 		setRequestIssue(r, slog.LevelWarn, err.Error())
 		return response
 	}
-	response.RichSync = &richSyncResult{Content: cached.Content, Format: cached.Format, SyncType: cached.SyncType, Source: cached.Source}
+	setRichOnlyResponse(&response, &cached)
 	return response
 }
 
@@ -667,6 +664,12 @@ func validRichSyncType(value string) bool {
 	}
 }
 
+func setRichOnlyResponse(response *lyricsResponse, rich *db.RichLyrics) {
+	response.PlainLyrics = ""
+	response.SyncedLyrics = ""
+	response.RichSync = &richSyncResult{Content: rich.Content, Format: rich.Format, SyncType: rich.SyncType, Source: rich.Source}
+}
+
 func lyricsAvailable(lyrics *db.Lyrics) bool {
 	if lyrics == nil {
 		return false
@@ -685,7 +688,6 @@ func toLyricsResponse(track *db.Track, lyrics *db.Lyrics) lyricsResponse {
 		Instrumental: lyrics.Instrumental,
 		PlainLyrics:  lyrics.PlainLyrics,
 		SyncedLyrics: lyrics.SyncedLyrics,
-		LyricsFile:   buildLyricsFile(track, lyrics),
 	}
 }
 

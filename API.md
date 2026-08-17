@@ -354,10 +354,11 @@ consults LRCLIB and caches the result.
 
 Query parameters: required `track_name` and `artist_name`; optional
 `album_name`, non-negative `duration`, `include_rich_sync=true`, and optional
-`sync_type=word|syllable|richsync`. When
-`include_rich_sync=true`, the server performs an additional Unison-compatible
-lookup and may include the optional `richSync` object. Existing requests do not
-perform this lookup and retain the existing response shape.
+`sync_type=word|syllable|richsync`. Without `include_rich_sync=true`, the
+response contains the available plain and/or line-synchronized lyrics. With
+`include_rich_sync=true`, the server first tries an additional
+Unison-compatible lookup; a successful rich lookup returns only `richSync`,
+while a rich miss falls back to the plain/LRC lyrics fields.
 
 Example response:
 
@@ -371,8 +372,7 @@ Example response:
   "duration": 229,
   "instrumental": false,
   "plainLyrics": "A heart that's full up like a landfill…",
-  "syncedLyrics": "[00:00.00] A heart that's full up like a landfill…",
-  "lyricsfile": "version: '1.0'\nmetadata:\n  title: No Surprises…"
+  "syncedLyrics": "[00:00.00] A heart that's full up like a landfill…"
 }
 ```
 
@@ -387,18 +387,17 @@ Example response:
 | `instrumental` | boolean | True for instrumental tracks (lyrics fields empty). |
 | `plainLyrics` | string | Plain-text lyrics. |
 | `syncedLyrics` | string | Timestamped LRC lyrics, when available. |
-| `lyricsfile` | string | LRCLIB-style YAML lyrics payload, generated from the cached row (`lines` from LRC timestamps, `plain` block when lyrics exist). |
-| `richSync` | object | Optional source-native word/syllable synchronized payload; returned only when `include_rich_sync=true` and a provider has a result. |
+| `richSync` | object | Source-native word/syllable synchronized payload; returned alone when `include_rich_sync=true` and a provider has a result. If unavailable, the response falls back to `plainLyrics` and/or `syncedLyrics`. |
 | `richSync.content` | string | Raw provider payload, normally TTML. |
 | `richSync.format` | string | Payload format such as `ttml` or `lrc`. |
 | `richSync.syncType` | string | Synchronization level such as `word`, `syllable`, or `richsync`. |
 | `richSync.source` | string | Provider name, currently `unison`. |
 
-The `name` and `lyricsfile` fields match the object LRCLIB returns, so
-LRCLIB clients can consume this endpoint without adaptation. Both are
-derived at serialization time from the cached row — no extra storage is
-needed. Rich payloads are cached separately in the lyrics database and never
-replace `syncedLyrics`.
+The response intentionally does not include LRCLIB's redundant `lyricsfile`
+YAML field. Rich payloads are cached separately in the lyrics database. When a
+rich payload is returned, it replaces the plain and line-synchronized fields;
+when it is unavailable, the endpoint falls back to the cached or LRCLIB
+plain/LRC fields.
 
 Responses: `200` lyrics object · `400` invalid/missing input · `404` not
 found (memoized for 24 hours) · `429` rate limited · `503` upstream busy ·
@@ -407,11 +406,10 @@ found (memoized for 24 hours) · `429` rate limited · `503` upstream busy ·
 ## `GET /api/lyrics/search`
 
 Searches the local catalog and merges it with LRCLIB's `/api/search`
-results. Each result carries the fields LRCLIB returns — `id`, `name`,
-`trackName`, `artistName`, `albumName`, `duration`, `instrumental`,
-`plainLyrics`, `syncedLyrics`, and `lyricsfile` (the YAML payload). The
-`name` and `lyricsfile` fields are derived locally from the cached row so
-upstream search results and local hits return the same shape.
+results. Each result carries the compact fields `id`, `name`, `trackName`,
+`artistName`, `albumName`, `duration`, `instrumental`, `plainLyrics`, and
+`syncedLyrics` when available. The redundant LRCLIB `lyricsfile` YAML field is
+not returned.
 
 Query parameters: `q`, or one or more of `track_name`, `artist_name`,
 `album_name`; optional `limit` from `1–50`, default `20`. `q` is passed to

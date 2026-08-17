@@ -117,7 +117,7 @@ cold-lookup latency and has been removed.
 - **FTS5 search** — title, artist, album, and genre search over SQLite.
 - **Metadata fallback** — iTunes + Deezer provider chain with local caching.
 - **Lyrics fallback** — LRCLIB exact lookup and cache.
-- **Opt-in rich lyrics** — Unison-compatible word/syllable payloads are cached separately and returned with `include_rich_sync=true`, leaving the LRCLIB-compatible response unchanged by default.
+- **Opt-in rich lyrics** — Unison-compatible word/syllable payloads are cached separately and returned alone with `include_rich_sync=true`; unavailable rich lyrics fall back to plain/LRC lyrics.
 - **Rate limiting** — per-client-IP limits with `Retry-After` headers.
 - **Upstream pacing** — every provider (LRCLIB, iTunes, Deezer, Last.fm) is
   paced process-wide to a fixed interval, so no client traffic can exceed a
