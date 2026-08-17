@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -85,12 +86,16 @@ type stubProvider struct {
 	name  string
 	track *db.Track
 	err   error
+	delay time.Duration
 	call  atomic.Int32
 }
 
 func (p *stubProvider) Name() string { return p.name }
 func (p *stubProvider) Lookup(_ context.Context, _ Input) (*db.Track, error) {
 	p.call.Add(1)
+	if p.delay > 0 {
+		time.Sleep(p.delay)
+	}
 	return p.track, p.err
 }
 
@@ -144,6 +149,39 @@ func TestResolverCachesPositiveResult(t *testing.T) {
 	}
 	if p.call.Load() != 1 {
 		t.Fatalf("expected one upstream call after caching, got %d", p.call.Load())
+	}
+}
+
+func TestResolverCoalescesConcurrentExactLookups(t *testing.T) {
+	provider := &stubProvider{name: "p", track: &db.Track{Name: "Shared Song", ArtistName: "Shared Artist"}, delay: 25 * time.Millisecond}
+	resolver := NewResolver(provider)
+
+	const requests = 12
+	var wait sync.WaitGroup
+	wait.Add(requests)
+	for i := 0; i < requests; i++ {
+		go func() {
+			defer wait.Done()
+			track, err := resolver.Lookup(context.Background(), Input{TrackName: "Shared Song", ArtistName: "Shared Artist"})
+			if err != nil || track == nil || track.Name != "Shared Song" {
+				t.Errorf("coalesced lookup returned track=%+v err=%v", track, err)
+			}
+		}()
+	}
+	wait.Wait()
+	if provider.call.Load() != 1 {
+		t.Fatalf("expected one provider call for concurrent identical lookups, got %d", provider.call.Load())
+	}
+}
+
+func TestResolverRejectsWrongSongOrArtist(t *testing.T) {
+	provider := &stubProvider{name: "p", track: &db.Track{Name: "Different Song", ArtistName: "Different Artist"}}
+	resolver := NewResolver(provider)
+	if _, err := resolver.Lookup(context.Background(), Input{TrackName: "Requested Song", ArtistName: "Requested Artist"}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected wrong provider result to be rejected, got %v", err)
+	}
+	if provider.call.Load() != 1 {
+		t.Fatalf("expected one provider call, got %d", provider.call.Load())
 	}
 }
 

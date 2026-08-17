@@ -84,32 +84,41 @@ func newFallbackGuard(cfg config.Config) *fallbackGuard {
 	}
 }
 
+// acquire reserves one upstream fallback attempt without writing an HTTP
+// response. It lets request coalescers reserve budget only for the leader of
+// an identical lookup; waiters share that leader's result and consume nothing.
+func (g *fallbackGuard) acquire(r *http.Request) (release func(), status, retryAfter int, proceed bool) {
+	ip := clientIP(r, g.trustProxy)
+	if allowed, retry := g.budget.allow(ip); !allowed {
+		return nil, http.StatusTooManyRequests, retry, false
+	}
+	release, ok := g.gate.acquire(r.Context(), g.queueWait)
+	if !ok {
+		return nil, http.StatusServiceUnavailable, int(upstreamQueueRetryAfter), false
+	}
+	return release, 0, 0, true
+}
+
 // enter gates one upstream fallback attempt. When proceed is false the guard
 // has already written the 429 (per-IP budget) or 503 (queue saturated)
 // response and the handler must return without touching upstream.
-//
-// Note: the budget is consumed before the provider call. For metadata and
-// cover lookups the resolver memoizes misses in memory, so a repeated miss
-// consumes budget without spending upstream; this over-count is intentional
-// and harmless at the default budget of 10/min.
 func (g *fallbackGuard) enter(r *http.Request, w http.ResponseWriter) (release func(), proceed bool) {
-	ip := clientIP(r, g.trustProxy)
-	if allowed, retryAfter := g.budget.allow(ip); !allowed {
+	release, status, retryAfter, ok := g.acquire(r)
+	if ok {
+		return release, true
+	}
+	if status == http.StatusTooManyRequests {
 		setOutcome(r, "rate_limited")
 		writeRateLimitResponse(w, retryAfter)
 		return nil, false
 	}
-	release, ok := g.gate.acquire(r.Context(), g.queueWait)
-	if !ok {
-		w.Header().Set("Retry-After", strconv.Itoa(int(upstreamQueueRetryAfter)))
-		setOutcome(r, "upstream_busy")
-		writeJSON(w, http.StatusServiceUnavailable, apiError{
-			Code:    http.StatusServiceUnavailable,
-			Message: "Upstream busy, try again shortly",
-		})
-		return nil, false
-	}
-	return release, true
+	w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+	setOutcome(r, "upstream_busy")
+	writeJSON(w, http.StatusServiceUnavailable, apiError{
+		Code:    http.StatusServiceUnavailable,
+		Message: "Upstream busy, try again shortly",
+	})
+	return nil, false
 }
 
 // Stop shuts down the budget limiter's cleanup goroutine.

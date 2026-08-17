@@ -3,8 +3,10 @@ package httpserver
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -148,6 +150,78 @@ func TestGetLyricsDoesNotReturnEmptyCachedLyrics(t *testing.T) {
 	}
 	if getCalls.Load() != 2 || searchCalls.Load() != 2 {
 		t.Fatalf("expected one additional exact/search pair, got exact=%d search=%d", getCalls.Load(), searchCalls.Load())
+	}
+}
+
+func TestGetLyricsFetchesMultipleSongsForSameArtist(t *testing.T) {
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		track := r.URL.Query().Get("track_name")
+		artist := r.URL.Query().Get("artist_name")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"trackName":%q,"artistName":%q,"albumName":"Album","duration":200,"instrumental":false,"plainLyrics":%q,"syncedLyrics":""}`, track, artist, track+" lyrics")
+	}))
+	defer upstream.Close()
+
+	cfg := fallbackConfig(upstream.URL + "/api")
+	cfg.FallbackPerMin = 3
+	cfg.FallbackMaxQueue = 10
+	metadataDB, lyricsDB := testHTTPDatabases(t)
+	server := NewWithConfig(cfg, metadataDB, lyricsDB)
+	cleanupHTTPServer(t, server)
+
+	for _, track := range []string{"Song One", "Song Two", "Song Three"} {
+		response := performRequest(t, server.Handler, "/api/lyrics/get?track_name="+url.QueryEscape(track)+"&artist_name=Same+Artist")
+		if response.Code != http.StatusOK {
+			t.Fatalf("expected %s to resolve, got %d: %s", track, response.Code, response.Body.String())
+		}
+		var got lyricsResponse
+		if err := json.NewDecoder(response.Body).Decode(&got); err != nil {
+			t.Fatalf("decode %s response: %v", track, err)
+		}
+		if got.TrackName != track || got.ArtistName != "Same Artist" || got.PlainLyrics != track+" lyrics" {
+			t.Fatalf("wrong cached result for %s: %+v", track, got)
+		}
+	}
+	if calls.Load() != 3 {
+		t.Fatalf("expected one upstream call per distinct song, got %d", calls.Load())
+	}
+
+	// Repeating each request must use its own persistent exact-song cache.
+	for _, track := range []string{"Song One", "Song Two", "Song Three"} {
+		response := performRequest(t, server.Handler, "/api/lyrics/get?track_name="+url.QueryEscape(track)+"&artist_name=Same+Artist")
+		if response.Code != http.StatusOK {
+			t.Fatalf("expected cached %s to resolve, got %d", track, response.Code)
+		}
+	}
+	if calls.Load() != 3 {
+		t.Fatalf("expected cached repeats not to call upstream, got %d calls", calls.Load())
+	}
+}
+
+func TestGetLyricsRejectsWrongUpstreamSong(t *testing.T) {
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"trackName":"Different Song","artistName":"Same Artist","albumName":"Album","duration":200,"instrumental":false,"plainLyrics":"wrong lyrics","syncedLyrics":""}`))
+	}))
+	defer upstream.Close()
+
+	metadataDB, lyricsDB := testHTTPDatabases(t)
+	server := NewWithConfig(fallbackConfig(upstream.URL+"/api"), metadataDB, lyricsDB)
+	cleanupHTTPServer(t, server)
+
+	response := performRequest(t, server.Handler, "/api/lyrics/get?track_name=Requested+Song&artist_name=Same+Artist")
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("expected wrong upstream result to be rejected with 404, got %d: %s", response.Code, response.Body.String())
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("expected one upstream request, got %d", calls.Load())
+	}
+	if _, _, err := db.FindTrackExact(context.Background(), metadataDB, lyricsDB, "Requested Song", "Same Artist", "", 0); err == nil {
+		t.Fatal("wrong upstream result was cached under the requested song")
 	}
 }
 

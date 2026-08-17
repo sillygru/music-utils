@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sillygru/music-utils/internal/db"
@@ -19,6 +20,54 @@ const (
 	defaultSearchLimit = 20
 	maxSearchLimit     = 50
 )
+
+type fallbackBlockedError struct {
+	status     int
+	retryAfter int
+}
+
+func (e *fallbackBlockedError) Error() string { return "upstream fallback unavailable" }
+
+type lyricsUpstreamCall struct {
+	done   chan struct{}
+	remote *lrclib.RemoteResult
+	err    error
+}
+
+type lyricsUpstreamGroup struct {
+	mu       sync.Mutex
+	inFlight map[string]*lyricsUpstreamCall
+}
+
+func newLyricsUpstreamGroup() *lyricsUpstreamGroup {
+	return &lyricsUpstreamGroup{inFlight: make(map[string]*lyricsUpstreamCall)}
+}
+
+// Do coalesces concurrent upstream lookups for the same exact lyrics key. The
+// callback runs only for the leader, so only that request reserves fallback
+// budget and enters the upstream queue.
+func (g *lyricsUpstreamGroup) Do(ctx context.Context, key string, callback func() (*lrclib.RemoteResult, error)) (*lrclib.RemoteResult, error) {
+	g.mu.Lock()
+	if call, ok := g.inFlight[key]; ok {
+		g.mu.Unlock()
+		select {
+		case <-call.done:
+			return call.remote, call.err
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	call := &lyricsUpstreamCall{done: make(chan struct{})}
+	g.inFlight[key] = call
+	g.mu.Unlock()
+
+	call.remote, call.err = callback()
+	g.mu.Lock()
+	delete(g.inFlight, key)
+	close(call.done)
+	g.mu.Unlock()
+	return call.remote, call.err
+}
 
 // lyricsResponse mirrors the object shape LRCLIB returns for lyrics lookups
 // and search results. Name and LyricsFile are derived from the stored row at
@@ -44,6 +93,7 @@ type apiError struct {
 }
 
 func getLyricsHandler(metadataDB, lyricsDB *sql.DB, client *lrclib.Client, lyricsMisses *lyricsMissCache, fallbacks *fallbackGuard, fallbackEnabled bool, prefetcher *prefetcher) http.HandlerFunc {
+	upstreamGroup := newLyricsUpstreamGroup()
 	return func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
 		candidates := names.Candidates(query.Get("track_name"), query.Get("artist_name"), query.Get("album_name"))
@@ -106,15 +156,30 @@ func getLyricsHandler(metadataDB, lyricsDB *sql.DB, client *lrclib.Client, lyric
 			return
 		}
 
-		release, ok := fallbacks.enter(r, w)
-		if !ok {
+		remote, remoteErr := upstreamGroup.Do(r.Context(), missKey, func() (*lrclib.RemoteResult, error) {
+			release, status, retryAfter, ok := fallbacks.acquire(r)
+			if !ok {
+				return nil, &fallbackBlockedError{status: status, retryAfter: retryAfter}
+			}
+			defer release()
+
+			upstreamStart := time.Now()
+			remote, err := lookupRemoteLyrics(r.Context(), client, query.Get("track_name"), query.Get("artist_name"), query.Get("album_name"), duration)
+			setUpstreamDuration(r, time.Since(upstreamStart))
+			return remote, err
+		})
+		var blocked *fallbackBlockedError
+		if errors.As(remoteErr, &blocked) {
+			if blocked.status == http.StatusTooManyRequests {
+				setOutcome(r, "rate_limited")
+				writeRateLimitResponse(w, blocked.retryAfter)
+			} else {
+				w.Header().Set("Retry-After", strconv.Itoa(blocked.retryAfter))
+				setOutcome(r, "upstream_busy")
+				writeJSON(w, http.StatusServiceUnavailable, apiError{Code: http.StatusServiceUnavailable, Message: "Upstream busy, try again shortly"})
+			}
 			return
 		}
-		defer release()
-
-		upstreamStart := time.Now()
-		remote, remoteErr := lookupRemoteLyrics(r.Context(), client, query.Get("track_name"), query.Get("artist_name"), query.Get("album_name"), duration)
-		setUpstreamDuration(r, time.Since(upstreamStart))
 		if remoteErr != nil && !errors.Is(remoteErr, lrclib.ErrNotFound) {
 			setRequestIssue(r, slog.LevelWarn, remoteErr.Error())
 		}
@@ -322,6 +387,25 @@ func remoteLyricsAvailable(result *lrclib.RemoteResult) bool {
 	return result.Instrumental || result.PlainLyrics != "" || result.SyncedLyrics != ""
 }
 
+// remoteLyricsMatchesInput validates the identity returned by LRCLIB before
+// its content is cached. Album names are allowed to differ because LRCLIB may
+// resolve the same recording on a different release, but track and artist must
+// match the requested candidate.
+func remoteLyricsMatchesInput(input names.Input, result *lrclib.RemoteResult) bool {
+	if result == nil {
+		return false
+	}
+	actual := names.Normalize(result.TrackName, result.ArtistName, result.AlbumName)
+	if strings.ToLower(strings.TrimSpace(actual.TrackName)) != strings.ToLower(strings.TrimSpace(input.TrackName)) {
+		return false
+	}
+	if strings.TrimSpace(input.ArtistName) != "" &&
+		strings.ToLower(strings.TrimSpace(actual.ArtistName)) != strings.ToLower(strings.TrimSpace(input.ArtistName)) {
+		return false
+	}
+	return true
+}
+
 // lookupRemoteLyrics resolves lyrics upstream. LRCLIB's exact endpoint requires
 // an artist, so an artist-less request resolves through search and selects the
 // best result instead.
@@ -342,7 +426,13 @@ func lookupRemoteLyrics(ctx context.Context, client *lrclib.Client, trackName, a
 		}
 		remote, err := client.GetExact(ctx, candidate.TrackName, candidate.ArtistName, candidate.AlbumName, duration)
 		if err == nil {
-			return remote, nil
+			if remoteLyricsMatchesInput(candidate, remote) && remoteLyricsAvailable(remote) {
+				return remote, nil
+			}
+			// A successful HTTP response is not necessarily the requested
+			// recording. Treat an identity mismatch like a miss so a different
+			// song can never be persisted under this request's cache key.
+			err = lrclib.ErrNotFound
 		}
 		lastErr = err
 	}

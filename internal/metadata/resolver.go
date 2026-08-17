@@ -23,19 +23,28 @@ type cachedEntry struct {
 	expiresAt time.Time
 }
 
+type lookupCall struct {
+	done  chan struct{}
+	value *db.Track
+	err   error
+}
+
 // Resolver chains providers in order and memoizes both positive results and
 // not-found misses for a bounded lifetime so repeated lookups stop re-hitting
-// upstream providers.
+// upstream providers. inFlight coalesces concurrent misses for the same exact
+// song, so a burst cannot spend one upstream request per caller.
 type Resolver struct {
 	providers []Provider
 	mu        sync.Mutex
 	cache     map[string]cachedEntry
+	inFlight  map[string]*lookupCall
 }
 
 func NewResolver(providers ...Provider) *Resolver {
 	return &Resolver{
 		providers: providers,
 		cache:     make(map[string]cachedEntry),
+		inFlight:  make(map[string]*lookupCall),
 	}
 }
 
@@ -101,26 +110,51 @@ func (r *Resolver) lookupOne(ctx context.Context, input Input) (*db.Track, error
 		}
 		return entry.value, nil
 	}
+	if call, ok := r.inFlight[key]; ok {
+		r.mu.Unlock()
+		select {
+		case <-call.done:
+			return call.value, call.err
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	call := &lookupCall{done: make(chan struct{})}
+	r.inFlight[key] = call
 	r.mu.Unlock()
 
+	var found *db.Track
 	for _, provider := range r.providers {
 		if provider == nil {
 			continue
 		}
 		track, err := provider.Lookup(ctx, input)
-		if err == nil {
-			r.store(key, track, false)
-			return track, nil
+		if err == nil && track != nil && trackMatchesInput(input, track) {
+			found = track
+			break
 		}
-		if !errors.Is(err, ErrNotFound) {
+		if err != nil && !errors.Is(err, ErrNotFound) {
 			// Transient/provider error without a result: keep trying the next
 			// tier rather than recording a miss.
 			continue
 		}
 	}
 
-	r.store(key, nil, true)
-	return nil, ErrNotFound
+	resultErr := error(nil)
+	if found == nil {
+		resultErr = ErrNotFound
+		r.store(key, nil, true)
+	} else {
+		r.store(key, found, false)
+	}
+
+	r.mu.Lock()
+	call.value = found
+	call.err = resultErr
+	delete(r.inFlight, key)
+	close(call.done)
+	r.mu.Unlock()
+	return found, resultErr
 }
 
 func (r *Resolver) store(key string, track *db.Track, notFound bool) {
@@ -131,6 +165,24 @@ func (r *Resolver) store(key string, track *db.Track, notFound bool) {
 	r.mu.Lock()
 	r.cache[key] = cachedEntry{value: track, notFound: notFound, expiresAt: time.Now().Add(ttl)}
 	r.mu.Unlock()
+}
+
+// trackMatchesInput prevents a provider from caching a result for a different
+// song or artist merely because its search endpoint returned a non-empty row.
+// Album names are intentionally not required to match: providers commonly
+// return a canonical release variant for the same recording.
+func trackMatchesInput(input Input, track *db.Track) bool {
+	if track == nil {
+		return false
+	}
+	actual := names.Normalize(track.Name, track.ArtistName, track.AlbumName)
+	if normalize(input.TrackName) == "" || normalize(actual.TrackName) != normalize(input.TrackName) {
+		return false
+	}
+	if normalize(input.ArtistName) != "" && normalize(actual.ArtistName) != normalize(input.ArtistName) {
+		return false
+	}
+	return true
 }
 
 // durationKey collapses durations to a stride so provider second-level rounding
