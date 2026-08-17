@@ -87,7 +87,7 @@ type lyricsResponse struct {
 }
 
 type richSyncResult struct {
-	Content  string `json:"content"`
+	Content  any    `json:"content"`
 	Format   string `json:"format"`
 	SyncType string `json:"syncType"`
 	Source   string `json:"source"`
@@ -601,7 +601,11 @@ func tryRichOnlyResponse(r *http.Request, metadataDB, lyricsDB *sql.DB, client *
 		return lyricsResponse{}, false
 	}
 	track.ID = trackID
-	rich := db.RichLyrics{TrackID: trackID, Content: remote.Content, Format: remote.Format, SyncType: remote.SyncType, Source: remote.Source}
+	content, format, converted := compactRichSyncForStorage(remote.Content, remote.Format)
+	if !converted {
+		content, format = remote.Content, remote.Format
+	}
+	rich := db.RichLyrics{TrackID: trackID, Content: content, Format: format, SyncType: remote.SyncType, Source: remote.Source}
 	if err := db.UpsertRichLyrics(r.Context(), lyricsDB, rich); err != nil {
 		setRequestIssue(r, slog.LevelWarn, err.Error())
 		return lyricsResponse{}, false
@@ -662,7 +666,11 @@ func enrichLyricsResponse(r *http.Request, track *db.Track, lyrics *db.Lyrics, l
 		setRequestIssue(r, slog.LevelWarn, "rich lyrics returned unsupported sync type")
 		return response
 	}
-	cached := db.RichLyrics{TrackID: track.ID, Content: remote.Content, Format: remote.Format, SyncType: remote.SyncType, Source: remote.Source}
+	content, format, converted := compactRichSyncForStorage(remote.Content, remote.Format)
+	if !converted {
+		content, format = remote.Content, remote.Format
+	}
+	cached := db.RichLyrics{TrackID: track.ID, Content: content, Format: format, SyncType: remote.SyncType, Source: remote.Source}
 	if err := db.UpsertRichLyrics(r.Context(), lyricsDB, cached); err != nil {
 		setRequestIssue(r, slog.LevelWarn, err.Error())
 		return response
@@ -696,7 +704,7 @@ func validRichSyncType(value string) bool {
 func setRichOnlyResponse(response *lyricsResponse, rich *db.RichLyrics) {
 	response.PlainLyrics = ""
 	response.SyncedLyrics = ""
-	response.RichSync = &richSyncResult{Content: rich.Content, Format: rich.Format, SyncType: rich.SyncType, Source: rich.Source}
+	response.RichSync = &richSyncResult{Content: compactRichSyncContent(rich.Content, rich.Format), Format: rich.Format, SyncType: rich.SyncType, Source: rich.Source}
 }
 
 func lyricsAvailable(lyrics *db.Lyrics) bool {

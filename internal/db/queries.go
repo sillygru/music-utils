@@ -211,6 +211,66 @@ content=excluded.content, content_hash=excluded.content_hash, updated_at=CURRENT
 	return nil
 }
 
+// RichLyricsConverter converts one source-native rich payload for storage. The
+// bool reports whether the converter produced a replacement.
+type RichLyricsConverter func(content, format string) (newContent, newFormat string, ok bool)
+
+// MigrateRichLyrics converts existing rich payload rows without holding a
+// transaction across the whole table. Callers can run this in the background
+// so startup is not delayed while the database is upgraded.
+func MigrateRichLyrics(ctx context.Context, database *sql.DB, converter RichLyricsConverter) (int, error) {
+	if database == nil {
+		return 0, errors.New("lyrics database is nil")
+	}
+	if converter == nil {
+		return 0, errors.New("rich lyrics converter is nil")
+	}
+	rows, err := database.QueryContext(ctx, `SELECT id,content,format,sync_type FROM lyrics_sync_variants WHERE LOWER(format)='ttml'`)
+	if err != nil {
+		return 0, fmt.Errorf("find rich lyrics to migrate: %w", err)
+	}
+	type migrationRow struct {
+		id       int64
+		content  string
+		format   string
+		syncType string
+	}
+	pending := make([]migrationRow, 0)
+	for rows.Next() {
+		var row migrationRow
+		if err := rows.Scan(&row.id, &row.content, &row.format, &row.syncType); err != nil {
+			_ = rows.Close()
+			return 0, fmt.Errorf("scan rich lyrics migration: %w", err)
+		}
+		pending = append(pending, row)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return 0, fmt.Errorf("iterate rich lyrics migration: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return 0, fmt.Errorf("close rich lyrics migration rows: %w", err)
+	}
+
+	migrated := 0
+	for _, row := range pending {
+		content, format, ok := converter(row.content, row.format)
+		if !ok {
+			continue
+		}
+		result, err := database.ExecContext(ctx, `UPDATE lyrics_sync_variants
+SET content=?, format=?, content_hash=?, updated_at=CURRENT_TIMESTAMP
+WHERE id=? AND LOWER(format)='ttml'`, content, format, richContentHash(content, format, row.syncType), row.id)
+		if err != nil {
+			return migrated, fmt.Errorf("migrate rich lyrics %d: %w", row.id, err)
+		}
+		if affected, err := result.RowsAffected(); err == nil && affected > 0 {
+			migrated++
+		}
+	}
+	return migrated, nil
+}
+
 // FindRichLyrics returns the best cached rich payload for a track. A requested
 // sync type narrows the result; an empty sync type accepts word or syllable
 // variants in source priority order.

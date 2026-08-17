@@ -72,7 +72,7 @@ func TestGetLyricsRichSyncIsOptInAndCached(t *testing.T) {
 	if err := json.NewDecoder(rich.Body).Decode(&fields); err != nil {
 		t.Fatalf("decode rich response: %v", err)
 	}
-	if fields.RichSync == nil || fields.RichSync.Format != "ttml" || fields.RichSync.SyncType != "word" || fields.RichSync.Source != "unison" {
+	if fields.RichSync == nil || fields.RichSync.Format != "json" || fields.RichSync.SyncType != "word" || fields.RichSync.Source != "unison" {
 		t.Fatalf("unexpected rich response: %+v", fields.RichSync)
 	}
 	if fields.PlainLyrics != nil || fields.SyncedLyrics != nil || fields.LyricsFile != nil {

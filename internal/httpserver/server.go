@@ -142,6 +142,7 @@ func NewWithLogger(cfg config.Config, metadataDB, lyricsDB, coverDB *sql.DB, log
 	}
 	client := newLRCLIBClient(cfg, logger)
 	richClient := newRichLyricsClient(cfg, logger)
+	richLyricsMigrationStop := startRichLyricsMigration(lyricsDB, logger)
 	var requestLogs *reqlog.Writer
 	if cfg.RequestLogEnabled {
 		var err error
@@ -232,6 +233,7 @@ func NewWithLogger(cfg config.Config, metadataDB, lyricsDB, coverDB *sql.DB, log
 	}
 	server.RegisterOnShutdown(limiter.Stop)
 	server.RegisterOnShutdown(replayCache.Stop)
+	server.RegisterOnShutdown(richLyricsMigrationStop)
 	server.RegisterOnShutdown(fallbacks.Stop)
 	server.RegisterOnShutdown(coverRefresher.Stop)
 	if prefetcher != nil {
@@ -302,6 +304,25 @@ func newMetadataResolver(cfg config.Config, logger *slog.Logger, itunesPace *pac
 		return nil
 	}
 	return metadata.NewResolver(providers...)
+}
+
+func startRichLyricsMigration(lyricsDB *sql.DB, logger *slog.Logger) func() {
+	if lyricsDB == nil {
+		return func() {}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	go func() {
+		defer cancel()
+		migrated, err := db.MigrateRichLyrics(ctx, lyricsDB, compactRichSyncForStorage)
+		if err != nil {
+			logger.Warn("rich lyrics storage migration failed", "error", err)
+			return
+		}
+		if migrated > 0 {
+			logger.Info("migrated rich lyrics to compact JSON", "rows", migrated)
+		}
+	}()
+	return cancel
 }
 
 func newRichLyricsClient(cfg config.Config, logger *slog.Logger) *richlyrics.Client {

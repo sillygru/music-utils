@@ -388,16 +388,32 @@ Example response:
 | `plainLyrics` | string | Plain-text lyrics. |
 | `syncedLyrics` | string | Timestamped LRC lyrics, when available. |
 | `richSync` | object | Source-native word/syllable synchronized payload; returned alone when `include_rich_sync=true` and a provider has a result. If unavailable, the response falls back to `plainLyrics` and/or `syncedLyrics`. |
-| `richSync.content` | string | Raw provider payload, normally TTML. |
-| `richSync.format` | string | Payload format such as `ttml` or `lrc`. |
+| `richSync.content` | object | Compact parsed rich-sync JSON with `title`, `artist`, `duration`, and `lines`. Each line is `[begin, end, text, words]`; each word is `[begin, end, text]`. |
+| `richSync.content.title` | string | Song title, when present. |
+| `richSync.content.artist` | string | Artist name, when present. |
+| `richSync.content.duration` | number | Song duration in seconds. |
+| `richSync.content.lines` | array | Timed line tuples; word timestamps are nested in the fourth item. |
+| `richSync.format` | string | `json` for the compact server representation. |
 | `richSync.syncType` | string | Synchronization level such as `word`, `syllable`, or `richsync`. |
 | `richSync.source` | string | Provider name, currently `unison`. |
 
+A rich response has this compact content shape:
+
+```json
+{
+  "title": "Somebody's Pleasure",
+  "artist": "Aziz Hedra",
+  "duration": 223.98,
+  "lines": [[7.184, 13.436, "I've been so busy, ignoring, and hiding", [[7.184, 7.532, "I've"], [7.532, 7.819, "been"]]]]
+}
+```
+
 The response intentionally does not include LRCLIB's redundant `lyricsfile`
-YAML field. Rich payloads are cached separately in the lyrics database. When a
-rich payload is returned, it replaces the plain and line-synchronized fields;
-when it is unavailable, the endpoint falls back to the cached or LRCLIB
-plain/LRC fields.
+YAML field. Rich payloads are cached separately in the lyrics database as
+compact JSON, and existing TTML rows are converted asynchronously after
+startup. When a rich payload is returned, it replaces the plain and
+line-synchronized fields; when it is unavailable, the endpoint falls back to
+the cached or LRCLIB plain/LRC fields.
 
 Responses: `200` lyrics object · `400` invalid/missing input · `404` not
 found (memoized for 24 hours) · `429` rate limited · `503` upstream busy ·
