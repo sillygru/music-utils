@@ -621,7 +621,18 @@ func enrichLyricsResponse(r *http.Request, track *db.Track, lyrics *db.Lyrics, l
 	}
 	defer release()
 	started := time.Now()
-	remote, err := client.Get(r.Context(), track.Name, track.ArtistName, track.AlbumName, track.Duration)
+	query := r.URL.Query()
+	candidates := names.Candidates(query.Get("track_name"), query.Get("artist_name"), query.Get("album_name"))
+	input := candidates[0]
+	lookupTrack := input.TrackName
+	if lookupTrack == "" && track != nil {
+		lookupTrack = track.Name
+	}
+	lookupArtist := input.ArtistName
+	lookupAlbum := input.AlbumName
+	lookupDuration, _ := optionalDuration(query.Get("duration"))
+
+	remote, err := client.Get(r.Context(), lookupTrack, lookupArtist, lookupAlbum, lookupDuration)
 	setUpstreamDuration(r, time.Since(started))
 	if err != nil {
 		if !errors.Is(err, richlyrics.ErrNotFound) {

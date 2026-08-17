@@ -143,3 +143,60 @@ func TestGetLyricsRichSyncCanResolveWithoutLineLyrics(t *testing.T) {
 		t.Fatalf("expected one rich lookup, got %d", richCalls.Load())
 	}
 }
+
+func TestGetLyricsRichSyncPassesOnlyUserSuppliedParameters(t *testing.T) {
+	var requestedQueries []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/lyrics" {
+			t.Fatalf("unexpected rich upstream path: %s", r.URL.Path)
+		}
+		requestedQueries = append(requestedQueries, r.URL.RawQuery)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":true,"data":{"lyrics":"<tt>test</tt>","format":"ttml","syncType":"word"}}`))
+	}))
+	defer upstream.Close()
+
+	metadataDB, lyricsDB := testHTTPDatabases(t)
+	// Seed track with non-empty album and duration in DB
+	seedHTTPTrack(t, metadataDB, lyricsDB)
+
+	cfg := config.Config{
+		Port:                "8080",
+		RichLyricsEnabled:   true,
+		RichLyricsBaseURL:   upstream.URL,
+		RichLyricsUserAgent: "music-utils-test",
+		RichLyricsTimeoutMS: 1000,
+	}
+	server := NewWithConfig(cfg, metadataDB, lyricsDB)
+	cleanupHTTPServer(t, server)
+
+	// Case 1: user provides track_name and artist_name only (no album, no duration)
+	resp := performRequest(t, server.Handler, "/api/lyrics/get?track_name=Example+Song&artist_name=Example+Artist&include_rich_sync=true")
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.Code)
+	}
+	if len(requestedQueries) != 1 {
+		t.Fatalf("expected 1 upstream call, got %d", len(requestedQueries))
+	}
+	if query := requestedQueries[0]; query != "artist=Example+Artist&song=Example+Song" {
+		t.Fatalf("expected query with only user parameters, got: %s", query)
+	}
+
+	// Reset rich cache for track 1
+	if _, err := lyricsDB.ExecContext(context.Background(), "DELETE FROM lyrics_sync_variants WHERE track_id=1"); err != nil {
+		t.Fatalf("clear rich cache: %v", err)
+	}
+
+	// Case 2: user provides track_name, artist_name, album_name, and duration
+	resp2 := performRequest(t, server.Handler, "/api/lyrics/get?track_name=Example+Song&artist_name=Example+Artist&album_name=Custom+Album&duration=180&include_rich_sync=true")
+	if resp2.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp2.Code)
+	}
+	if len(requestedQueries) != 2 {
+		t.Fatalf("expected 2 upstream calls, got %d", len(requestedQueries))
+	}
+	if query := requestedQueries[1]; query != "album=Custom+Album&artist=Example+Artist&duration=180&song=Example+Song" {
+		t.Fatalf("expected query with all provided parameters, got: %s", query)
+	}
+}
+
