@@ -170,16 +170,16 @@ func TestGetLyricsRichSyncPassesOnlyUserSuppliedParameters(t *testing.T) {
 	server := NewWithConfig(cfg, metadataDB, lyricsDB)
 	cleanupHTTPServer(t, server)
 
-	// Case 1: user provides track_name and artist_name only (no album, no duration)
-	resp := performRequest(t, server.Handler, "/api/lyrics/get?track_name=Example+Song&artist_name=Example+Artist&include_rich_sync=true")
+	// Case 1: user provides track_name only (artist and album filled from DB, duration never filled)
+	resp := performRequest(t, server.Handler, "/api/lyrics/get?track_name=Example+Song&include_rich_sync=true")
 	if resp.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.Code)
 	}
 	if len(requestedQueries) != 1 {
 		t.Fatalf("expected 1 upstream call, got %d", len(requestedQueries))
 	}
-	if query := requestedQueries[0]; query != "artist=Example+Artist&song=Example+Song" {
-		t.Fatalf("expected query with only user parameters, got: %s", query)
+	if query := requestedQueries[0]; query != "album=Example+Album&artist=Example+Artist&song=Example+Song" {
+		t.Fatalf("expected query with artist/album filled from DB and no duration, got: %s", query)
 	}
 
 	// Reset rich cache for track 1
@@ -187,16 +187,17 @@ func TestGetLyricsRichSyncPassesOnlyUserSuppliedParameters(t *testing.T) {
 		t.Fatalf("clear rich cache: %v", err)
 	}
 
-	// Case 2: user provides track_name, artist_name, album_name, and duration
-	resp2 := performRequest(t, server.Handler, "/api/lyrics/get?track_name=Example+Song&artist_name=Example+Artist&album_name=Custom+Album&duration=180&include_rich_sync=true")
+	// Case 2: user provides track_name and artist_name, but overrides album_name and provides duration
+	resp2 := performRequest(t, server.Handler, "/api/lyrics/get?track_name=Example+Song&artist_name=Custom+Artist&album_name=Custom+Album&duration=180&include_rich_sync=true")
 	if resp2.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp2.Code)
 	}
 	if len(requestedQueries) != 2 {
 		t.Fatalf("expected 2 upstream calls, got %d", len(requestedQueries))
 	}
-	if query := requestedQueries[1]; query != "album=Custom+Album&artist=Example+Artist&duration=180&song=Example+Song" {
-		t.Fatalf("expected query with all provided parameters, got: %s", query)
+	if query := requestedQueries[1]; query != "album=Custom+Album&artist=Custom+Artist&duration=180&song=Example+Song" {
+		t.Fatalf("expected query with user-provided overrides and duration, got: %s", query)
 	}
 }
+
 

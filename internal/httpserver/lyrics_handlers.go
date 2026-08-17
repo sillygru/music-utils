@@ -558,7 +558,19 @@ func tryRichOnlyResponse(r *http.Request, metadataDB, lyricsDB *sql.DB, client *
 	}
 	defer release()
 	started := time.Now()
-	remote, err := client.Get(r.Context(), trackName, artistName, albumName, duration)
+	lookupTrack := strings.TrimSpace(trackName)
+	if lookupTrack == "" && existingTrack != nil {
+		lookupTrack = existingTrack.Name
+	}
+	lookupArtist := strings.TrimSpace(artistName)
+	if lookupArtist == "" && existingTrack != nil {
+		lookupArtist = existingTrack.ArtistName
+	}
+	lookupAlbum := strings.TrimSpace(albumName)
+	if lookupAlbum == "" && existingTrack != nil {
+		lookupAlbum = existingTrack.AlbumName
+	}
+	remote, err := client.Get(r.Context(), lookupTrack, lookupArtist, lookupAlbum, duration)
 	setUpstreamDuration(r, time.Since(started))
 	if err != nil {
 		if !errors.Is(err, richlyrics.ErrNotFound) {
@@ -629,7 +641,13 @@ func enrichLyricsResponse(r *http.Request, track *db.Track, lyrics *db.Lyrics, l
 		lookupTrack = track.Name
 	}
 	lookupArtist := input.ArtistName
+	if lookupArtist == "" && track != nil {
+		lookupArtist = track.ArtistName
+	}
 	lookupAlbum := input.AlbumName
+	if lookupAlbum == "" && track != nil {
+		lookupAlbum = track.AlbumName
+	}
 	lookupDuration, _ := optionalDuration(query.Get("duration"))
 
 	remote, err := client.Get(r.Context(), lookupTrack, lookupArtist, lookupAlbum, lookupDuration)
