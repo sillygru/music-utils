@@ -41,6 +41,9 @@ const (
 	defaultLRCLIBFallbackEnabled   = true
 	defaultLRCLIBBaseURL           = "https://lrclib.net/api"
 	defaultLRCLIBTimeoutMS         = 5000
+	defaultRichLyricsEnabled       = true
+	defaultRichLyricsBaseURL       = "https://unison.boidu.dev"
+	defaultRichLyricsTimeoutMS     = 5000
 	defaultMetadataFallbackEnabled = true
 	defaultITunesBaseURL           = "https://itunes.apple.com"
 	defaultDeezerBaseURL           = "https://api.deezer.com"
@@ -89,6 +92,10 @@ type Config struct {
 	LRCLIBBaseURL           string
 	LRCLIBUserAgent         string
 	LRCLIBTimeoutMS         int
+	RichLyricsEnabled       bool
+	RichLyricsBaseURL       string
+	RichLyricsUserAgent     string
+	RichLyricsTimeoutMS     int
 	MetadataFallbackEnabled bool
 	ITunesBaseURL           string
 	DeezerBaseURL           string
@@ -144,6 +151,10 @@ func Load() Config {
 		LRCLIBBaseURL:           valueOrDefault("LRCLIB_BASE_URL", defaultLRCLIBBaseURL),
 		LRCLIBUserAgent:         valueOrDefault("LRCLIB_USER_AGENT", defaultLRCLIBUserAgent()),
 		LRCLIBTimeoutMS:         intOrDefault("LRCLIB_TIMEOUT_MS", defaultLRCLIBTimeoutMS),
+		RichLyricsEnabled:       boolOrDefault("RICH_LYRICS_ENABLED", defaultRichLyricsEnabled),
+		RichLyricsBaseURL:       valueOrDefault("RICH_LYRICS_BASE_URL", defaultRichLyricsBaseURL),
+		RichLyricsUserAgent:     valueOrDefault("RICH_LYRICS_USER_AGENT", defaultRichLyricsUserAgent()),
+		RichLyricsTimeoutMS:     intOrDefault("RICH_LYRICS_TIMEOUT_MS", defaultRichLyricsTimeoutMS),
 		MetadataFallbackEnabled: boolOrDefault("METADATA_FALLBACK_ENABLED", defaultMetadataFallbackEnabled),
 		ITunesBaseURL:           valueOrDefault("ITUNES_BASE_URL", defaultITunesBaseURL),
 		DeezerBaseURL:           valueOrDefault("DEEZER_BASE_URL", defaultDeezerBaseURL),
@@ -236,7 +247,7 @@ func (c Config) Validate() error {
 	if c.RequestLogRetentionDays < 0 {
 		return fmt.Errorf("REQUEST_LOG_RETENTION_DAYS must be zero or positive")
 	}
-	if c.LRCLIBTimeoutMS < 1 || c.MetadataTimeoutMS < 1 || c.CoverTimeoutMS < 1 {
+	if c.LRCLIBTimeoutMS < 1 || c.RichLyricsTimeoutMS < 1 || c.MetadataTimeoutMS < 1 || c.CoverTimeoutMS < 1 {
 		return fmt.Errorf("upstream timeouts must be positive")
 	}
 	if c.PrefetchPerMin < 1 {
@@ -251,7 +262,10 @@ func (c Config) Validate() error {
 	if strings.TrimSpace(c.LRCLIBUserAgent) == "" {
 		return fmt.Errorf("LRCLIB_USER_AGENT must not be empty")
 	}
-	for name, value := range map[string]string{"LRCLIB_BASE_URL": c.LRCLIBBaseURL, "ITUNES_BASE_URL": c.ITunesBaseURL, "DEEZER_BASE_URL": c.DeezerBaseURL, "LASTFM_BASE_URL": c.LastfmBaseURL} {
+	if strings.TrimSpace(c.RichLyricsUserAgent) == "" {
+		return fmt.Errorf("RICH_LYRICS_USER_AGENT must not be empty")
+	}
+	for name, value := range map[string]string{"LRCLIB_BASE_URL": c.LRCLIBBaseURL, "RICH_LYRICS_BASE_URL": c.RichLyricsBaseURL, "ITUNES_BASE_URL": c.ITunesBaseURL, "DEEZER_BASE_URL": c.DeezerBaseURL, "LASTFM_BASE_URL": c.LastfmBaseURL} {
 		baseURL, err := url.Parse(strings.TrimSpace(value))
 		if err != nil || (baseURL.Scheme != "http" && baseURL.Scheme != "https") || baseURL.Host == "" {
 			return fmt.Errorf("%s must be an http or https URL", name)
@@ -279,6 +293,10 @@ func defaultLRCLIBUserAgent() string {
 	return "music-utils/" + version.Version + " (+https://gru0.dev)"
 }
 
+func defaultRichLyricsUserAgent() string {
+	return "music-utils/" + version.Version + " (+https://gru0.dev)"
+}
+
 func defaultCoverUserAgent() string {
 	return "music-utils/" + version.Version + " (+https://gru0.dev)"
 }
@@ -290,7 +308,7 @@ func validateEnvironment() error {
 	if err := validateIntEnv("DB_CACHE_SIZE_KB"); err != nil {
 		return err
 	}
-	for _, name := range []string{"DB_MAX_OPEN_CONNS", "RATE_LIMIT_PER_SEC", "RATE_LIMIT_PER_MIN", "FALLBACK_PER_MIN", "FALLBACK_MAX_QUEUE", "FALLBACK_QUEUE_WAIT_MS", "COVER_REFRESH_AFTER_DAYS", "COVER_REFRESH_MAX_ROWS", "COVER_REFRESH_MAX_RECHECK", "LRCLIB_TIMEOUT_MS", "METADATA_TIMEOUT_MS", "COVER_TIMEOUT_MS", "PREFETCH_PER_MIN", "PREFETCH_CONCURRENCY", "PREFETCH_QUEUE_SIZE"} {
+	for _, name := range []string{"DB_MAX_OPEN_CONNS", "RATE_LIMIT_PER_SEC", "RATE_LIMIT_PER_MIN", "FALLBACK_PER_MIN", "FALLBACK_MAX_QUEUE", "FALLBACK_QUEUE_WAIT_MS", "COVER_REFRESH_AFTER_DAYS", "COVER_REFRESH_MAX_ROWS", "COVER_REFRESH_MAX_RECHECK", "LRCLIB_TIMEOUT_MS", "RICH_LYRICS_TIMEOUT_MS", "METADATA_TIMEOUT_MS", "COVER_TIMEOUT_MS", "PREFETCH_PER_MIN", "PREFETCH_CONCURRENCY", "PREFETCH_QUEUE_SIZE"} {
 		if err := validatePositiveIntEnv(name); err != nil {
 			return err
 		}
@@ -304,7 +322,7 @@ func validateEnvironment() error {
 			return fmt.Errorf("REQUEST_LOG_RETENTION_DAYS must be an integer >= -1 (-1 means keep forever)")
 		}
 	}
-	for _, name := range []string{"TRUST_PROXY", "LRCLIB_FALLBACK_ENABLED", "METADATA_FALLBACK_ENABLED", "COVER_FALLBACK_ENABLED", "COVER_REFRESH_ENABLED", "REQUEST_LOG_ENABLED", "REQUEST_LOG_UA_OPTIMIZE", "REQUEST_LOG_UA_SAVE_UNKNOWN", "REQUESTS_TODAY_ENABLED", "PREFETCH_ENABLED", "PREFETCH_LYRICS", "PREFETCH_ALBUM_COVER", "PREFETCH_ARTIST_COVER"} {
+	for _, name := range []string{"TRUST_PROXY", "LRCLIB_FALLBACK_ENABLED", "RICH_LYRICS_ENABLED", "METADATA_FALLBACK_ENABLED", "COVER_FALLBACK_ENABLED", "COVER_REFRESH_ENABLED", "REQUEST_LOG_ENABLED", "REQUEST_LOG_UA_OPTIMIZE", "REQUEST_LOG_UA_SAVE_UNKNOWN", "REQUESTS_TODAY_ENABLED", "PREFETCH_ENABLED", "PREFETCH_LYRICS", "PREFETCH_ALBUM_COVER", "PREFETCH_ARTIST_COVER"} {
 		if value := strings.TrimSpace(os.Getenv(name)); value != "" {
 			if _, err := strconv.ParseBool(value); err != nil {
 				return fmt.Errorf("%s must be a boolean", name)

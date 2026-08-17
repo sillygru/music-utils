@@ -29,6 +29,28 @@ func TestLoadLRCLIBDefaults(t *testing.T) {
 	}
 }
 
+func TestLoadRichLyricsDefaults(t *testing.T) {
+	clearRateLimitEnv(t)
+	for _, name := range []string{"RICH_LYRICS_ENABLED", "RICH_LYRICS_BASE_URL", "RICH_LYRICS_USER_AGENT", "RICH_LYRICS_TIMEOUT_MS"} {
+		t.Setenv(name, "")
+	}
+	cfg := Load()
+	if !cfg.RichLyricsEnabled || cfg.RichLyricsBaseURL != "https://unison.boidu.dev" || cfg.RichLyricsTimeoutMS != 5000 {
+		t.Fatalf("unexpected rich lyrics defaults: %+v", cfg)
+	}
+	if cfg.RichLyricsUserAgent != "music-utils/"+version.Version+" (+https://gru0.dev)" {
+		t.Fatalf("unexpected rich lyrics user agent: %q", cfg.RichLyricsUserAgent)
+	}
+}
+
+func TestLoadAndValidateRejectsInvalidRichLyricsURL(t *testing.T) {
+	clearRateLimitEnv(t)
+	t.Setenv("RICH_LYRICS_BASE_URL", "localhost")
+	if _, err := LoadAndValidate(); err == nil {
+		t.Fatal("expected invalid RICH_LYRICS_BASE_URL to fail validation")
+	}
+}
+
 func TestLoadAndValidateRejectsInvalidSuppliedValues(t *testing.T) {
 	t.Setenv("PORT", "not-a-port")
 	if _, err := LoadAndValidate(); err == nil {

@@ -18,6 +18,7 @@ import (
 	"github.com/sillygru/music-utils/internal/metadata"
 	"github.com/sillygru/music-utils/internal/pacer"
 	"github.com/sillygru/music-utils/internal/reqlog"
+	"github.com/sillygru/music-utils/internal/richlyrics"
 	"github.com/sillygru/music-utils/internal/version"
 )
 
@@ -140,6 +141,7 @@ func NewWithLogger(cfg config.Config, metadataDB, lyricsDB, coverDB *sql.DB, log
 		logger = slog.Default()
 	}
 	client := newLRCLIBClient(cfg, logger)
+	richClient := newRichLyricsClient(cfg, logger)
 	var requestLogs *reqlog.Writer
 	if cfg.RequestLogEnabled {
 		var err error
@@ -195,7 +197,7 @@ func NewWithLogger(cfg config.Config, metadataDB, lyricsDB, coverDB *sql.DB, log
 			mux.HandleFunc("GET "+statsSongsPath, statsSongsHandler(metadataDB))
 		}
 	}
-	mux.HandleFunc("GET /api/lyrics/get", getLyricsHandler(metadataDB, lyricsDB, client, lyricsMisses, fallbacks, cfg.LRCLIBFallbackEnabled, prefetcher))
+	mux.HandleFunc("GET /api/lyrics/get", getLyricsHandler(metadataDB, lyricsDB, client, richClient, lyricsMisses, fallbacks, cfg.LRCLIBFallbackEnabled, cfg.RichLyricsEnabled, prefetcher))
 	mux.HandleFunc("GET /api/lyrics/search", searchLyricsHandlerWithUpstream(metadataDB, lyricsDB, client, fallbacks, cfg.LRCLIBFallbackEnabled))
 	mux.HandleFunc("GET /api/metadata/get", getMetadataHandler(metadataDB, metadataResolver, fallbacks, cfg.MetadataFallbackEnabled, prefetcher))
 	mux.HandleFunc("GET /api/metadata/search", searchMetadataHandlerWithUpstream(metadataDB, metadataResolver, fallbacks, cfg.MetadataFallbackEnabled))
@@ -300,6 +302,27 @@ func newMetadataResolver(cfg config.Config, logger *slog.Logger, itunesPace *pac
 		return nil
 	}
 	return metadata.NewResolver(providers...)
+}
+
+func newRichLyricsClient(cfg config.Config, logger *slog.Logger) *richlyrics.Client {
+	baseURL := cfg.RichLyricsBaseURL
+	if strings.TrimSpace(baseURL) == "" {
+		baseURL = "https://unison.boidu.dev"
+	}
+	userAgent := cfg.RichLyricsUserAgent
+	if strings.TrimSpace(userAgent) == "" {
+		userAgent = "music-utils/" + version.Version + " (+https://gru0.dev)"
+	}
+	timeout := time.Duration(cfg.RichLyricsTimeoutMS) * time.Millisecond
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	client, err := richlyrics.New(baseURL, userAgent, timeout)
+	if err != nil {
+		logger.Error("configure rich lyrics client", "error", err)
+		return nil
+	}
+	return client
 }
 
 func newLRCLIBClient(cfg config.Config, logger *slog.Logger) *lrclib.Client {

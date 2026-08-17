@@ -183,6 +183,58 @@ func InsertTrackWithLyrics(ctx context.Context, metadataDB, lyricsDB *sql.DB, tr
 	return trackID, lyricsID, nil
 }
 
+// UpsertRichLyrics stores one source-native rich/syllable payload for a track.
+// Rich content is kept separate from synced_lyrics so existing LRCLIB clients
+// continue receiving the same LRC-compatible field.
+func UpsertRichLyrics(ctx context.Context, database *sql.DB, rich RichLyrics) error {
+	if database == nil {
+		return errors.New("lyrics database is nil")
+	}
+	rich.Content = strings.TrimSpace(rich.Content)
+	rich.Format = strings.ToLower(strings.TrimSpace(rich.Format))
+	rich.SyncType = strings.ToLower(strings.TrimSpace(rich.SyncType))
+	rich.Source = strings.ToLower(strings.TrimSpace(rich.Source))
+	if rich.TrackID <= 0 || rich.Content == "" || rich.Format == "" || rich.SyncType == "" || rich.Source == "" {
+		return errors.New("rich lyrics track, content, format, sync type, and source are required")
+	}
+	if rich.Hash == "" {
+		rich.Hash = richContentHash(rich.Content, rich.Format, rich.SyncType)
+	}
+	_, err := database.ExecContext(ctx, `INSERT INTO lyrics_sync_variants (track_id,content,format,sync_type,source,content_hash,updated_at)
+VALUES (?,?,?,?,?,?,CURRENT_TIMESTAMP)
+ON CONFLICT(track_id,format,sync_type,source) DO UPDATE SET
+content=excluded.content, content_hash=excluded.content_hash, updated_at=CURRENT_TIMESTAMP`,
+		rich.TrackID, rich.Content, rich.Format, rich.SyncType, rich.Source, rich.Hash)
+	if err != nil {
+		return fmt.Errorf("upsert rich lyrics: %w", err)
+	}
+	return nil
+}
+
+// FindRichLyrics returns the best cached rich payload for a track. A requested
+// sync type narrows the result; an empty sync type accepts word or syllable
+// variants in source priority order.
+func FindRichLyrics(ctx context.Context, database *sql.DB, trackID int64, syncType string) (*RichLyrics, error) {
+	if database == nil {
+		return nil, errors.New("lyrics database is nil")
+	}
+	rich := &RichLyrics{}
+	err := database.QueryRowContext(ctx, `SELECT id,track_id,content,format,sync_type,source,content_hash
+FROM lyrics_sync_variants
+WHERE track_id=? AND (?='' OR sync_type=?)
+ORDER BY CASE sync_type WHEN 'word' THEN 0 WHEN 'syllable' THEN 1 WHEN 'richsync' THEN 2 ELSE 3 END,
+         CASE source WHEN 'unison' THEN 0 ELSE 1 END, id DESC LIMIT 1`,
+		trackID, strings.ToLower(strings.TrimSpace(syncType)), strings.ToLower(strings.TrimSpace(syncType))).Scan(
+		&rich.ID, &rich.TrackID, &rich.Content, &rich.Format, &rich.SyncType, &rich.Source, &rich.Hash)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, sql.ErrNoRows
+	}
+	if err != nil {
+		return nil, fmt.Errorf("find rich lyrics: %w", err)
+	}
+	return rich, nil
+}
+
 // FindLyricsByID reads one row from the lyrics database.
 func FindLyricsByID(ctx context.Context, database *sql.DB, lyricsID int64) (*Lyrics, error) {
 	if database == nil {
@@ -497,6 +549,11 @@ func ftsQuery(value string) string {
 }
 func contentHash(plain, synced string) string {
 	hash := sha256.Sum256([]byte(normalize(plain) + "\x00" + normalize(synced)))
+	return hex.EncodeToString(hash[:])
+}
+
+func richContentHash(content, format, syncType string) string {
+	hash := sha256.Sum256([]byte(format + "\x00" + syncType + "\x00" + content))
 	return hex.EncodeToString(hash[:])
 }
 func nullableText(value string) any {

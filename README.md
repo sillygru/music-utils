@@ -117,6 +117,7 @@ cold-lookup latency and has been removed.
 - **FTS5 search** — title, artist, album, and genre search over SQLite.
 - **Metadata fallback** — iTunes + Deezer provider chain with local caching.
 - **Lyrics fallback** — LRCLIB exact lookup and cache.
+- **Opt-in rich lyrics** — Unison-compatible word/syllable payloads are cached separately and returned with `include_rich_sync=true`, leaving the LRCLIB-compatible response unchanged by default.
 - **Rate limiting** — per-client-IP limits with `Retry-After` headers.
 - **Upstream pacing** — every provider (LRCLIB, iTunes, Deezer, Last.fm) is
   paced process-wide to a fixed interval, so no client traffic can exceed a
@@ -204,11 +205,17 @@ cold-lookup latency and has been removed.
 | `LRCLIB_BASE_URL` | `https://lrclib.net/api` | LRCLIB API base URL. |
 | `LRCLIB_USER_AGENT` | `music-utils/v0.6.0 (+https://gru0.dev)` | LRCLIB User-Agent. |
 | `LRCLIB_TIMEOUT_MS` | `5000` | LRCLIB timeout. |
+| `RICH_LYRICS_ENABLED` | `true` | Enable opt-in word/syllable synchronized lyrics enrichment. |
+| `RICH_LYRICS_BASE_URL` | `https://unison.boidu.dev` | Unison-compatible rich lyrics API base URL. |
+| `RICH_LYRICS_USER_AGENT` | `music-utils/v0.6.0 (+https://gru0.dev)` | Rich lyrics provider User-Agent. |
+| `RICH_LYRICS_TIMEOUT_MS` | `5000` | Rich lyrics provider timeout. |
 
 ## Database migration
 
 New installations create `METADATA_DB_PATH`, `LYRICS_DB_PATH`, and
-`COVER_DB_PATH` independently.
+`COVER_DB_PATH` independently. The lyrics migration also creates the additive
+`lyrics_sync_variants` table for cached word/syllable payloads; existing lyrics
+rows are not rewritten or backfilled.
 On startup, an existing combined database is upgraded in place when it is used
 as the metadata path: lyrics rows are copied to the lyrics database, metadata
 tracks are rebuilt without a cross-database foreign key, and the old lyrics

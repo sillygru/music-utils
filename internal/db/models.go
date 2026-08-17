@@ -70,3 +70,14 @@ type Lyrics struct {
 	ContentHash  string
 	Source       string
 }
+
+// RichLyrics is a cached source-native word or syllable synchronized payload.
+type RichLyrics struct {
+	ID        int64
+	TrackID   int64
+	Content   string
+	Format    string
+	SyncType  string
+	Source    string
+	Hash      string
+}
