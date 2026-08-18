@@ -63,8 +63,20 @@ func buildRichSyncObject(rs richSyncResult) []byte {
 	switch content := rs.Content.(type) {
 	case compactRichSync:
 		b.Write(buildCompactContent(content))
+	case *compactRichSync:
+		if content != nil {
+			b.Write(buildCompactContent(*content))
+		} else {
+			b.WriteString("null")
+		}
 	case string:
-		b.Write(jsonMarshal(content))
+		if parsed, ok := parseStoredCompactRichSync(content); ok {
+			b.Write(buildCompactContent(parsed))
+		} else if parsed, err := parseCompactRichSync(content); err == nil && len(parsed.Lines) > 0 {
+			b.Write(buildCompactContent(parsed))
+		} else {
+			b.Write(jsonMarshal(content))
+		}
 	default:
 		b.WriteString("null")
 	}

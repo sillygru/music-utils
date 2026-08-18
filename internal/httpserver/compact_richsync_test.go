@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -216,5 +218,136 @@ func TestWriteLyricsResponseJSONUnparseableContentStaysString(t *testing.T) {
 	}
 	if decoded.RichSync.Content != "<tt>rich only</tt>" {
 		t.Fatalf("unexpected decoded content: %q", decoded.RichSync.Content)
+	}
+}
+
+func TestCompactRichTupleMarshaling(t *testing.T) {
+	word := compactRichWord{Begin: 7.184, End: 7.532, Text: "I've"}
+	wordJSON, err := json.Marshal(word)
+	if err != nil {
+		t.Fatalf("marshal word: %v", err)
+	}
+	expectedWord := `[7.184,7.532,"I've"]`
+	if string(wordJSON) != expectedWord {
+		t.Fatalf("expected word JSON %q, got %q", expectedWord, string(wordJSON))
+	}
+
+	line := compactRichLine{
+		Begin: 7.184,
+		End:   13.436,
+		Text:  "I've been so busy, ignoring, and hiding",
+		Words: []compactRichWord{
+			{Begin: 7.184, End: 7.532, Text: "I've"},
+			{Begin: 7.532, End: 7.819, Text: "been"},
+			{Begin: 7.819, End: 8.112, Text: "so"},
+			{Begin: 8.112, End: 9.420, Text: "busy"},
+		},
+	}
+	lineJSON, err := json.Marshal(line)
+	if err != nil {
+		t.Fatalf("marshal line: %v", err)
+	}
+	expectedLine := `[7.184,13.436,"I've been so busy, ignoring, and hiding",[[7.184,7.532,"I've"],[7.532,7.819,"been"],[7.819,8.112,"so"],[8.112,9.42,"busy"]]]`
+	if string(lineJSON) != expectedLine {
+		t.Fatalf("expected line JSON %q, got %q", expectedLine, string(lineJSON))
+	}
+
+	res := lyricsResponse{
+		ID: 42, Name: "Somebody's Pleasure", TrackName: "Somebody's Pleasure",
+		ArtistName: "Aziz Hedra", AlbumName: "Album", Duration: 229,
+		RichSync: &richSyncResult{
+			Content: compactRichSync{
+				Title:    "Somebody's Pleasure",
+				Artist:   "Aziz Hedra",
+				Duration: 223.98,
+				Lines:    []compactRichLine{line},
+			},
+			Format: "json", SyncType: "word", Source: "unison",
+		},
+	}
+	var b bytes.Buffer
+	if err := writeLyricsResponseJSON(&b, res); err != nil {
+		t.Fatalf("write lyrics json: %v", err)
+	}
+	body := b.String()
+
+	// Verify the lines output matches the documentation layout
+	expectedLinesBlock := "      \"lines\": [\n" +
+		"        [7.184, 13.436, \"I've been so busy, ignoring, and hiding\", [\n" +
+		"          [7.184, 7.532, \"I've\"],\n" +
+		"          [7.532, 7.819, \"been\"],\n" +
+		"          [7.819, 8.112, \"so\"],\n" +
+		"          [8.112, 9.42, \"busy\"]\n" +
+		"        ]]\n" +
+		"      ]"
+	if !strings.Contains(body, expectedLinesBlock) {
+		t.Fatalf("expected lines block:\n%s\ngot:\n%s", expectedLinesBlock, body)
+	}
+}
+
+func TestGetLyricsRichSyncFormattedResponseBody(t *testing.T) {
+	ttml := `<tt xmlns="http://www.w3.org/ns/ttml">
+  <head>
+    <metadata>
+      <title>Somebody's Pleasure</title>
+      <agent>Aziz Hedra</agent>
+    </metadata>
+  </head>
+  <body dur="03:43.98">
+    <div>
+      <p begin="00:07.184" end="00:13.436">
+        <span begin="00:07.184" end="00:07.532">I've</span>
+        <span begin="00:07.532" end="00:07.819">been</span>
+        <span begin="00:07.819" end="00:08.112">so</span>
+        <span begin="00:08.112" end="00:09.420">busy</span>
+      </p>
+    </div>
+  </body>
+</tt>`
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"success": true,
+			"data": map[string]any{
+				"lyrics":   ttml,
+				"format":   "ttml",
+				"syncType": "word",
+			},
+		})
+	}))
+	defer upstream.Close()
+
+	metadataDB, lyricsDB := testHTTPDatabases(t)
+	cfg := fallbackConfig(upstream.URL + "/api")
+	cfg.RichLyricsEnabled = true
+	cfg.RichLyricsBaseURL = upstream.URL
+	cfg.RichLyricsUserAgent = "music-utils-test"
+	cfg.RichLyricsTimeoutMS = 1000
+	metadataDB.SetMaxOpenConns(1)
+	server := NewWithConfig(cfg, metadataDB, lyricsDB)
+	cleanupHTTPServer(t, server)
+
+	rec := performRequest(t, server.Handler, "/api/lyrics/get?track_name=Somebody%27s+Pleasure&artist_name=Aziz+Hedra&include_rich_sync=true")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	body := rec.Body.String()
+	expectedBlock := "      \"lines\": [\n" +
+		"        [7.184, 13.436, \"I've been so busy\", [\n" +
+		"          [7.184, 7.532, \"I've\"],\n" +
+		"          [7.532, 7.819, \"been\"],\n" +
+		"          [7.819, 8.112, \"so\"],\n" +
+		"          [8.112, 9.42, \"busy\"]\n" +
+		"        ]]\n" +
+		"      ]"
+	if !strings.Contains(body, expectedBlock) {
+		t.Fatalf("expected lines block in HTTP response:\n%s\ngot response:\n%s", expectedBlock, body)
+	}
+	if !strings.Contains(body, "  \"richSync\": {\n") {
+		t.Fatalf("expected richSync object in response:\n%s", body)
+	}
+	if !strings.Contains(body, "    \"format\": \"json\",\n") {
+		t.Fatalf("expected format json in richSync:\n%s", body)
 	}
 }

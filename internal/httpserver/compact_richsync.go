@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"bytes"
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
@@ -27,7 +28,25 @@ type compactRichLine struct {
 }
 
 func (line compactRichLine) MarshalJSON() ([]byte, error) {
-	return json.Marshal([]any{line.Begin, line.End, line.Text, line.Words})
+	words := line.Words
+	if words == nil {
+		words = []compactRichWord{}
+	}
+	wordsBytes, err := json.Marshal(words)
+	if err != nil {
+		return nil, err
+	}
+	var b bytes.Buffer
+	b.WriteByte('[')
+	b.Write(jsonMarshal(line.Begin))
+	b.WriteString(",")
+	b.Write(jsonMarshal(line.End))
+	b.WriteString(",")
+	b.Write(jsonMarshal(line.Text))
+	b.WriteString(",")
+	b.Write(wordsBytes)
+	b.WriteByte(']')
+	return b.Bytes(), nil
 }
 
 func (line *compactRichLine) UnmarshalJSON(data []byte) error {
@@ -54,7 +73,15 @@ type compactRichWord struct {
 }
 
 func (word compactRichWord) MarshalJSON() ([]byte, error) {
-	return json.Marshal([]any{word.Begin, word.End, word.Text})
+	var b bytes.Buffer
+	b.WriteByte('[')
+	b.Write(jsonMarshal(word.Begin))
+	b.WriteString(",")
+	b.Write(jsonMarshal(word.End))
+	b.WriteString(",")
+	b.Write(jsonMarshal(word.Text))
+	b.WriteByte(']')
+	return b.Bytes(), nil
 }
 
 func (word *compactRichWord) UnmarshalJSON(data []byte) error {

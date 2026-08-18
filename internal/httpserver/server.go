@@ -511,5 +511,9 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 		_ = writeLyricsResponseJSON(w, res)
 		return
 	}
+	if res, ok := value.(*lyricsResponse); ok && res != nil {
+		_ = writeLyricsResponseJSON(w, *res)
+		return
+	}
 	_ = json.NewEncoder(w).Encode(value)
 }

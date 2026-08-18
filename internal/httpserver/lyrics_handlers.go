@@ -704,7 +704,12 @@ func validRichSyncType(value string) bool {
 func setRichOnlyResponse(response *lyricsResponse, rich *db.RichLyrics) {
 	response.PlainLyrics = ""
 	response.SyncedLyrics = ""
-	response.RichSync = &richSyncResult{Content: compactRichSyncContent(rich.Content, rich.Format), Format: rich.Format, SyncType: rich.SyncType, Source: rich.Source}
+	content := compactRichSyncContent(rich.Content, rich.Format)
+	format := rich.Format
+	if _, ok := content.(compactRichSync); ok {
+		format = "json"
+	}
+	response.RichSync = &richSyncResult{Content: content, Format: format, SyncType: rich.SyncType, Source: rich.Source}
 }
 
 func lyricsAvailable(lyrics *db.Lyrics) bool {
