@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/sillygru/music-utils/internal/config"
+	"github.com/sillygru/music-utils/internal/db"
 )
 
 func TestGetLyricsRichSyncIsOptInAndCached(t *testing.T) {
@@ -144,6 +145,147 @@ func TestGetLyricsRichSyncCanResolveWithoutLineLyrics(t *testing.T) {
 	}
 }
 
+func TestSearchLyricsRichSyncIsOptInAndCached(t *testing.T) {
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/lyrics" {
+			t.Fatalf("unexpected rich upstream path: %s", r.URL.Path)
+		}
+		calls.Add(1)
+		if r.URL.Query().Get("song") != "Example Song" || r.URL.Query().Get("artist") != "Example Artist" {
+			t.Fatalf("unexpected rich upstream query: %v", r.URL.Query())
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":true,"data":{"lyrics":"<tt><p begin=\"0s\" end=\"1s\"><span begin=\"0s\" end=\"1s\">These</span></p></tt>","format":"ttml","syncType":"word"}}`))
+	}))
+	defer upstream.Close()
+
+	metadataDB, lyricsDB := testHTTPDatabases(t)
+	seedHTTPTrack(t, metadataDB, lyricsDB)
+	cfg := config.Config{
+		Port:                  "8080",
+		RateLimitPerSec:       100,
+		RateLimitPerMin:       1000,
+		FallbackPerMin:        100,
+		FallbackMaxQueue:      10,
+		FallbackQueueWaitMS:   1000,
+		RichLyricsEnabled:     true,
+		RichLyricsBaseURL:     upstream.URL,
+		RichLyricsUserAgent:   "music-utils-test",
+		RichLyricsTimeoutMS:   1000,
+		LRCLIBFallbackEnabled: false,
+	}
+	server := NewWithConfig(cfg, metadataDB, lyricsDB)
+	cleanupHTTPServer(t, server)
+
+	legacy := performRequest(t, server.Handler, "/api/lyrics/search?q=example")
+	if legacy.Code != http.StatusOK {
+		t.Fatalf("expected legacy search 200, got %d: %s", legacy.Code, legacy.Body.String())
+	}
+	var legacyResults []lyricsResponse
+	if err := json.NewDecoder(legacy.Body).Decode(&legacyResults); err != nil {
+		t.Fatalf("decode legacy search: %v", err)
+	}
+	if len(legacyResults) != 1 || legacyResults[0].RichSync != nil || legacyResults[0].PlainLyrics == "" {
+		t.Fatalf("unexpected legacy search result: %+v", legacyResults)
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("legacy search unexpectedly called rich provider: %d", calls.Load())
+	}
+
+	rich := performRequest(t, server.Handler, "/api/lyrics/search?q=example&include_rich_sync=true&sync_type=word")
+	if rich.Code != http.StatusOK {
+		t.Fatalf("expected rich search 200, got %d: %s", rich.Code, rich.Body.String())
+	}
+	var richResults []lyricsResponse
+	if err := json.NewDecoder(rich.Body).Decode(&richResults); err != nil {
+		t.Fatalf("decode rich search: %v", err)
+	}
+	if len(richResults) != 1 || richResults[0].RichSync == nil || richResults[0].RichSync.Format != "json" || richResults[0].RichSync.SyncType != "word" {
+		t.Fatalf("unexpected rich search result: %+v", richResults)
+	}
+	if richResults[0].PlainLyrics != "" || richResults[0].SyncedLyrics != "" {
+		t.Fatal("rich search result unexpectedly included LRCLIB fields")
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("expected one rich provider call, got %d", calls.Load())
+	}
+
+	// A different search URL bypasses the HTTP replay cache but should use the
+	// rich variant persisted for the local track.
+	cached := performRequest(t, server.Handler, "/api/lyrics/search?track_name=example")
+	if cached.Code != http.StatusOK || calls.Load() != 1 {
+		t.Fatalf("expected cached rich search result, status=%d calls=%d", cached.Code, calls.Load())
+	}
+	var cachedResults []lyricsResponse
+	if err := json.NewDecoder(cached.Body).Decode(&cachedResults); err != nil {
+		t.Fatalf("decode cached rich search: %v", err)
+	}
+	if len(cachedResults) != 1 || cachedResults[0].RichSync != nil {
+		t.Fatal("rich payload should remain opt-in on the cached search URL")
+	}
+
+	cachedRich := performRequest(t, server.Handler, "/api/lyrics/search?track_name=example&include_rich_sync=1&sync_type=word")
+	if cachedRich.Code != http.StatusOK || calls.Load() != 1 {
+		t.Fatalf("expected persisted rich search result, status=%d calls=%d", cachedRich.Code, calls.Load())
+	}
+	var cachedRichResults []lyricsResponse
+	if err := json.NewDecoder(cachedRich.Body).Decode(&cachedRichResults); err != nil {
+		t.Fatalf("decode persisted rich search: %v", err)
+	}
+	if len(cachedRichResults) != 1 || cachedRichResults[0].RichSync == nil {
+		t.Fatal("expected persisted rich payload on opt-in search")
+	}
+}
+
+func TestSearchLyricsRichSyncEnrichesUpstreamResults(t *testing.T) {
+	var richCalls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/search":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[{"id":77,"trackName":"Remote Song","artistName":"Remote Artist","albumName":"Remote Album","duration":200,"instrumental":false,"plainLyrics":"remote lyrics","syncedLyrics":""}]`))
+		case "/lyrics":
+			richCalls.Add(1)
+			if r.URL.Query().Get("song") != "Remote Song" || r.URL.Query().Get("artist") != "Remote Artist" {
+				t.Fatalf("unexpected rich upstream query: %v", r.URL.Query())
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"success":true,"data":{"lyrics":"<tt>remote rich</tt>","format":"ttml","syncType":"word"}}`))
+		default:
+			t.Fatalf("unexpected upstream path: %s", r.URL.Path)
+		}
+	}))
+	defer upstream.Close()
+
+	metadataDB, lyricsDB := testHTTPDatabases(t)
+	cfg := fallbackConfig(upstream.URL + "/api")
+	cfg.RichLyricsEnabled = true
+	cfg.RichLyricsBaseURL = upstream.URL
+	cfg.RichLyricsUserAgent = "music-utils-test"
+	cfg.RichLyricsTimeoutMS = 1000
+	server := NewWithConfig(cfg, metadataDB, lyricsDB)
+	cleanupHTTPServer(t, server)
+
+	response := performRequest(t, server.Handler, "/api/lyrics/search?q=remote&include_rich_sync=true")
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected rich upstream search 200, got %d: %s", response.Code, response.Body.String())
+	}
+	var results []lyricsResponse
+	if err := json.NewDecoder(response.Body).Decode(&results); err != nil {
+		t.Fatalf("decode rich upstream search: %v", err)
+	}
+	if len(results) != 1 || results[0].ID != 77 || results[0].RichSync == nil || results[0].RichSync.Content != "<tt>remote rich</tt>" {
+		t.Fatalf("unexpected rich upstream result: %+v", results)
+	}
+	if richCalls.Load() != 1 {
+		t.Fatalf("expected one rich lookup, got %d", richCalls.Load())
+	}
+	if _, _, err := db.FindTrackExact(context.Background(), metadataDB, lyricsDB, "Remote Song", "Remote Artist", "Remote Album", 200); err == nil {
+		t.Fatal("upstream search rich enrichment unexpectedly persisted a local track")
+	}
+}
+
 func TestGetLyricsRichSyncPassesOnlyUserSuppliedParameters(t *testing.T) {
 	var requestedQueries []string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -199,5 +341,3 @@ func TestGetLyricsRichSyncPassesOnlyUserSuppliedParameters(t *testing.T) {
 		t.Fatalf("expected query with user-provided overrides and duration, got: %s", query)
 	}
 }
-
-

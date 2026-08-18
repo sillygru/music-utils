@@ -437,6 +437,12 @@ not returned.
 Query parameters: `q`, or one or more of `track_name`, `artist_name`,
 `album_name`; optional `limit` from `1–50`, default `20`. `q` is passed to
 LRCLIB's `/api/search`; the server applies the final limit after merging.
+The optional `include_rich_sync=true` (also accepts `1` or `yes`) enriches
+results with the same opt-in `richSync` object as `/api/lyrics/get`, and
+`sync_type=word|syllable|richsync` selects a cached synchronization variant.
+When rich sync is requested and available, that result contains `richSync`
+alone instead of `plainLyrics`/`syncedLyrics`; without the flag, search never
+calls the rich provider and returns the ordinary fields only.
 
 ```sh
 curl 'https://music.gru0.dev/api/lyrics/search?q=no%20surprises&limit=20'

@@ -199,7 +199,7 @@ func NewWithLogger(cfg config.Config, metadataDB, lyricsDB, coverDB *sql.DB, log
 		}
 	}
 	mux.HandleFunc("GET /api/lyrics/get", getLyricsHandler(metadataDB, lyricsDB, client, richClient, lyricsMisses, fallbacks, cfg.LRCLIBFallbackEnabled, cfg.RichLyricsEnabled, prefetcher))
-	mux.HandleFunc("GET /api/lyrics/search", searchLyricsHandlerWithUpstream(metadataDB, lyricsDB, client, fallbacks, cfg.LRCLIBFallbackEnabled))
+	mux.HandleFunc("GET /api/lyrics/search", searchLyricsHandlerWithUpstream(metadataDB, lyricsDB, client, richClient, fallbacks, cfg.LRCLIBFallbackEnabled, cfg.RichLyricsEnabled))
 	mux.HandleFunc("GET /api/metadata/get", getMetadataHandler(metadataDB, metadataResolver, fallbacks, cfg.MetadataFallbackEnabled, prefetcher))
 	mux.HandleFunc("GET /api/metadata/search", searchMetadataHandlerWithUpstream(metadataDB, metadataResolver, fallbacks, cfg.MetadataFallbackEnabled))
 	mux.HandleFunc("GET /api/cover/get", getCoverTopHandler(metadataDB, coverDB, coverResolver, fallbacks, cfg.CoverFallbackEnabled, prefetcher))

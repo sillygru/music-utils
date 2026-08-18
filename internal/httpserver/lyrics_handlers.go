@@ -278,7 +278,7 @@ func getLyricsHandler(metadataDB, lyricsDB *sql.DB, client *lrclib.Client, richC
 	}
 }
 
-func searchLyricsHandlerWithUpstream(metadataDB, lyricsDB *sql.DB, client *lrclib.Client, fallbacks *fallbackGuard, fallbackEnabled bool) http.HandlerFunc {
+func searchLyricsHandlerWithUpstream(metadataDB, lyricsDB *sql.DB, client *lrclib.Client, richClient *richlyrics.Client, fallbacks *fallbackGuard, fallbackEnabled, richEnabled bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
 		searchQuery := names.CleanSearch(query.Get("q"))
@@ -314,7 +314,12 @@ func searchLyricsHandlerWithUpstream(metadataDB, lyricsDB *sql.DB, client *lrcli
 			seen[key] = struct{}{}
 			track := &db.Track{ID: result.ID, Name: result.TrackName, ArtistName: result.ArtistName, AlbumName: result.AlbumName, Duration: result.Duration}
 			lyrics := &db.Lyrics{PlainLyrics: result.PlainLyrics, SyncedLyrics: result.SyncedLyrics, Instrumental: result.Instrumental}
-			results = append(results, toLyricsResponse(track, lyrics))
+			response := toLyricsResponse(track, lyrics)
+			// LRCLIB search IDs are upstream IDs, not local metadata IDs, so
+			// rich results are returned directly and are not persisted under a
+			// potentially unrelated local track row.
+			enrichLyricsSearchResponse(r, lyricsDB, richClient, fallbacks, richEnabled, &response, 0, false)
+			results = append(results, response)
 		}
 		// Put LRCLIB results first so a warm local catalog cannot hide the
 		// upstream search merely because it fills the final limit.
@@ -323,10 +328,10 @@ func searchLyricsHandlerWithUpstream(metadataDB, lyricsDB *sql.DB, client *lrcli
 			if !ok {
 				return
 			}
-			defer release()
 			upstreamStart := time.Now()
 			remote, remoteErr := client.Search(r.Context(), searchQuery)
 			setUpstreamDuration(r, time.Since(upstreamStart))
+			release()
 			if remoteErr == nil {
 				for _, result := range remote {
 					if synthesizedLyricsResult(result) {
@@ -343,7 +348,9 @@ func searchLyricsHandlerWithUpstream(metadataDB, lyricsDB *sql.DB, client *lrcli
 			}
 			seen[key] = struct{}{}
 			if len(results) < limit {
-				results = append(results, toLyricsResponse(&tracks[i].Track, &tracks[i].Lyrics))
+				response := toLyricsResponse(&tracks[i].Track, &tracks[i].Lyrics)
+				enrichLyricsSearchResponse(r, lyricsDB, richClient, fallbacks, richEnabled, &response, tracks[i].Track.ID, true)
+				results = append(results, response)
 			}
 		}
 		if len(results) == 0 {
@@ -355,6 +362,55 @@ func searchLyricsHandlerWithUpstream(metadataDB, lyricsDB *sql.DB, client *lrcli
 		}
 		writeJSON(w, http.StatusOK, results)
 	}
+}
+
+func enrichLyricsSearchResponse(r *http.Request, lyricsDB *sql.DB, client *richlyrics.Client, fallbacks *fallbackGuard, enabled bool, response *lyricsResponse, trackID int64, cache bool) {
+	if !enabled || client == nil || !includeRichSync(r) || response == nil {
+		return
+	}
+	syncType := requestedRichSyncType(r)
+	if cache && trackID > 0 {
+		if cached, err := db.FindRichLyrics(r.Context(), lyricsDB, trackID, syncType); err == nil {
+			setRichOnlyResponse(response, cached)
+			return
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			setRequestIssue(r, slog.LevelWarn, err.Error())
+			return
+		}
+	}
+	if fallbacks == nil {
+		return
+	}
+	release, _, _, ok := fallbacks.acquire(r)
+	if !ok {
+		return
+	}
+	defer release()
+	started := time.Now()
+	remote, err := client.Get(r.Context(), response.TrackName, response.ArtistName, response.AlbumName, response.Duration)
+	setUpstreamDuration(r, time.Since(started))
+	if err != nil {
+		if !errors.Is(err, richlyrics.ErrNotFound) {
+			setRequestIssue(r, slog.LevelWarn, err.Error())
+		}
+		return
+	}
+	if !validRichSyncType(remote.SyncType) {
+		setRequestIssue(r, slog.LevelWarn, "rich lyrics returned unsupported sync type")
+		return
+	}
+	content, format, converted := compactRichSyncForStorage(remote.Content, remote.Format)
+	if !converted {
+		content, format = remote.Content, remote.Format
+	}
+	rich := db.RichLyrics{TrackID: trackID, Content: content, Format: format, SyncType: remote.SyncType, Source: remote.Source}
+	if cache && trackID > 0 {
+		if err := db.UpsertRichLyrics(r.Context(), lyricsDB, rich); err != nil {
+			setRequestIssue(r, slog.LevelWarn, err.Error())
+			return
+		}
+	}
+	setRichOnlyResponse(response, &rich)
 }
 
 func searchLyricsHandler(metadataDB, lyricsDB *sql.DB) http.HandlerFunc {

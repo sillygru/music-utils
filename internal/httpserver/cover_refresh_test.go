@@ -13,6 +13,13 @@ import (
 	"github.com/sillygru/music-utils/internal/db"
 )
 
+// coverRefreshSweepNow is the fixed in-window sweep instant shared by the
+// cover-refresh tests. Row aging is derived from it so the assertions hold
+// regardless of the wall clock.
+func coverRefreshSweepNow() time.Time {
+	return time.Date(2026, 8, 8, 3, 30, 0, 0, time.UTC)
+}
+
 func refreshJobConfig() config.Config {
 	return config.Config{
 		CoverRefreshEnabled:    true,
@@ -81,7 +88,9 @@ func TestCoverRefreshSweepRefreshesStaleRows(t *testing.T) {
 			t.Fatalf("seed %s: %v", row.artist, err)
 		}
 	}
-	if _, err := coverDB.ExecContext(ctx, `UPDATE cover_urls SET checked_at = datetime('now', '-40 days')`); err != nil {
+	sweepNow := coverRefreshSweepNow()
+	agedAt := sweepNow.Add(-40 * 24 * time.Hour).UTC().Format(lastFMTimeFormat)
+	if _, err := coverDB.ExecContext(ctx, `UPDATE cover_urls SET checked_at = ?`, agedAt); err != nil {
 		t.Fatalf("age cover rows: %v", err)
 	}
 
@@ -106,7 +115,7 @@ func TestCoverRefreshSweepRefreshesStaleRows(t *testing.T) {
 	job := newCoverRefreshJob(refreshJobConfig(), coverDB, cover.NewResolver(stub), slog.Default())
 	// Sweep at a fixed in-window hour so the test is deterministic regardless
 	// of the wall clock (the configured window is 00:00–23:00 local).
-	job.sweep(ctx, time.Date(2026, 8, 8, 3, 30, 0, 0, time.UTC))
+	job.sweep(ctx, sweepNow)
 	job.Stop()
 
 	var deadURL string
@@ -163,7 +172,9 @@ func TestCoverRefreshPromotesLiveVariant(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed variants: %v", err)
 	}
-	if _, err := coverDB.ExecContext(ctx, `UPDATE cover_urls SET checked_at = datetime('now', '-40 days')`); err != nil {
+	sweepNow := coverRefreshSweepNow()
+	agedAt := sweepNow.Add(-40 * 24 * time.Hour).UTC().Format(lastFMTimeFormat)
+	if _, err := coverDB.ExecContext(ctx, `UPDATE cover_urls SET checked_at = ?`, agedAt); err != nil {
 		t.Fatalf("age cover rows: %v", err)
 	}
 	var before string
@@ -174,7 +185,7 @@ func TestCoverRefreshPromotesLiveVariant(t *testing.T) {
 	job := newCoverRefreshJob(refreshJobConfig(), coverDB, cover.NewResolver(stub), slog.Default())
 	// Sweep at a fixed in-window hour so the test is deterministic regardless
 	// of the wall clock (the configured window is 00:00–23:00 local).
-	job.sweep(ctx, time.Date(2026, 8, 8, 3, 30, 0, 0, time.UTC))
+	job.sweep(ctx, sweepNow)
 	job.Stop()
 
 	var winner, checked string
