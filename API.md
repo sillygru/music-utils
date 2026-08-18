@@ -444,7 +444,9 @@ When rich sync is requested and available, that result contains `richSync`
 alone instead of `plainLyrics`/`syncedLyrics`; without the flag, search never
 calls the rich provider and returns the ordinary fields only. Matching local
 tracks are preferred over duplicate upstream release variants, and results
-with `syncedLyrics` or `richSync` are placed before lyric-less results.
+with `syncedLyrics` or `richSync` are placed before lyric-less results. For an
+exact local title/artist match with rich sync enabled, the endpoint skips the
+upstream search entirely and serves the cached result immediately.
 
 ```sh
 curl 'https://music.gru0.dev/api/lyrics/search?q=no%20surprises&limit=20'

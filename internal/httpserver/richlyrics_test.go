@@ -285,6 +285,50 @@ func TestSearchLyricsRichSyncAvoidsDuplicateProviderLookups(t *testing.T) {
 	}
 }
 
+func TestSearchLyricsRichSyncSkipsLRCLIBForExactLocalMatch(t *testing.T) {
+	var lrclibCalls, richCalls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/search":
+			lrclibCalls.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[]`))
+		case "/lyrics":
+			richCalls.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"success":true,"data":{"lyrics":"<tt>rich</tt>","format":"ttml","syncType":"word"}}`))
+		default:
+			t.Fatalf("unexpected upstream path: %s", r.URL.Path)
+		}
+	}))
+	defer upstream.Close()
+
+	metadataDB, lyricsDB := testHTTPDatabases(t)
+	seedHTTPTrack(t, metadataDB, lyricsDB)
+	cfg := fallbackConfig(upstream.URL + "/api")
+	cfg.RichLyricsEnabled = true
+	cfg.RichLyricsBaseURL = upstream.URL
+	cfg.RichLyricsUserAgent = "music-utils-test"
+	cfg.RichLyricsTimeoutMS = 1000
+	server := NewWithConfig(cfg, metadataDB, lyricsDB)
+	cleanupHTTPServer(t, server)
+
+	first := performRequest(t, server.Handler, "/api/lyrics/search?q=Example+Song&include_rich_sync=true")
+	if first.Code != http.StatusOK {
+		t.Fatalf("expected first search 200, got %d: %s", first.Code, first.Body.String())
+	}
+	if lrclibCalls.Load() != 0 || richCalls.Load() != 1 {
+		t.Fatalf("expected local exact search to skip LRCLIB and fetch rich once, lrclib=%d rich=%d", lrclibCalls.Load(), richCalls.Load())
+	}
+
+	// Use a distinct URL to bypass the five-second response replay cache. The
+	// persisted rich variant should make this request entirely local.
+	second := performRequest(t, server.Handler, "/api/lyrics/search?track_name=Example+Song&include_rich_sync=1")
+	if second.Code != http.StatusOK || lrclibCalls.Load() != 0 || richCalls.Load() != 1 {
+		t.Fatalf("expected persisted local rich search, status=%d lrclib=%d rich=%d", second.Code, lrclibCalls.Load(), richCalls.Load())
+	}
+}
+
 func TestSearchLyricsRichSyncEnrichesUpstreamResults(t *testing.T) {
 	var richCalls atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

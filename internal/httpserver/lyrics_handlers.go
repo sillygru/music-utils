@@ -346,10 +346,12 @@ func searchLyricsHandlerWithUpstream(metadataDB, lyricsDB *sql.DB, client *lrcli
 			// potentially unrelated local track row.
 			results = append(results, toLyricsResponse(track, lyrics))
 		}
-		// Search upstream after local rows are available so matching local
-		// tracks remain canonical while still allowing new results to fill the
-		// final limit.
-		if fallbackEnabled && client != nil {
+		// An exact local match with rich sync requested is already a complete
+		// answer. Do not pay the LRCLIB search latency just to rediscover the
+		// same song's release variants; broad searches and local misses still
+		// use the normal upstream merge below.
+		localExactMatch := includeRichSync(r) && localExactSearchMatch(tracks, searchQuery)
+		if fallbackEnabled && client != nil && !localExactMatch {
 			release, ok := fallbacks.enter(r, w)
 			if !ok {
 				return
@@ -395,6 +397,27 @@ func searchLyricsHandlerWithUpstream(metadataDB, lyricsDB *sql.DB, client *lrcli
 
 func searchLyricsIdentity(trackName, artistName string) string {
 	return strings.ToLower(strings.TrimSpace(trackName)) + "\x00" + strings.ToLower(strings.TrimSpace(artistName))
+}
+
+func localExactSearchMatch(tracks []db.TrackSearchResult, searchQuery string) bool {
+	searchQuery = names.CleanSearch(searchQuery)
+	if searchQuery == "" {
+		return false
+	}
+	for i := range tracks {
+		track := tracks[i].Track
+		for _, candidate := range []string{
+			track.Name,
+			strings.Join(nonEmpty(track.Name, track.ArtistName), " "),
+			strings.Join(nonEmpty(track.ArtistName, track.Name), " "),
+			strings.Join(nonEmpty(track.Name, track.AlbumName), " "),
+		} {
+			if names.CleanSearch(candidate) == searchQuery {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func mergeSearchLyrics(response *lyricsResponse, result lrclib.RemoteResult) {
