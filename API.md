@@ -442,7 +442,9 @@ results with the same opt-in `richSync` object as `/api/lyrics/get`, and
 `sync_type=word|syllable|richsync` selects a cached synchronization variant.
 When rich sync is requested and available, that result contains `richSync`
 alone instead of `plainLyrics`/`syncedLyrics`; without the flag, search never
-calls the rich provider and returns the ordinary fields only.
+calls the rich provider and returns the ordinary fields only. Matching local
+tracks are preferred over duplicate upstream release variants, and results
+with `syncedLyrics` or `richSync` are placed before lyric-less results.
 
 ```sh
 curl 'https://music.gru0.dev/api/lyrics/search?q=no%20surprises&limit=20'

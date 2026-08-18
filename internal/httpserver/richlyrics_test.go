@@ -238,6 +238,53 @@ func TestSearchLyricsRichSyncIsOptInAndCached(t *testing.T) {
 	}
 }
 
+func TestSearchLyricsRichSyncAvoidsDuplicateProviderLookups(t *testing.T) {
+	var searchCalls, richCalls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/search":
+			searchCalls.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			// This is the same song as the local row on a different release;
+			// it must be merged into the local result rather than enriched as a
+			// second rich lookup.
+			_, _ = w.Write([]byte(`[{"id":77,"trackName":"Example Song","artistName":"Example Artist","albumName":"Different Release","duration":203.5,"instrumental":false,"plainLyrics":"remote lyrics","syncedLyrics":"[00:01.00]remote lyrics"}]`))
+		case "/lyrics":
+			richCalls.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"success":true,"data":{"lyrics":"<tt>rich</tt>","format":"ttml","syncType":"word"}}`))
+		default:
+			t.Fatalf("unexpected upstream path: %s", r.URL.Path)
+		}
+	}))
+	defer upstream.Close()
+
+	metadataDB, lyricsDB := testHTTPDatabases(t)
+	seedHTTPTrack(t, metadataDB, lyricsDB)
+	cfg := fallbackConfig(upstream.URL + "/api")
+	cfg.RichLyricsEnabled = true
+	cfg.RichLyricsBaseURL = upstream.URL
+	cfg.RichLyricsUserAgent = "music-utils-test"
+	cfg.RichLyricsTimeoutMS = 1000
+	server := NewWithConfig(cfg, metadataDB, lyricsDB)
+	cleanupHTTPServer(t, server)
+
+	response := performRequest(t, server.Handler, "/api/lyrics/search?q=example&include_rich_sync=true")
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected search 200, got %d: %s", response.Code, response.Body.String())
+	}
+	var results []lyricsResponse
+	if err := json.NewDecoder(response.Body).Decode(&results); err != nil {
+		t.Fatalf("decode search: %v", err)
+	}
+	if len(results) != 1 || results[0].RichSync == nil || results[0].SyncedLyrics != "" {
+		t.Fatalf("expected one rich local result, got %+v", results)
+	}
+	if searchCalls.Load() != 1 || richCalls.Load() != 1 {
+		t.Fatalf("expected one search and one rich lookup, search=%d rich=%d", searchCalls.Load(), richCalls.Load())
+	}
+}
+
 func TestSearchLyricsRichSyncEnrichesUpstreamResults(t *testing.T) {
 	var richCalls atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -283,6 +330,43 @@ func TestSearchLyricsRichSyncEnrichesUpstreamResults(t *testing.T) {
 	}
 	if _, _, err := db.FindTrackExact(context.Background(), metadataDB, lyricsDB, "Remote Song", "Remote Artist", "Remote Album", 200); err == nil {
 		t.Fatal("upstream search rich enrichment unexpectedly persisted a local track")
+	}
+}
+
+func TestSearchLyricsRanksSynchronizedResultsFirst(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/search" {
+			t.Fatalf("unexpected upstream path: %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"id":77,"trackName":"Synced Song","artistName":"Remote Artist","albumName":"Album","duration":200,"instrumental":false,"plainLyrics":"remote lyrics","syncedLyrics":"[00:01.00]remote lyrics"}]`))
+	}))
+	defer upstream.Close()
+
+	metadataDB, lyricsDB := testHTTPDatabases(t)
+	if _, _, err := db.InsertTrackWithLyrics(context.Background(), metadataDB, lyricsDB, db.Track{
+		Name:       "Plain Song",
+		ArtistName: "Local Artist",
+		AlbumName:  "Album",
+		Duration:   200,
+	}, db.Lyrics{PlainLyrics: "local lyrics"}); err != nil {
+		t.Fatalf("seed plain track: %v", err)
+	}
+	cfg := fallbackConfig(upstream.URL + "/api")
+	cfg.RichLyricsEnabled = false
+	server := NewWithConfig(cfg, metadataDB, lyricsDB)
+	cleanupHTTPServer(t, server)
+
+	response := performRequest(t, server.Handler, "/api/lyrics/search?q=song")
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected search 200, got %d: %s", response.Code, response.Body.String())
+	}
+	var results []lyricsResponse
+	if err := json.NewDecoder(response.Body).Decode(&results); err != nil {
+		t.Fatalf("decode search: %v", err)
+	}
+	if len(results) != 2 || results[0].TrackName != "Synced Song" || results[0].SyncedLyrics == "" {
+		t.Fatalf("expected synchronized result first, got %+v", results)
 	}
 }
 

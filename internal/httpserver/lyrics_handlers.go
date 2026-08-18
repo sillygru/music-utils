@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -306,7 +307,33 @@ func searchLyricsHandlerWithUpstream(metadataDB, lyricsDB *sql.DB, client *lrcli
 		}
 		results := make([]lyricsResponse, 0, limit)
 		seen := make(map[string]struct{}, limit)
+		localIndexes := make(map[string]int, len(tracks))
+		localTrackIDs := make(map[int64]struct{}, len(tracks))
+
+		// Local rows are canonical: they can reuse cached rich variants and
+		// should not be replaced by a duplicate LRCLIB release result. This is
+		// especially important for rich search, where every uncached result
+		// would otherwise require a separate paced provider request.
+		for i := range tracks {
+			key := strings.ToLower(strings.TrimSpace(tracks[i].Track.Name)) + "\x00" + strings.ToLower(strings.TrimSpace(tracks[i].Track.ArtistName)) + "\x00" + strings.ToLower(strings.TrimSpace(tracks[i].Track.AlbumName)) + "\x00" + strconv.FormatFloat(tracks[i].Track.Duration, 'f', 0, 64)
+			if _, exists := seen[key]; exists || len(results) >= limit {
+				continue
+			}
+			seen[key] = struct{}{}
+			response := toLyricsResponse(&tracks[i].Track, &tracks[i].Lyrics)
+			localIndexes[searchLyricsIdentity(response.TrackName, response.ArtistName)] = len(results)
+			localTrackIDs[response.ID] = struct{}{}
+			results = append(results, response)
+		}
+
 		appendResult := func(result lrclib.RemoteResult) {
+			identity := searchLyricsIdentity(result.TrackName, result.ArtistName)
+			if index, ok := localIndexes[identity]; ok {
+				// Keep the local metadata/ID, but fill any missing LRC fields
+				// from the matching upstream result before rich enrichment.
+				mergeSearchLyrics(&results[index], result)
+				return
+			}
 			key := strings.ToLower(strings.TrimSpace(result.TrackName)) + "\x00" + strings.ToLower(strings.TrimSpace(result.ArtistName)) + "\x00" + strings.ToLower(strings.TrimSpace(result.AlbumName)) + "\x00" + strconv.FormatFloat(result.Duration, 'f', 0, 64)
 			if _, ok := seen[key]; ok || len(results) >= limit {
 				return
@@ -314,15 +341,14 @@ func searchLyricsHandlerWithUpstream(metadataDB, lyricsDB *sql.DB, client *lrcli
 			seen[key] = struct{}{}
 			track := &db.Track{ID: result.ID, Name: result.TrackName, ArtistName: result.ArtistName, AlbumName: result.AlbumName, Duration: result.Duration}
 			lyrics := &db.Lyrics{PlainLyrics: result.PlainLyrics, SyncedLyrics: result.SyncedLyrics, Instrumental: result.Instrumental}
-			response := toLyricsResponse(track, lyrics)
 			// LRCLIB search IDs are upstream IDs, not local metadata IDs, so
 			// rich results are returned directly and are not persisted under a
 			// potentially unrelated local track row.
-			enrichLyricsSearchResponse(r, lyricsDB, richClient, fallbacks, richEnabled, &response, 0, false)
-			results = append(results, response)
+			results = append(results, toLyricsResponse(track, lyrics))
 		}
-		// Put LRCLIB results first so a warm local catalog cannot hide the
-		// upstream search merely because it fills the final limit.
+		// Search upstream after local rows are available so matching local
+		// tracks remain canonical while still allowing new results to fill the
+		// final limit.
 		if fallbackEnabled && client != nil {
 			release, ok := fallbacks.enter(r, w)
 			if !ok {
@@ -341,18 +367,21 @@ func searchLyricsHandlerWithUpstream(metadataDB, lyricsDB *sql.DB, client *lrcli
 				}
 			}
 		}
-		for i := range tracks {
-			key := strings.ToLower(strings.TrimSpace(tracks[i].Track.Name)) + "\x00" + strings.ToLower(strings.TrimSpace(tracks[i].Track.ArtistName)) + "\x00" + strings.ToLower(strings.TrimSpace(tracks[i].Track.AlbumName)) + "\x00" + strconv.FormatFloat(tracks[i].Track.Duration, 'f', 0, 64)
-			if _, exists := seen[key]; exists {
-				continue
+
+		// Rich enrichment happens after merging. Local tracks first consult the
+		// persistent rich cache; only uncached remote-only rows call the provider.
+		for i := range results {
+			trackID := int64(0)
+			cache := false
+			if _, ok := localTrackIDs[results[i].ID]; ok {
+				trackID = results[i].ID
+				cache = true
 			}
-			seen[key] = struct{}{}
-			if len(results) < limit {
-				response := toLyricsResponse(&tracks[i].Track, &tracks[i].Lyrics)
-				enrichLyricsSearchResponse(r, lyricsDB, richClient, fallbacks, richEnabled, &response, tracks[i].Track.ID, true)
-				results = append(results, response)
-			}
+			enrichLyricsSearchResponse(r, lyricsDB, richClient, fallbacks, richEnabled, &results[i], trackID, cache)
 		}
+		sort.SliceStable(results, func(i, j int) bool {
+			return searchResponseHasSync(results[i]) && !searchResponseHasSync(results[j])
+		})
 		if len(results) == 0 {
 			setOutcome(r, "miss")
 		} else if len(tracks) > 0 {
@@ -362,6 +391,29 @@ func searchLyricsHandlerWithUpstream(metadataDB, lyricsDB *sql.DB, client *lrcli
 		}
 		writeJSON(w, http.StatusOK, results)
 	}
+}
+
+func searchLyricsIdentity(trackName, artistName string) string {
+	return strings.ToLower(strings.TrimSpace(trackName)) + "\x00" + strings.ToLower(strings.TrimSpace(artistName))
+}
+
+func mergeSearchLyrics(response *lyricsResponse, result lrclib.RemoteResult) {
+	if response == nil {
+		return
+	}
+	if response.PlainLyrics == "" {
+		response.PlainLyrics = result.PlainLyrics
+	}
+	if response.SyncedLyrics == "" {
+		response.SyncedLyrics = result.SyncedLyrics
+	}
+	if result.Instrumental {
+		response.Instrumental = true
+	}
+}
+
+func searchResponseHasSync(response lyricsResponse) bool {
+	return response.RichSync != nil || response.SyncedLyrics != ""
 }
 
 func enrichLyricsSearchResponse(r *http.Request, lyricsDB *sql.DB, client *richlyrics.Client, fallbacks *fallbackGuard, enabled bool, response *lyricsResponse, trackID int64, cache bool) {
