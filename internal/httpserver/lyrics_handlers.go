@@ -3,6 +3,7 @@ package httpserver
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -19,8 +20,9 @@ import (
 )
 
 const (
-	defaultSearchLimit = 20
-	maxSearchLimit     = 50
+	defaultSearchLimit   = 20
+	maxSearchLimit       = 50
+	lyricsSearchCacheTTL = 24 * time.Hour
 )
 
 type fallbackBlockedError struct {
@@ -297,6 +299,17 @@ func searchLyricsHandlerWithUpstream(metadataDB, lyricsDB *sql.DB, client *lrcli
 			writeJSON(w, http.StatusBadRequest, apiError{Code: http.StatusBadRequest, Message: "limit must be an integer between 1 and 50"})
 			return
 		}
+		cacheKey := query.Encode()
+		if cached, cacheErr := db.FindLyricsSearchCache(r.Context(), lyricsDB, cacheKey, lyricsSearchCacheTTL); cacheErr == nil {
+			var cachedResults []lyricsResponse
+			if err := json.Unmarshal(cached, &cachedResults); err == nil {
+				setOutcome(r, "local_hit")
+				writeJSON(w, http.StatusOK, cachedResults)
+				return
+			}
+		} else if !errors.Is(cacheErr, sql.ErrNoRows) {
+			setRequestIssue(r, slog.LevelWarn, cacheErr.Error())
+		}
 		cacheStart := time.Now()
 		tracks, err := db.SearchTracks(r.Context(), metadataDB, lyricsDB, searchQuery, limit)
 		setCacheDuration(r, time.Since(cacheStart))
@@ -339,19 +352,24 @@ func searchLyricsHandlerWithUpstream(metadataDB, lyricsDB *sql.DB, client *lrcli
 				return
 			}
 			seen[key] = struct{}{}
-			track := &db.Track{ID: result.ID, Name: result.TrackName, ArtistName: result.ArtistName, AlbumName: result.AlbumName, Duration: result.Duration}
-			lyrics := &db.Lyrics{PlainLyrics: result.PlainLyrics, SyncedLyrics: result.SyncedLyrics, Instrumental: result.Instrumental}
-			// LRCLIB search IDs are upstream IDs, not local metadata IDs, so
-			// rich results are returned directly and are not persisted under a
-			// potentially unrelated local track row.
-			results = append(results, toLyricsResponse(track, lyrics))
+			track := db.Track{ID: result.ID, Name: result.TrackName, ArtistName: result.ArtistName, AlbumName: result.AlbumName, Duration: result.Duration, Source: "lrclib_fallback"}
+			lyrics := db.Lyrics{PlainLyrics: result.PlainLyrics, SyncedLyrics: result.SyncedLyrics, Instrumental: result.Instrumental, Source: "lrclib_fallback"}
+			trackID, _, persistErr := db.InsertTrackWithLyrics(r.Context(), metadataDB, lyricsDB, track, lyrics)
+			if persistErr != nil {
+				setRequestIssue(r, slog.LevelWarn, persistErr.Error())
+			}
+			if trackID > 0 {
+				track.ID = trackID
+				localTrackIDs[trackID] = struct{}{}
+				localIndexes[identity] = len(results)
+			}
+			results = append(results, toLyricsResponse(&track, &lyrics))
 		}
-		// An exact local match with rich sync requested is already a complete
-		// answer. Do not pay the LRCLIB search latency just to rediscover the
-		// same song's release variants; broad searches and local misses still
-		// use the normal upstream merge below.
-		localExactMatch := includeRichSync(r) && localExactSearchMatch(tracks, searchQuery)
-		if fallbackEnabled && client != nil && !localExactMatch {
+		// Rich-enabled searches are intended to serve the local rich cache when
+		// a catalog result exists. Do not pay LRCLIB search latency just to
+		// rediscover release variants that cannot improve the local response.
+		localRichCacheHit := includeRichSync(r) && len(tracks) > 0
+		if fallbackEnabled && client != nil && !localRichCacheHit {
 			release, ok := fallbacks.enter(r, w)
 			if !ok {
 				return
@@ -391,33 +409,19 @@ func searchLyricsHandlerWithUpstream(metadataDB, lyricsDB *sql.DB, client *lrcli
 		} else {
 			setOutcome(r, "lrclib_fallback_hit")
 		}
+		if encoded, encodeErr := json.Marshal(results); encodeErr == nil {
+			if cacheErr := db.UpsertLyricsSearchCache(r.Context(), lyricsDB, cacheKey, encoded); cacheErr != nil {
+				setRequestIssue(r, slog.LevelWarn, cacheErr.Error())
+			}
+		} else {
+			setRequestIssue(r, slog.LevelWarn, encodeErr.Error())
+		}
 		writeJSON(w, http.StatusOK, results)
 	}
 }
 
 func searchLyricsIdentity(trackName, artistName string) string {
 	return strings.ToLower(strings.TrimSpace(trackName)) + "\x00" + strings.ToLower(strings.TrimSpace(artistName))
-}
-
-func localExactSearchMatch(tracks []db.TrackSearchResult, searchQuery string) bool {
-	searchQuery = names.CleanSearch(searchQuery)
-	if searchQuery == "" {
-		return false
-	}
-	for i := range tracks {
-		track := tracks[i].Track
-		for _, candidate := range []string{
-			track.Name,
-			strings.Join(nonEmpty(track.Name, track.ArtistName), " "),
-			strings.Join(nonEmpty(track.ArtistName, track.Name), " "),
-			strings.Join(nonEmpty(track.Name, track.AlbumName), " "),
-		} {
-			if names.CleanSearch(candidate) == searchQuery {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 func mergeSearchLyrics(response *lyricsResponse, result lrclib.RemoteResult) {

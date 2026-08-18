@@ -280,8 +280,8 @@ func TestSearchLyricsRichSyncAvoidsDuplicateProviderLookups(t *testing.T) {
 	if len(results) != 1 || results[0].RichSync == nil || results[0].SyncedLyrics != "" {
 		t.Fatalf("expected one rich local result, got %+v", results)
 	}
-	if searchCalls.Load() != 1 || richCalls.Load() != 1 {
-		t.Fatalf("expected one search and one rich lookup, search=%d rich=%d", searchCalls.Load(), richCalls.Load())
+	if searchCalls.Load() != 0 || richCalls.Load() != 1 {
+		t.Fatalf("expected local rich search to skip upstream and fetch rich once, search=%d rich=%d", searchCalls.Load(), richCalls.Load())
 	}
 }
 
@@ -330,10 +330,11 @@ func TestSearchLyricsRichSyncSkipsLRCLIBForExactLocalMatch(t *testing.T) {
 }
 
 func TestSearchLyricsRichSyncEnrichesUpstreamResults(t *testing.T) {
-	var richCalls atomic.Int32
+	var searchCalls, richCalls atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/search":
+			searchCalls.Add(1)
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`[{"id":77,"trackName":"Remote Song","artistName":"Remote Artist","albumName":"Remote Album","duration":200,"instrumental":false,"plainLyrics":"remote lyrics","syncedLyrics":""}]`))
 		case "/lyrics":
@@ -366,14 +367,28 @@ func TestSearchLyricsRichSyncEnrichesUpstreamResults(t *testing.T) {
 	if err := json.NewDecoder(response.Body).Decode(&results); err != nil {
 		t.Fatalf("decode rich upstream search: %v", err)
 	}
-	if len(results) != 1 || results[0].ID != 77 || results[0].RichSync == nil || results[0].RichSync.Content != "<tt>remote rich</tt>" {
+	if len(results) != 1 || results[0].ID <= 0 || results[0].RichSync == nil || results[0].RichSync.Content != "<tt>remote rich</tt>" {
 		t.Fatalf("unexpected rich upstream result: %+v", results)
 	}
-	if richCalls.Load() != 1 {
-		t.Fatalf("expected one rich lookup, got %d", richCalls.Load())
+	if searchCalls.Load() != 1 || richCalls.Load() != 1 {
+		t.Fatalf("expected one search and one rich lookup, search=%d rich=%d", searchCalls.Load(), richCalls.Load())
 	}
-	if _, _, err := db.FindTrackExact(context.Background(), metadataDB, lyricsDB, "Remote Song", "Remote Artist", "Remote Album", 200); err == nil {
-		t.Fatal("upstream search rich enrichment unexpectedly persisted a local track")
+	if _, _, err := db.FindTrackExact(context.Background(), metadataDB, lyricsDB, "Remote Song", "Remote Artist", "Remote Album", 200); err != nil {
+		t.Fatalf("expected upstream search to persist a local track: %v", err)
+	}
+
+	// Reordered query parameters bypass the five-second response replay cache
+	// while resolving to the same persistent search-cache key.
+	cached := performRequest(t, server.Handler, "/api/lyrics/search?include_rich_sync=true&q=remote")
+	if cached.Code != http.StatusOK || searchCalls.Load() != 1 || richCalls.Load() != 1 {
+		t.Fatalf("expected persisted rich search result, status=%d search_calls=%d rich_calls=%d", cached.Code, searchCalls.Load(), richCalls.Load())
+	}
+	var cachedResults []lyricsResponse
+	if err := json.NewDecoder(cached.Body).Decode(&cachedResults); err != nil {
+		t.Fatalf("decode persisted rich search: %v", err)
+	}
+	if len(cachedResults) != 1 || cachedResults[0].RichSync == nil {
+		t.Fatalf("expected cached rich result, got %+v", cachedResults)
 	}
 }
 

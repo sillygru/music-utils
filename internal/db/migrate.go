@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-//go:embed metadata_schema.sql lyrics_schema.sql lyrics_sync_schema.sql covers_schema.sql
+//go:embed metadata_schema.sql lyrics_schema.sql lyrics_sync_schema.sql lyrics_search_schema.sql covers_schema.sql
 var schemaFS embed.FS
 
 var metadataColumns = []struct {
@@ -105,7 +105,10 @@ func MigrateLyrics(ctx context.Context, database *sql.DB) error {
 	if err := migrateSchema(ctx, database, "lyrics_schema.sql"); err != nil {
 		return err
 	}
-	return migrateSchema(ctx, database, "lyrics_sync_schema.sql")
+	if err := migrateSchema(ctx, database, "lyrics_sync_schema.sql"); err != nil {
+		return err
+	}
+	return migrateSchema(ctx, database, "lyrics_search_schema.sql")
 }
 
 // MigrateCover initializes the independent album/artist cover URL database and
