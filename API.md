@@ -404,7 +404,14 @@ A rich response has this compact content shape:
   "title": "Somebody's Pleasure",
   "artist": "Aziz Hedra",
   "duration": 223.98,
-  "lines": [[7.184, 13.436, "I've been so busy, ignoring, and hiding", [[7.184, 7.532, "I've"], [7.532, 7.819, "been"]]]]
+  "lines": [
+    [7.184, 13.436, "I've been so busy, ignoring, and hiding", [
+      [7.184, 7.532, "I've"],
+      [7.532, 7.819, "been"],
+      [7.819, 8.112, "so"],
+      [8.112, 9.420, "busy"]
+    ]]
+  ]
 }
 ```
 

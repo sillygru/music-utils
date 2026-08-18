@@ -507,5 +507,9 @@ func healthz(w http.ResponseWriter, r *http.Request) {
 func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
+	if res, ok := value.(lyricsResponse); ok {
+		_ = writeLyricsResponseJSON(w, res)
+		return
+	}
 	_ = json.NewEncoder(w).Encode(value)
 }

@@ -2,4 +2,4 @@
 package version
 
 // Version is the current application version and the source used for release tags.
-var Version = "v0.12.4"
+var Version = "v0.12.5"
