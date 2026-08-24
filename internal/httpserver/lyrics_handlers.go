@@ -13,6 +13,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sillygru/music-utils/internal/betterlyrics"
+	"github.com/sillygru/music-utils/internal/binilyrics"
 	"github.com/sillygru/music-utils/internal/db"
 	"github.com/sillygru/music-utils/internal/lrclib"
 	"github.com/sillygru/music-utils/internal/names"
@@ -87,6 +89,16 @@ type lyricsResponse struct {
 	PlainLyrics  string          `json:"plainLyrics,omitempty"`
 	SyncedLyrics string          `json:"syncedLyrics,omitempty"`
 	RichSync     *richSyncResult `json:"richSync,omitempty"`
+	Variants     []lyricsVariant `json:"variants,omitempty"`
+}
+
+type lyricsVariant struct {
+	Provider     string          `json:"provider"`
+	SyncType     string          `json:"syncType"`
+	Format       string          `json:"format"`
+	RichSync     *richSyncResult `json:"richSync,omitempty"`
+	PlainLyrics  string          `json:"plainLyrics,omitempty"`
+	SyncedLyrics string          `json:"syncedLyrics,omitempty"`
 }
 
 type richSyncResult struct {
@@ -101,8 +113,8 @@ type apiError struct {
 	Message string `json:"message"`
 }
 
-func getLyricsHandler(metadataDB, lyricsDB *sql.DB, client *lrclib.Client, richClient *richlyrics.Client, lyricsMisses *lyricsMissCache, fallbacks *fallbackGuard, fallbackEnabled, richEnabled bool, prefetcher *prefetcher) http.HandlerFunc {
-	upstreamGroup := newLyricsUpstreamGroup()
+func getLyricsHandler(metadataDB, lyricsDB *sql.DB, client *lrclib.Client, richClient *richlyrics.Client, betterClient *betterlyrics.Client, biniClient *binilyrics.Client, lyricsMisses *lyricsMissCache, fallbacks *fallbackGuard, fallbackEnabled, richEnabled bool, prefetcher *prefetcher) http.HandlerFunc {
+	lookupGroup := newLyricsLookupGroup()
 	return func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
 		candidates := names.Candidates(query.Get("track_name"), query.Get("artist_name"), query.Get("album_name"))
@@ -175,109 +187,38 @@ func getLyricsHandler(metadataDB, lyricsDB *sql.DB, client *lrclib.Client, richC
 			return
 		}
 
-		remote, remoteErr := upstreamGroup.Do(r.Context(), missKey, func() (*lrclib.RemoteResult, error) {
-			release, status, retryAfter, ok := fallbacks.acquire(r)
-			if !ok {
-				return nil, &fallbackBlockedError{status: status, retryAfter: retryAfter}
-			}
-			defer release()
-
-			upstreamStart := time.Now()
-			remote, err := lookupRemoteLyrics(r.Context(), client, query.Get("track_name"), query.Get("artist_name"), query.Get("album_name"), duration)
-			setUpstreamDuration(r, time.Since(upstreamStart))
-			return remote, err
+		parallelResult := lookupGroup.lookup(r.Context(), missKey, func(ctx context.Context, publish func(lyricsLookupResult)) {
+			runParallelLyricsGet(ctx, publish, metadataDB, lyricsDB, client, richClient, betterClient, biniClient, lyricsMisses, fallbacks, fallbackEnabled, richEnabled, includeRichSync(r), clientIP(r, false), existingTrack, trackName, artistName, albumName, duration)
 		})
-		var blocked *fallbackBlockedError
-		if errors.As(remoteErr, &blocked) {
-			if blocked.status == http.StatusTooManyRequests {
-				setOutcome(r, "rate_limited")
-				writeRateLimitResponse(w, blocked.retryAfter)
+		if parallelResult.upstream > 0 {
+			setUpstreamDuration(r, parallelResult.upstream)
+		}
+		if parallelResult.status == http.StatusTooManyRequests {
+			setOutcome(r, "rate_limited")
+			writeRateLimitResponse(w, parallelResult.retry)
+			return
+		}
+		if parallelResult.status == http.StatusServiceUnavailable {
+			w.Header().Set("Retry-After", strconv.Itoa(parallelResult.retry))
+			setOutcome(r, "upstream_busy")
+			writeJSON(w, http.StatusServiceUnavailable, apiError{Code: http.StatusServiceUnavailable, Message: "Upstream busy, try again shortly"})
+			return
+		}
+		if response, ok := responseFromParallelLookup(parallelResult, includeRichSync(r)); ok {
+			if parallelResult.rich != nil && includeRichSync(r) {
+				setOutcome(r, "rich_lyrics_fallback_hit")
 			} else {
-				w.Header().Set("Retry-After", strconv.Itoa(blocked.retryAfter))
-				setOutcome(r, "upstream_busy")
-				writeJSON(w, http.StatusServiceUnavailable, apiError{Code: http.StatusServiceUnavailable, Message: "Upstream busy, try again shortly"})
+				setOutcome(r, "lrclib_fallback_hit")
 			}
+			if parallelResult.track != nil {
+				prefetcher.Enqueue(parallelResult.track.Name, parallelResult.track.ArtistName, parallelResult.track.AlbumName, parallelResult.track.Duration)
+			}
+			writeJSON(w, http.StatusOK, response)
 			return
 		}
-		if remoteErr != nil && !errors.Is(remoteErr, lrclib.ErrNotFound) {
-			setRequestIssue(r, slog.LevelWarn, remoteErr.Error())
-		}
-		if remoteErr == nil && !remoteLyricsAvailable(remote) {
-			// LRCLIB can return a successful metadata-only record for a release
-			// variant. It is not a usable lyrics hit, so broaden the lookup below.
-			remoteErr = lrclib.ErrNotFound
-		}
-		if remoteErr != nil {
-			// LRCLIB's exact endpoint is release-sensitive when an album hint is
-			// supplied. Broaden that lookup through search by track and artist;
-			// leave album-less 404s as genuine misses to preserve the fallback
-			// budget and avoid an unnecessary second upstream request.
-			if artistName != "" && errors.Is(remoteErr, lrclib.ErrNotFound) && albumName != "" {
-				searchStart := time.Now()
-				searchResults, searchErr := client.Search(r.Context(), strings.Join(nonEmpty(trackName, artistName), " "))
-				setUpstreamDuration(r, time.Since(searchStart))
-				if searchErr == nil {
-					remote = matchingLyricsResult(searchResults, trackName, artistName)
-					if remote != nil {
-						remoteErr = nil
-					}
-				} else {
-					setRequestIssue(r, slog.LevelWarn, searchErr.Error())
-				}
-			}
-			if remoteErr != nil {
-				lyricsMisses.Set(missKey, time.Now())
-				if richResponse, ok := tryRichOnlyResponse(r, metadataDB, lyricsDB, richClient, fallbacks, richEnabled, existingTrack, trackName, artistName, albumName, duration); ok {
-					setOutcome(r, "rich_lyrics_fallback_hit")
-					writeJSON(w, http.StatusOK, richResponse)
-					return
-				}
-				setOutcome(r, "miss")
-				writeJSON(w, http.StatusNotFound, apiError{Code: http.StatusNotFound, Message: "Track not found"})
-				return
-			}
-		}
-
-		cachedTrack := db.Track{
-			Name:       firstNonEmpty(remote.TrackName, trackName),
-			ArtistName: firstNonEmpty(remote.ArtistName, artistName),
-			AlbumName:  firstNonEmpty(remote.AlbumName, albumName),
-			Duration:   remote.Duration,
-			Source:     "lrclib_fallback",
-		}
-		if cachedTrack.Duration <= 0 {
-			cachedTrack.Duration = duration
-		}
-		cacheTrack := cachedTrack
-		if existingTrack != nil {
-			// Refresh the already-known metadata row in place so a request that
-			// supplied a release alias becomes a local hit next time.
-			cacheTrack = *existingTrack
-			cacheTrack.Source = "lrclib_fallback"
-		}
-		trackID, _, err := db.InsertTrackWithLyrics(r.Context(), metadataDB, lyricsDB, cacheTrack, db.Lyrics{
-			PlainLyrics:  remote.PlainLyrics,
-			SyncedLyrics: remote.SyncedLyrics,
-			Instrumental: remote.Instrumental,
-			Source:       "lrclib_fallback",
-		})
-		if err != nil {
-			setRequestIssue(r, slog.LevelError, err.Error())
-			setOutcome(r, "error")
-			writeJSON(w, http.StatusInternalServerError, apiError{Code: http.StatusInternalServerError, Message: "Internal server error"})
-			return
-		}
-
-		cacheTrack.ID = trackID
-		track = &cacheTrack
-		lyrics = &db.Lyrics{
-			PlainLyrics:  remote.PlainLyrics,
-			SyncedLyrics: remote.SyncedLyrics,
-			Instrumental: remote.Instrumental,
-		}
-		setOutcome(r, "lrclib_fallback_hit")
-		prefetcher.Enqueue(cacheTrack.Name, cacheTrack.ArtistName, cacheTrack.AlbumName, cacheTrack.Duration)
-		writeJSON(w, http.StatusOK, enrichLyricsResponse(r, track, lyrics, lyricsDB, richClient, fallbacks, richEnabled))
+		setOutcome(r, "miss")
+		writeJSON(w, http.StatusNotFound, apiError{Code: http.StatusNotFound, Message: "Track not found"})
+		return
 	}
 }
 
@@ -299,7 +240,7 @@ func searchLyricsHandlerWithUpstream(metadataDB, lyricsDB *sql.DB, client *lrcli
 			writeJSON(w, http.StatusBadRequest, apiError{Code: http.StatusBadRequest, Message: "limit must be an integer between 1 and 50"})
 			return
 		}
-		cacheKey := query.Encode()
+		cacheKey := lyricsSearchCacheKey(searchQuery, limit, includeRichSync(r), requestedRichSyncType(r))
 		if cached, cacheErr := db.FindLyricsSearchCache(r.Context(), lyricsDB, cacheKey, lyricsSearchCacheTTL); cacheErr == nil {
 			var cachedResults []lyricsResponse
 			if err := json.Unmarshal(cached, &cachedResults); err == nil {
@@ -418,6 +359,10 @@ func searchLyricsHandlerWithUpstream(metadataDB, lyricsDB *sql.DB, client *lrcli
 		}
 		writeJSON(w, http.StatusOK, results)
 	}
+}
+
+func lyricsSearchCacheKey(query string, limit int, includeRich bool, syncType string) string {
+	return lyricsCachePolicyVersion + "\x00search\x00" + canonicalPart(query) + "\x00" + strconv.Itoa(limit) + "\x00" + cacheBoolString(includeRich) + "\x00" + canonicalPart(syncType)
 }
 
 func searchLyricsIdentity(trackName, artistName string) string {
@@ -855,17 +800,20 @@ func lyricsAvailable(lyrics *db.Lyrics) bool {
 }
 
 func toLyricsResponse(track *db.Track, lyrics *db.Lyrics) lyricsResponse {
-	return lyricsResponse{
-		ID:           track.ID,
-		Name:         track.Name,
-		TrackName:    track.Name,
-		ArtistName:   track.ArtistName,
-		AlbumName:    track.AlbumName,
-		Duration:     track.Duration,
-		Instrumental: lyrics.Instrumental,
-		PlainLyrics:  lyrics.PlainLyrics,
-		SyncedLyrics: lyrics.SyncedLyrics,
+	response := lyricsResponse{
+		ID:         track.ID,
+		Name:       track.Name,
+		TrackName:  track.Name,
+		ArtistName: track.ArtistName,
+		AlbumName:  track.AlbumName,
+		Duration:   track.Duration,
 	}
+	if lyrics != nil {
+		response.Instrumental = lyrics.Instrumental
+		response.PlainLyrics = lyrics.PlainLyrics
+		response.SyncedLyrics = lyrics.SyncedLyrics
+	}
+	return response
 }
 
 func searchLimit(value string) (int, error) {

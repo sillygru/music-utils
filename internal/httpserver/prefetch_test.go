@@ -20,10 +20,10 @@ import (
 // kindCoverStub is a cover provider stub that returns per-kind candidates so
 // prefetch tests exercise the album and artist search paths separately.
 type kindCoverStub struct {
-	name       string
-	albums     []cover.Result
-	artists    []cover.Result
-	albumCalls int
+	name        string
+	albums      []cover.Result
+	artists     []cover.Result
+	albumCalls  int
 	artistCalls int
 }
 
@@ -108,8 +108,8 @@ func TestPrefetchFetchesRelatedContent(t *testing.T) {
 		t.Fatalf("new lrclib client: %v", err)
 	}
 	resolver := cover.NewResolver(&kindCoverStub{
-		name:   "stub",
-		albums: []cover.Result{{URL: "http://img/album.jpg", Source: "stub", ArtistName: "Example Artist", AlbumName: "Example Album"}},
+		name:    "stub",
+		albums:  []cover.Result{{URL: "http://img/album.jpg", Source: "stub", ArtistName: "Example Artist", AlbumName: "Example Album"}},
 		artists: []cover.Result{{URL: "http://img/artist.jpg", Source: "stub", ArtistName: "Example Artist"}},
 	})
 	metadataDB, lyricsDB, coverDB := prefetchTestDatabases(t)
@@ -165,8 +165,8 @@ func TestPrefetchSkipsCachedTargets(t *testing.T) {
 		t.Fatalf("new lrclib client: %v", err)
 	}
 	stub := &kindCoverStub{
-		name:   "stub",
-		albums: []cover.Result{{URL: "http://img/album.jpg", Source: "stub", ArtistName: "Example Artist", AlbumName: "Example Album"}},
+		name:    "stub",
+		albums:  []cover.Result{{URL: "http://img/album.jpg", Source: "stub", ArtistName: "Example Artist", AlbumName: "Example Album"}},
 		artists: []cover.Result{{URL: "http://img/artist.jpg", Source: "stub", ArtistName: "Example Artist"}},
 	}
 	metadataDB, lyricsDB, coverDB := prefetchTestDatabases(t)
@@ -205,8 +205,8 @@ func TestPrefetchDeduplicatesInFlight(t *testing.T) {
 		t.Fatalf("new lrclib client: %v", err)
 	}
 	resolver := cover.NewResolver(&kindCoverStub{
-		name:   "stub",
-		albums: []cover.Result{{URL: "http://img/album.jpg", Source: "stub", ArtistName: "Example Artist", AlbumName: "Example Album"}},
+		name:    "stub",
+		albums:  []cover.Result{{URL: "http://img/album.jpg", Source: "stub", ArtistName: "Example Artist", AlbumName: "Example Album"}},
 		artists: []cover.Result{{URL: "http://img/artist.jpg", Source: "stub", ArtistName: "Example Artist"}},
 	})
 	metadataDB, lyricsDB, coverDB := prefetchTestDatabases(t)
@@ -239,8 +239,8 @@ func TestPrefetchRespectsBudget(t *testing.T) {
 		t.Fatalf("new lrclib client: %v", err)
 	}
 	stub := &kindCoverStub{
-		name:   "stub",
-		albums: []cover.Result{{URL: "http://img/album.jpg", Source: "stub", ArtistName: "Example Artist", AlbumName: "First Album"}},
+		name:    "stub",
+		albums:  []cover.Result{{URL: "http://img/album.jpg", Source: "stub", ArtistName: "Example Artist", AlbumName: "First Album"}},
 		artists: []cover.Result{{URL: "http://img/artist.jpg", Source: "stub", ArtistName: "Example Artist"}},
 	}
 	metadataDB, lyricsDB, coverDB := prefetchTestDatabases(t)
