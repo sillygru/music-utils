@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"context"
@@ -15,14 +15,15 @@ import (
 	"github.com/sillygru/music-utils/internal/reqlog"
 )
 
-// runStats implements `music-utils stats`, which reads the request log SQLite
+// RunStats implements `music-utils stats`, which reads the request log SQLite
 // database and prints performance, activity, and traffic statistics formatted
 // in ASCII/Unicode boxes.
-func runStats(args []string) int {
-	return runStatsTo(os.Stdout, os.Stderr, args)
+func RunStats(args []string) int {
+	return RunStatsTo(os.Stdout, os.Stderr, args)
 }
 
-func runStatsTo(out, errOut io.Writer, args []string) int {
+// RunStatsTo runs the stats subcommand with custom output streams.
+func RunStatsTo(out, errOut io.Writer, args []string) int {
 	flags := flag.NewFlagSet("stats", flag.ContinueOnError)
 	flags.SetOutput(errOut)
 	dbPath := flags.String("db", "", "request log database path (defaults to REQUEST_LOG_DB_PATH)")

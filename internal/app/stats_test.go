@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"bytes"
@@ -12,7 +12,7 @@ import (
 
 func TestRunStatsMissingDB(t *testing.T) {
 	var out, errOut bytes.Buffer
-	code := runStatsTo(&out, &errOut, []string{"-db", "/non/existent/request_log.db"})
+	code := RunStatsTo(&out, &errOut, []string{"-db", "/non/existent/request_log.db"})
 	if code != 1 {
 		t.Fatalf("expected exit code 1 for missing db, got %d", code)
 	}
@@ -34,7 +34,7 @@ func TestRunStatsEmptyDB(t *testing.T) {
 	}
 
 	var out, errOut bytes.Buffer
-	code := runStatsTo(&out, &errOut, []string{"-db", dbPath})
+	code := RunStatsTo(&out, &errOut, []string{"-db", dbPath})
 	if code != 0 {
 		t.Fatalf("expected exit code 0, got %d (err: %s)", code, errOut.String())
 	}
@@ -90,7 +90,7 @@ func TestRunStatsWithData(t *testing.T) {
 	}
 
 	var out, errOut bytes.Buffer
-	code := runStatsTo(&out, &errOut, []string{"-db", dbPath, "-days", "7", "-top", "5"})
+	code := RunStatsTo(&out, &errOut, []string{"-db", dbPath, "-days", "7", "-top", "5"})
 	if code != 0 {
 		t.Fatalf("expected exit code 0, got %d (err: %s)", code, errOut.String())
 	}
@@ -111,6 +111,4 @@ func TestRunStatsWithData(t *testing.T) {
 	if !strings.Contains(output, "/api/lyrics/get") {
 		t.Errorf("missing /api/lyrics/get endpoint in output:\n%s", output)
 	}
-	t.Logf("Rendered stats box output:\n%s", output)
 }
-
