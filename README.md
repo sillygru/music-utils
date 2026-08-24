@@ -196,7 +196,7 @@ cold-lookup latency and has been removed.
 | `PREFETCH_ARTIST_COVER` | `true` | Prefetch artist artwork once the song's artist is known. |
 | `REQUEST_LOG_ENABLED` | `true` | Record every request (when, endpoint, params, outcome, split cache/upstream timings) into the request log database. |
 | `REQUEST_LOG_DB_PATH` | `./data/request_log.db` | Storage-optimized request log database. |
-| `REQUEST_LOG_RETENTION_DAYS` | `30` | Prune request log rows older than this daily; `0` or `-1` keeps everything forever. |
+| `REQUEST_LOG_RETENTION_DAYS` | `0` | Prune request log rows older than this daily; `0` or `-1` keeps everything forever (default). |
 | `REQUEST_LOG_UA_OPTIMIZE` | `true` | Collapse well-known client User-Agents (curl, wget, browsers, ...) to short tokens in the request log to save storage. |
 | `REQUEST_LOG_UA_SAVE_UNKNOWN` | `true` | When UA optimization is on and a User-Agent is unrecognized, save the full string (`true`) or drop it as empty (`false`). |
 | `REQUESTS_TODAY_ENABLED` | `false` | Serve `GET /api/stats/requests-today`, reporting requests logged in the last 24 hours (rolling window, seeded from the request log; its own polls excluded). |
@@ -263,6 +263,21 @@ LRCLIB instance) rather than at a lyrics dump. The request log database is
 operational data (timestamps, client params, latency) and is likewise never
 exported. Cover URLs can rotate at their CDNs, so treat a cover dump as a
 cache seed, not a permanent store.
+
+## Request stats
+
+`music-utils stats` (or `go run ./cmd/server stats`) reads the operational
+request log database and prints request volume, performance percentiles,
+activity windows (24h, 7d, 30d, all-time), daily histograms, top endpoints,
+and client User-Agents formatted in ASCII/Unicode boxes:
+
+```sh
+# Inspect the default request log database (REQUEST_LOG_DB_PATH)
+go run ./cmd/server stats
+
+# Or point at a custom database path with custom daily window and top list size:
+./bin/music-utils stats -db ./data/request_log.db -days 30 -top 15
+```
 
 ## Running a public instance
 

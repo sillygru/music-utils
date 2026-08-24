@@ -20,6 +20,9 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "export" {
 		os.Exit(runExport(os.Args[2:]))
 	}
+	if len(os.Args) > 1 && os.Args[1] == "stats" {
+		os.Exit(runStats(os.Args[2:]))
+	}
 	cfg, err := config.LoadAndValidate()
 	if err != nil {
 		slog.Error("invalid configuration", "error", err)

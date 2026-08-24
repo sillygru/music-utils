@@ -33,7 +33,7 @@ const (
 	defaultCoverRefreshMaxRecheck   = 200
 	defaultRequestLogEnabled        = true
 	defaultRequestLogDBPath         = "./data/request_log.db"
-	defaultRequestLogRetentionDays  = 30
+	defaultRequestLogRetentionDays  = 0
 	defaultRequestLogUAOptimize     = true
 	defaultRequestLogUASaveUnknown  = true
 	defaultRequestsTodayEnabled     = false

@@ -128,7 +128,7 @@ func TestLoadRequestLogDefaults(t *testing.T) {
 	if cfg.RequestLogDBPath != "./data/request_log.db" {
 		t.Fatalf("unexpected default request log path: %q", cfg.RequestLogDBPath)
 	}
-	if cfg.RequestLogRetentionDays != 30 {
+	if cfg.RequestLogRetentionDays != 0 {
 		t.Fatalf("unexpected default request log retention: %d", cfg.RequestLogRetentionDays)
 	}
 	if !cfg.RequestLogUAOptimize {
