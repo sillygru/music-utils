@@ -11,12 +11,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sillygru/music-utils/internal/betterlyrics"
+	"github.com/sillygru/music-utils/internal/applemusic"
 	"github.com/sillygru/music-utils/internal/config"
 	"github.com/sillygru/music-utils/internal/cover"
 	"github.com/sillygru/music-utils/internal/db"
 	"github.com/sillygru/music-utils/internal/lrclib"
 	"github.com/sillygru/music-utils/internal/metadata"
+	"github.com/sillygru/music-utils/internal/musixmatch"
 	"github.com/sillygru/music-utils/internal/pacer"
 	"github.com/sillygru/music-utils/internal/reqlog"
 	"github.com/sillygru/music-utils/internal/richlyrics"
@@ -143,7 +144,8 @@ func NewWithLogger(cfg config.Config, metadataDB, lyricsDB, coverDB *sql.DB, log
 	}
 	client := newLRCLIBClient(cfg, logger)
 	richClient := newRichLyricsClient(cfg, logger)
-	betterClient := newBetterLyricsClient(cfg, logger)
+	appleClient := newAppleMusicClient(cfg, logger)
+	musixClient := newMusixmatchClient(cfg, logger)
 	richLyricsMigrationStop := startRichLyricsMigration(lyricsDB, logger)
 	var requestLogs *reqlog.Writer
 	if cfg.RequestLogEnabled {
@@ -200,7 +202,7 @@ func NewWithLogger(cfg config.Config, metadataDB, lyricsDB, coverDB *sql.DB, log
 			mux.HandleFunc("GET "+statsSongsPath, statsSongsHandler(metadataDB))
 		}
 	}
-	mux.HandleFunc("GET /api/lyrics/get", getLyricsHandler(metadataDB, lyricsDB, client, richClient, betterClient, lyricsMisses, fallbacks, cfg.LRCLIBFallbackEnabled, cfg.RichLyricsEnabled, prefetcher))
+	mux.HandleFunc("GET /api/lyrics/get", getLyricsHandler(metadataDB, lyricsDB, client, richClient, appleClient, musixClient, lyricsMisses, fallbacks, cfg.LRCLIBFallbackEnabled, cfg.RichLyricsEnabled, cfg.AppleMusicEnabled, cfg.MusixmatchEnabled, prefetcher))
 	mux.HandleFunc("GET /api/lyrics/search", searchLyricsHandlerParallel(metadataDB, lyricsDB, client, richClient, fallbacks, cfg.LRCLIBFallbackEnabled, cfg.RichLyricsEnabled))
 	mux.HandleFunc("GET /api/metadata/get", getMetadataHandler(metadataDB, metadataResolver, fallbacks, cfg.MetadataFallbackEnabled, prefetcher))
 	mux.HandleFunc("GET /api/metadata/search", searchMetadataHandlerWithUpstream(metadataDB, metadataResolver, fallbacks, cfg.MetadataFallbackEnabled))
@@ -327,13 +329,25 @@ func startRichLyricsMigration(lyricsDB *sql.DB, logger *slog.Logger) func() {
 	return cancel
 }
 
-func newBetterLyricsClient(cfg config.Config, logger *slog.Logger) *betterlyrics.Client {
-	if !cfg.BetterLyricsEnabled || strings.TrimSpace(cfg.BetterLyricsBaseURL) == "" {
+func newAppleMusicClient(cfg config.Config, logger *slog.Logger) *applemusic.Client {
+	if !cfg.AppleMusicEnabled {
 		return nil
 	}
-	client, err := betterlyrics.New(cfg.BetterLyricsBaseURL, cfg.RichLyricsUserAgent, cfg.BetterLyricsToken, time.Duration(cfg.BetterLyricsTimeoutMS)*time.Millisecond)
+	client, err := applemusic.New(cfg.AppleMusicCatalogBaseURL, cfg.AppleMusicLyricsBaseURL, cfg.AppleMusicStorefront, cfg.AppleMusicUserAgent, cfg.AppleMusicMediaUserTokens, time.Duration(cfg.AppleMusicTimeoutMS)*time.Millisecond)
 	if err != nil {
-		logger.Error("configure Better Lyrics client", "error", err)
+		logger.Error("configure Apple Music client", "error", err)
+		return nil
+	}
+	return client
+}
+
+func newMusixmatchClient(cfg config.Config, logger *slog.Logger) *musixmatch.Client {
+	if !cfg.MusixmatchEnabled || strings.TrimSpace(cfg.MusixmatchAPIKey) == "" {
+		return nil
+	}
+	client, err := musixmatch.New(cfg.MusixmatchBaseURL, cfg.MusixmatchAPIKey, cfg.MusixmatchUserAgent, time.Duration(cfg.MusixmatchTimeoutMS)*time.Millisecond)
+	if err != nil {
+		logger.Error("configure Musixmatch client", "error", err)
 		return nil
 	}
 	return client

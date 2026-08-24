@@ -165,7 +165,7 @@ func parseCompactRichSync(content string) (compactRichSync, error) {
 			if result.Title == "" {
 				result.Title = text
 			}
-		case "agent":
+		case "agent", "artist":
 			text, err := readRichElementText(decoder)
 			if err != nil {
 				return compactRichSync{}, err

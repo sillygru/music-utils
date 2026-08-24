@@ -11,104 +11,117 @@ import (
 )
 
 const (
-	defaultPort                    = "8080"
-	defaultLogLevel                = "info"
-	defaultMetadataDBPath          = "./data/metadata.db"
-	defaultLyricsDBPath            = "./data/lyrics.db"
-	defaultCoverDBPath             = "./data/cover.db"
-	defaultDBMmapSize              = int64(512 * 1024 * 1024)
-	defaultDBCacheSizeKB           = int64(-64000)
-	defaultDBMaxOpenConns          = 16
-	defaultRateLimitPerSec         = 20
-	defaultRateLimitPerMin         = 600
-	defaultTrustProxy              = false
-	defaultFallbackPerMin          = 60
-	defaultFallbackMaxQueue        = 50
-	defaultFallbackQueueWaitMS     = 10000
-	defaultCoverRefreshEnabled     = true
-	defaultCoverRefreshAfterDays   = 30
-	defaultCoverRefreshStartHour   = 2
-	defaultCoverRefreshEndHour     = 5
-	defaultCoverRefreshMaxRows     = 2000
-	defaultCoverRefreshMaxRecheck  = 200
-	defaultRequestLogEnabled       = true
-	defaultRequestLogDBPath        = "./data/request_log.db"
-	defaultRequestLogRetentionDays = 30
-	defaultRequestLogUAOptimize    = true
-	defaultRequestLogUASaveUnknown = true
-	defaultRequestsTodayEnabled    = false
-	defaultStatsEndpoints          = ""
-	defaultLRCLIBFallbackEnabled   = true
-	defaultLRCLIBBaseURL           = "https://lrclib.net/api"
-	defaultLRCLIBTimeoutMS         = 5000
-	defaultRichLyricsEnabled       = true
-	defaultRichLyricsBaseURL       = "https://unison.boidu.dev"
-	defaultRichLyricsTimeoutMS     = 5000
-	defaultBetterLyricsEnabled     = false
-	defaultBetterLyricsBaseURL     = ""
-	defaultBetterLyricsTimeoutMS   = 10000
-	defaultMetadataFallbackEnabled = true
+	defaultPort                     = "8080"
+	defaultLogLevel                 = "info"
+	defaultMetadataDBPath           = "./data/metadata.db"
+	defaultLyricsDBPath             = "./data/lyrics.db"
+	defaultCoverDBPath              = "./data/cover.db"
+	defaultDBMmapSize               = int64(512 * 1024 * 1024)
+	defaultDBCacheSizeKB            = int64(-64000)
+	defaultDBMaxOpenConns           = 16
+	defaultRateLimitPerSec          = 20
+	defaultRateLimitPerMin          = 600
+	defaultTrustProxy               = false
+	defaultFallbackPerMin           = 60
+	defaultFallbackMaxQueue         = 50
+	defaultFallbackQueueWaitMS      = 10000
+	defaultCoverRefreshEnabled      = true
+	defaultCoverRefreshAfterDays    = 30
+	defaultCoverRefreshStartHour    = 2
+	defaultCoverRefreshEndHour      = 5
+	defaultCoverRefreshMaxRows      = 2000
+	defaultCoverRefreshMaxRecheck   = 200
+	defaultRequestLogEnabled        = true
+	defaultRequestLogDBPath         = "./data/request_log.db"
+	defaultRequestLogRetentionDays  = 30
+	defaultRequestLogUAOptimize     = true
+	defaultRequestLogUASaveUnknown  = true
+	defaultRequestsTodayEnabled     = false
+	defaultStatsEndpoints           = ""
+	defaultLRCLIBFallbackEnabled    = true
+	defaultLRCLIBBaseURL            = "https://lrclib.net/api"
+	defaultLRCLIBTimeoutMS          = 5000
+	defaultRichLyricsEnabled        = true
+	defaultRichLyricsBaseURL        = "https://unison.boidu.dev"
+	defaultRichLyricsTimeoutMS      = 5000
+	defaultAppleMusicEnabled        = false
+	defaultAppleMusicCatalogBaseURL = "https://api.music.apple.com"
+	defaultAppleMusicLyricsBaseURL  = "https://api.music.apple.com"
+	defaultAppleMusicStorefront     = "us"
+	defaultAppleMusicTimeoutMS      = 10000
+	defaultMusixmatchEnabled        = false
+	defaultMusixmatchBaseURL        = "https://api.musixmatch.com"
+	defaultMusixmatchTimeoutMS      = 10000
+	defaultMetadataFallbackEnabled  = true
 
-	defaultITunesBaseURL           = "https://itunes.apple.com"
-	defaultDeezerBaseURL           = "https://api.deezer.com"
-	defaultMetadataTimeoutMS       = 5000
-	defaultCoverFallbackEnabled    = true
-	defaultLastfmBaseURL           = "https://www.last.fm"
-	defaultCoverTimeoutMS          = 10000
-	defaultPrefetchEnabled         = true
-	defaultPrefetchPerMin          = 10
-	defaultPrefetchConcurrency     = 4
-	defaultPrefetchQueueSize       = 64
-	defaultPrefetchLyrics          = true
-	defaultPrefetchAlbumCover      = true
-	defaultPrefetchArtistCover     = true
+	defaultITunesBaseURL        = "https://itunes.apple.com"
+	defaultDeezerBaseURL        = "https://api.deezer.com"
+	defaultMetadataTimeoutMS    = 5000
+	defaultCoverFallbackEnabled = true
+	defaultLastfmBaseURL        = "https://www.last.fm"
+	defaultCoverTimeoutMS       = 10000
+	defaultPrefetchEnabled      = true
+	defaultPrefetchPerMin       = 10
+	defaultPrefetchConcurrency  = 4
+	defaultPrefetchQueueSize    = 64
+	defaultPrefetchLyrics       = true
+	defaultPrefetchAlbumCover   = true
+	defaultPrefetchArtistCover  = true
 )
 
 // Config contains the settings needed to start the server.
 type Config struct {
-	Port                    string
-	LogLevel                string
-	MetadataDBPath          string
-	LyricsDBPath            string
-	DBMmapSize              int64
-	DBCacheSizeKB           int64
-	DBMaxOpenConns          int
-	RateLimitPerSec         int
-	RateLimitPerMin         int
-	TrustProxy              bool
-	FallbackPerMin          int
-	FallbackMaxQueue        int
-	FallbackQueueWaitMS     int
-	CoverRefreshEnabled     bool
-	CoverRefreshAfterDays   int
-	CoverRefreshStartHour   int
-	CoverRefreshEndHour     int
-	CoverRefreshMaxRows     int
-	CoverRefreshMaxRecheck  int
-	RequestLogEnabled       bool
-	RequestLogDBPath        string
-	RequestLogRetentionDays int
-	RequestLogUAOptimize    bool
-	RequestLogUASaveUnknown bool
-	RequestsTodayEnabled    bool
-	StatsEndpoints          []string
-	LRCLIBFallbackEnabled   bool
-	LRCLIBBaseURL           string
-	LRCLIBUserAgent         string
-	LRCLIBTimeoutMS         int
-	RichLyricsEnabled       bool
-	RichLyricsBaseURL       string
-	RichLyricsUserAgent     string
-	RichLyricsTimeoutMS     int
-	BetterLyricsEnabled     bool
-	BetterLyricsBaseURL     string
-	BetterLyricsToken       string
-	BetterLyricsTimeoutMS   int
-	MetadataFallbackEnabled bool
-	ITunesBaseURL           string
-	DeezerBaseURL           string
-	MetadataTimeoutMS       int
-	MetadataUserAgent       string
+	Port                      string
+	LogLevel                  string
+	MetadataDBPath            string
+	LyricsDBPath              string
+	DBMmapSize                int64
+	DBCacheSizeKB             int64
+	DBMaxOpenConns            int
+	RateLimitPerSec           int
+	RateLimitPerMin           int
+	TrustProxy                bool
+	FallbackPerMin            int
+	FallbackMaxQueue          int
+	FallbackQueueWaitMS       int
+	CoverRefreshEnabled       bool
+	CoverRefreshAfterDays     int
+	CoverRefreshStartHour     int
+	CoverRefreshEndHour       int
+	CoverRefreshMaxRows       int
+	CoverRefreshMaxRecheck    int
+	RequestLogEnabled         bool
+	RequestLogDBPath          string
+	RequestLogRetentionDays   int
+	RequestLogUAOptimize      bool
+	RequestLogUASaveUnknown   bool
+	RequestsTodayEnabled      bool
+	StatsEndpoints            []string
+	LRCLIBFallbackEnabled     bool
+	LRCLIBBaseURL             string
+	LRCLIBUserAgent           string
+	LRCLIBTimeoutMS           int
+	RichLyricsEnabled         bool
+	RichLyricsBaseURL         string
+	RichLyricsUserAgent       string
+	RichLyricsTimeoutMS       int
+	AppleMusicEnabled         bool
+	AppleMusicCatalogBaseURL  string
+	AppleMusicLyricsBaseURL   string
+	AppleMusicStorefront      string
+	AppleMusicUserAgent       string
+	AppleMusicMediaUserTokens []string
+	AppleMusicTimeoutMS       int
+	MusixmatchEnabled         bool
+	MusixmatchBaseURL         string
+	MusixmatchAPIKey          string
+	MusixmatchUserAgent       string
+	MusixmatchTimeoutMS       int
+	MetadataFallbackEnabled   bool
+	ITunesBaseURL             string
+	DeezerBaseURL             string
+	MetadataTimeoutMS         int
+	MetadataUserAgent         string
 
 	CoverDBPath          string
 	CoverFallbackEnabled bool
@@ -129,49 +142,57 @@ type Config struct {
 // setting is not provided or cannot be parsed.
 func Load() Config {
 	return Config{
-		Port:                    valueOrDefault("PORT", defaultPort),
-		LogLevel:                valueOrDefault("LOG_LEVEL", defaultLogLevel),
-		MetadataDBPath:          valueOrDefault("METADATA_DB_PATH", defaultMetadataDBPath),
-		LyricsDBPath:            valueOrDefault("LYRICS_DB_PATH", defaultLyricsDBPath),
-		DBMmapSize:              int64OrDefault("DB_MMAP_SIZE", defaultDBMmapSize),
-		DBCacheSizeKB:           int64OrDefault("DB_CACHE_SIZE_KB", defaultDBCacheSizeKB),
-		DBMaxOpenConns:          intOrDefault("DB_MAX_OPEN_CONNS", defaultDBMaxOpenConns),
-		RateLimitPerSec:         intOrDefault("RATE_LIMIT_PER_SEC", defaultRateLimitPerSec),
-		RateLimitPerMin:         intOrDefault("RATE_LIMIT_PER_MIN", defaultRateLimitPerMin),
-		TrustProxy:              boolOrDefault("TRUST_PROXY", defaultTrustProxy),
-		FallbackPerMin:          intOrDefault("FALLBACK_PER_MIN", defaultFallbackPerMin),
-		FallbackMaxQueue:        intOrDefault("FALLBACK_MAX_QUEUE", defaultFallbackMaxQueue),
-		FallbackQueueWaitMS:     intOrDefault("FALLBACK_QUEUE_WAIT_MS", defaultFallbackQueueWaitMS),
-		CoverRefreshEnabled:     boolOrDefault("COVER_REFRESH_ENABLED", defaultCoverRefreshEnabled),
-		CoverRefreshAfterDays:   intOrDefault("COVER_REFRESH_AFTER_DAYS", defaultCoverRefreshAfterDays),
-		CoverRefreshStartHour:   hourOrDefault("COVER_REFRESH_START_HOUR", defaultCoverRefreshStartHour),
-		CoverRefreshEndHour:     hourOrDefault("COVER_REFRESH_END_HOUR", defaultCoverRefreshEndHour),
-		CoverRefreshMaxRows:     intOrDefault("COVER_REFRESH_MAX_ROWS", defaultCoverRefreshMaxRows),
-		CoverRefreshMaxRecheck:  intOrDefault("COVER_REFRESH_MAX_RECHECK", defaultCoverRefreshMaxRecheck),
-		RequestLogEnabled:       boolOrDefault("REQUEST_LOG_ENABLED", defaultRequestLogEnabled),
-		RequestLogDBPath:        valueOrDefault("REQUEST_LOG_DB_PATH", defaultRequestLogDBPath),
-		RequestLogRetentionDays: nonNegativeIntOrDefault("REQUEST_LOG_RETENTION_DAYS", defaultRequestLogRetentionDays),
-		RequestLogUAOptimize:    boolOrDefault("REQUEST_LOG_UA_OPTIMIZE", defaultRequestLogUAOptimize),
-		RequestLogUASaveUnknown: boolOrDefault("REQUEST_LOG_UA_SAVE_UNKNOWN", defaultRequestLogUASaveUnknown),
-		RequestsTodayEnabled:    boolOrDefault("REQUESTS_TODAY_ENABLED", defaultRequestsTodayEnabled),
-		StatsEndpoints:          statsEndpointsOrDefault("STATS_ENDPOINTS", nil),
-		LRCLIBFallbackEnabled:   boolOrDefault("LRCLIB_FALLBACK_ENABLED", defaultLRCLIBFallbackEnabled),
-		LRCLIBBaseURL:           valueOrDefault("LRCLIB_BASE_URL", defaultLRCLIBBaseURL),
-		LRCLIBUserAgent:         valueOrDefault("LRCLIB_USER_AGENT", defaultLRCLIBUserAgent()),
-		LRCLIBTimeoutMS:         intOrDefault("LRCLIB_TIMEOUT_MS", defaultLRCLIBTimeoutMS),
-		RichLyricsEnabled:       boolOrDefault("RICH_LYRICS_ENABLED", defaultRichLyricsEnabled),
-		RichLyricsBaseURL:       valueOrDefault("RICH_LYRICS_BASE_URL", defaultRichLyricsBaseURL),
-		RichLyricsUserAgent:     valueOrDefault("RICH_LYRICS_USER_AGENT", defaultRichLyricsUserAgent()),
-		RichLyricsTimeoutMS:     intOrDefault("RICH_LYRICS_TIMEOUT_MS", defaultRichLyricsTimeoutMS),
-		BetterLyricsEnabled:     boolOrDefault("BETTER_LYRICS_ENABLED", defaultBetterLyricsEnabled),
-		BetterLyricsBaseURL:     strings.TrimSpace(os.Getenv("BETTER_LYRICS_BASE_URL")),
-		BetterLyricsToken:       strings.TrimSpace(os.Getenv("BETTER_LYRICS_TOKEN")),
-		BetterLyricsTimeoutMS:   intOrDefault("BETTER_LYRICS_TIMEOUT_MS", defaultBetterLyricsTimeoutMS),
-		MetadataFallbackEnabled: boolOrDefault("METADATA_FALLBACK_ENABLED", defaultMetadataFallbackEnabled),
-		ITunesBaseURL:           valueOrDefault("ITUNES_BASE_URL", defaultITunesBaseURL),
-		DeezerBaseURL:           valueOrDefault("DEEZER_BASE_URL", defaultDeezerBaseURL),
-		MetadataTimeoutMS:       intOrDefault("METADATA_TIMEOUT_MS", defaultMetadataTimeoutMS),
-		MetadataUserAgent:       valueOrDefault("METADATA_USER_AGENT", defaultMetadataUserAgent()),
+		Port:                      valueOrDefault("PORT", defaultPort),
+		LogLevel:                  valueOrDefault("LOG_LEVEL", defaultLogLevel),
+		MetadataDBPath:            valueOrDefault("METADATA_DB_PATH", defaultMetadataDBPath),
+		LyricsDBPath:              valueOrDefault("LYRICS_DB_PATH", defaultLyricsDBPath),
+		DBMmapSize:                int64OrDefault("DB_MMAP_SIZE", defaultDBMmapSize),
+		DBCacheSizeKB:             int64OrDefault("DB_CACHE_SIZE_KB", defaultDBCacheSizeKB),
+		DBMaxOpenConns:            intOrDefault("DB_MAX_OPEN_CONNS", defaultDBMaxOpenConns),
+		RateLimitPerSec:           intOrDefault("RATE_LIMIT_PER_SEC", defaultRateLimitPerSec),
+		RateLimitPerMin:           intOrDefault("RATE_LIMIT_PER_MIN", defaultRateLimitPerMin),
+		TrustProxy:                boolOrDefault("TRUST_PROXY", defaultTrustProxy),
+		FallbackPerMin:            intOrDefault("FALLBACK_PER_MIN", defaultFallbackPerMin),
+		FallbackMaxQueue:          intOrDefault("FALLBACK_MAX_QUEUE", defaultFallbackMaxQueue),
+		FallbackQueueWaitMS:       intOrDefault("FALLBACK_QUEUE_WAIT_MS", defaultFallbackQueueWaitMS),
+		CoverRefreshEnabled:       boolOrDefault("COVER_REFRESH_ENABLED", defaultCoverRefreshEnabled),
+		CoverRefreshAfterDays:     intOrDefault("COVER_REFRESH_AFTER_DAYS", defaultCoverRefreshAfterDays),
+		CoverRefreshStartHour:     hourOrDefault("COVER_REFRESH_START_HOUR", defaultCoverRefreshStartHour),
+		CoverRefreshEndHour:       hourOrDefault("COVER_REFRESH_END_HOUR", defaultCoverRefreshEndHour),
+		CoverRefreshMaxRows:       intOrDefault("COVER_REFRESH_MAX_ROWS", defaultCoverRefreshMaxRows),
+		CoverRefreshMaxRecheck:    intOrDefault("COVER_REFRESH_MAX_RECHECK", defaultCoverRefreshMaxRecheck),
+		RequestLogEnabled:         boolOrDefault("REQUEST_LOG_ENABLED", defaultRequestLogEnabled),
+		RequestLogDBPath:          valueOrDefault("REQUEST_LOG_DB_PATH", defaultRequestLogDBPath),
+		RequestLogRetentionDays:   nonNegativeIntOrDefault("REQUEST_LOG_RETENTION_DAYS", defaultRequestLogRetentionDays),
+		RequestLogUAOptimize:      boolOrDefault("REQUEST_LOG_UA_OPTIMIZE", defaultRequestLogUAOptimize),
+		RequestLogUASaveUnknown:   boolOrDefault("REQUEST_LOG_UA_SAVE_UNKNOWN", defaultRequestLogUASaveUnknown),
+		RequestsTodayEnabled:      boolOrDefault("REQUESTS_TODAY_ENABLED", defaultRequestsTodayEnabled),
+		StatsEndpoints:            statsEndpointsOrDefault("STATS_ENDPOINTS", nil),
+		LRCLIBFallbackEnabled:     boolOrDefault("LRCLIB_FALLBACK_ENABLED", defaultLRCLIBFallbackEnabled),
+		LRCLIBBaseURL:             valueOrDefault("LRCLIB_BASE_URL", defaultLRCLIBBaseURL),
+		LRCLIBUserAgent:           valueOrDefault("LRCLIB_USER_AGENT", defaultLRCLIBUserAgent()),
+		LRCLIBTimeoutMS:           intOrDefault("LRCLIB_TIMEOUT_MS", defaultLRCLIBTimeoutMS),
+		RichLyricsEnabled:         boolOrDefault("RICH_LYRICS_ENABLED", defaultRichLyricsEnabled),
+		RichLyricsBaseURL:         valueOrDefault("RICH_LYRICS_BASE_URL", defaultRichLyricsBaseURL),
+		RichLyricsUserAgent:       valueOrDefault("RICH_LYRICS_USER_AGENT", defaultRichLyricsUserAgent()),
+		RichLyricsTimeoutMS:       intOrDefault("RICH_LYRICS_TIMEOUT_MS", defaultRichLyricsTimeoutMS),
+		AppleMusicEnabled:         boolOrDefault("APPLE_MUSIC_ENABLED", defaultAppleMusicEnabled),
+		AppleMusicCatalogBaseURL:  valueOrDefault("APPLE_MUSIC_CATALOG_BASE_URL", defaultAppleMusicCatalogBaseURL),
+		AppleMusicLyricsBaseURL:   valueOrDefault("APPLE_MUSIC_LYRICS_BASE_URL", defaultAppleMusicLyricsBaseURL),
+		AppleMusicStorefront:      valueOrDefault("APPLE_MUSIC_STOREFRONT", defaultAppleMusicStorefront),
+		AppleMusicUserAgent:       valueOrDefault("APPLE_MUSIC_USER_AGENT", defaultMetadataUserAgent()),
+		AppleMusicMediaUserTokens: splitEnv("APPLE_MUSIC_MEDIA_USER_TOKENS"),
+		AppleMusicTimeoutMS:       intOrDefault("APPLE_MUSIC_TIMEOUT_MS", defaultAppleMusicTimeoutMS),
+		MusixmatchEnabled:         boolOrDefault("MUSIXMATCH_ENABLED", defaultMusixmatchEnabled),
+		MusixmatchBaseURL:         valueOrDefault("MUSIXMATCH_BASE_URL", defaultMusixmatchBaseURL),
+		MusixmatchAPIKey:          strings.TrimSpace(os.Getenv("MUSIXMATCH_API_KEY")),
+		MusixmatchUserAgent:       valueOrDefault("MUSIXMATCH_USER_AGENT", defaultMetadataUserAgent()),
+		MusixmatchTimeoutMS:       intOrDefault("MUSIXMATCH_TIMEOUT_MS", defaultMusixmatchTimeoutMS),
+		MetadataFallbackEnabled:   boolOrDefault("METADATA_FALLBACK_ENABLED", defaultMetadataFallbackEnabled),
+		ITunesBaseURL:             valueOrDefault("ITUNES_BASE_URL", defaultITunesBaseURL),
+		DeezerBaseURL:             valueOrDefault("DEEZER_BASE_URL", defaultDeezerBaseURL),
+		MetadataTimeoutMS:         intOrDefault("METADATA_TIMEOUT_MS", defaultMetadataTimeoutMS),
+		MetadataUserAgent:         valueOrDefault("METADATA_USER_AGENT", defaultMetadataUserAgent()),
 
 		CoverDBPath:          valueOrDefault("COVER_DB_PATH", defaultCoverDBPath),
 		CoverFallbackEnabled: boolOrDefault("COVER_FALLBACK_ENABLED", defaultCoverFallbackEnabled),
@@ -259,7 +280,7 @@ func (c Config) Validate() error {
 	if c.RequestLogRetentionDays < 0 {
 		return fmt.Errorf("REQUEST_LOG_RETENTION_DAYS must be zero or positive")
 	}
-	if c.LRCLIBTimeoutMS < 1 || c.RichLyricsTimeoutMS < 1 || c.BetterLyricsTimeoutMS < 1 || c.MetadataTimeoutMS < 1 || c.CoverTimeoutMS < 1 {
+	if c.LRCLIBTimeoutMS < 1 || c.RichLyricsTimeoutMS < 1 || c.AppleMusicTimeoutMS < 1 || c.MusixmatchTimeoutMS < 1 || c.MetadataTimeoutMS < 1 || c.CoverTimeoutMS < 1 {
 		return fmt.Errorf("upstream timeouts must be positive")
 	}
 	if c.PrefetchPerMin < 1 {
@@ -277,16 +298,10 @@ func (c Config) Validate() error {
 	if strings.TrimSpace(c.RichLyricsUserAgent) == "" {
 		return fmt.Errorf("RICH_LYRICS_USER_AGENT must not be empty")
 	}
-	for name, value := range map[string]string{"LRCLIB_BASE_URL": c.LRCLIBBaseURL, "RICH_LYRICS_BASE_URL": c.RichLyricsBaseURL, "ITUNES_BASE_URL": c.ITunesBaseURL, "DEEZER_BASE_URL": c.DeezerBaseURL, "LASTFM_BASE_URL": c.LastfmBaseURL} {
+	for name, value := range map[string]string{"LRCLIB_BASE_URL": c.LRCLIBBaseURL, "RICH_LYRICS_BASE_URL": c.RichLyricsBaseURL, "APPLE_MUSIC_CATALOG_BASE_URL": c.AppleMusicCatalogBaseURL, "APPLE_MUSIC_LYRICS_BASE_URL": c.AppleMusicLyricsBaseURL, "MUSIXMATCH_BASE_URL": c.MusixmatchBaseURL, "ITUNES_BASE_URL": c.ITunesBaseURL, "DEEZER_BASE_URL": c.DeezerBaseURL, "LASTFM_BASE_URL": c.LastfmBaseURL} {
 		baseURL, err := url.Parse(strings.TrimSpace(value))
 		if err != nil || (baseURL.Scheme != "http" && baseURL.Scheme != "https") || baseURL.Host == "" {
 			return fmt.Errorf("%s must be an http or https URL", name)
-		}
-	}
-	if strings.TrimSpace(c.BetterLyricsBaseURL) != "" {
-		baseURL, err := url.Parse(strings.TrimSpace(c.BetterLyricsBaseURL))
-		if err != nil || (baseURL.Scheme != "http" && baseURL.Scheme != "https") || baseURL.Host == "" {
-			return fmt.Errorf("BETTER_LYRICS_BASE_URL must be an http or https URL")
 		}
 	}
 	if strings.TrimSpace(c.MetadataUserAgent) == "" {
@@ -311,6 +326,21 @@ func defaultLRCLIBUserAgent() string {
 	return "music-utils/" + version.Version + " (+https://gru0.dev)"
 }
 
+func splitEnv(name string) []string {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return nil
+	}
+	parts := strings.Split(value, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
 func defaultRichLyricsUserAgent() string {
 	return "music-utils/" + version.Version + " (+https://gru0.dev)"
 }
@@ -326,7 +356,7 @@ func validateEnvironment() error {
 	if err := validateIntEnv("DB_CACHE_SIZE_KB"); err != nil {
 		return err
 	}
-	for _, name := range []string{"DB_MAX_OPEN_CONNS", "RATE_LIMIT_PER_SEC", "RATE_LIMIT_PER_MIN", "FALLBACK_PER_MIN", "FALLBACK_MAX_QUEUE", "FALLBACK_QUEUE_WAIT_MS", "COVER_REFRESH_AFTER_DAYS", "COVER_REFRESH_MAX_ROWS", "COVER_REFRESH_MAX_RECHECK", "LRCLIB_TIMEOUT_MS", "RICH_LYRICS_TIMEOUT_MS", "BETTER_LYRICS_TIMEOUT_MS", "METADATA_TIMEOUT_MS", "COVER_TIMEOUT_MS", "PREFETCH_PER_MIN", "PREFETCH_CONCURRENCY", "PREFETCH_QUEUE_SIZE"} {
+	for _, name := range []string{"DB_MAX_OPEN_CONNS", "RATE_LIMIT_PER_SEC", "RATE_LIMIT_PER_MIN", "FALLBACK_PER_MIN", "FALLBACK_MAX_QUEUE", "FALLBACK_QUEUE_WAIT_MS", "COVER_REFRESH_AFTER_DAYS", "COVER_REFRESH_MAX_ROWS", "COVER_REFRESH_MAX_RECHECK", "LRCLIB_TIMEOUT_MS", "RICH_LYRICS_TIMEOUT_MS", "APPLE_MUSIC_TIMEOUT_MS", "MUSIXMATCH_TIMEOUT_MS", "METADATA_TIMEOUT_MS", "COVER_TIMEOUT_MS", "PREFETCH_PER_MIN", "PREFETCH_CONCURRENCY", "PREFETCH_QUEUE_SIZE"} {
 		if err := validatePositiveIntEnv(name); err != nil {
 			return err
 		}
@@ -340,7 +370,7 @@ func validateEnvironment() error {
 			return fmt.Errorf("REQUEST_LOG_RETENTION_DAYS must be an integer >= -1 (-1 means keep forever)")
 		}
 	}
-	for _, name := range []string{"TRUST_PROXY", "LRCLIB_FALLBACK_ENABLED", "RICH_LYRICS_ENABLED", "BETTER_LYRICS_ENABLED", "METADATA_FALLBACK_ENABLED", "COVER_FALLBACK_ENABLED", "COVER_REFRESH_ENABLED", "REQUEST_LOG_ENABLED", "REQUEST_LOG_UA_OPTIMIZE", "REQUEST_LOG_UA_SAVE_UNKNOWN", "REQUESTS_TODAY_ENABLED", "PREFETCH_ENABLED", "PREFETCH_LYRICS", "PREFETCH_ALBUM_COVER", "PREFETCH_ARTIST_COVER"} {
+	for _, name := range []string{"TRUST_PROXY", "LRCLIB_FALLBACK_ENABLED", "RICH_LYRICS_ENABLED", "APPLE_MUSIC_ENABLED", "MUSIXMATCH_ENABLED", "METADATA_FALLBACK_ENABLED", "COVER_FALLBACK_ENABLED", "COVER_REFRESH_ENABLED", "REQUEST_LOG_ENABLED", "REQUEST_LOG_UA_OPTIMIZE", "REQUEST_LOG_UA_SAVE_UNKNOWN", "REQUESTS_TODAY_ENABLED", "PREFETCH_ENABLED", "PREFETCH_LYRICS", "PREFETCH_ALBUM_COVER", "PREFETCH_ARTIST_COVER"} {
 		if value := strings.TrimSpace(os.Getenv(name)); value != "" {
 			if _, err := strconv.ParseBool(value); err != nil {
 				return fmt.Errorf("%s must be a boolean", name)

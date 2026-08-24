@@ -8,9 +8,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sillygru/music-utils/internal/betterlyrics"
+	"github.com/sillygru/music-utils/internal/applemusic"
 	"github.com/sillygru/music-utils/internal/db"
 	"github.com/sillygru/music-utils/internal/lrclib"
+	"github.com/sillygru/music-utils/internal/musixmatch"
 	"github.com/sillygru/music-utils/internal/names"
 	"github.com/sillygru/music-utils/internal/richlyrics"
 )
@@ -25,10 +26,11 @@ func runParallelLyricsGet(
 	metadataDB, lyricsDB *sql.DB,
 	client *lrclib.Client,
 	richClient *richlyrics.Client,
-	betterClient *betterlyrics.Client,
+	appleClient *applemusic.Client,
+	musixClient *musixmatch.Client,
 	lyricsMisses *lyricsMissCache,
 	fallbacks *fallbackGuard,
-	fallbackEnabled, richEnabled, richRequested bool,
+	fallbackEnabled, richEnabled, appleEnabled, musixEnabled, richRequested bool,
 	clientKey string,
 	existingTrack *db.Track,
 	trackName, artistName, albumName string,
@@ -96,7 +98,7 @@ func runParallelLyricsGet(
 		}()
 	}
 
-	if betterClient != nil {
+	if appleEnabled && appleClient != nil {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -107,22 +109,48 @@ func runParallelLyricsGet(
 				}
 				defer release()
 			}
-			_ = betterClient.Stream(ctx, trackName, artistName, albumName, duration, func(result betterlyrics.Result) {
-				if strings.EqualFold(result.SyncType, "line") && strings.EqualFold(result.Format, "lrc") {
-					remote := &lrclib.RemoteResult{TrackName: trackName, ArtistName: artistName, AlbumName: albumName, Duration: duration, SyncedLyrics: result.Content}
-					track, lyrics, ok := persistRemoteLyrics(ctx, metadataDB, lyricsDB, existingTrack, remote, trackName, artistName, albumName, duration)
-					if ok {
-						publish(lyricsLookupResult{track: track, lyrics: lyrics})
-					}
-					return
-				}
-				track, rich, ok := persistRichContent(ctx, metadataDB, lyricsDB, existingTrack, result.Content, result.Format, result.SyncType, result.Source, trackName, artistName, albumName, duration)
-				if ok {
-					publish(lyricsLookupResult{track: track, rich: rich})
-				}
-			})
+			track, err := appleClient.SearchTrack(ctx, trackName, artistName, albumName, duration)
+			if err != nil {
+				return
+			}
+			remote, err := appleClient.GetLyrics(ctx, track.ID)
+			if err != nil {
+				return
+			}
+			trackRow, rich, ok := persistRemoteRichLyrics(ctx, metadataDB, lyricsDB, existingTrack, &richlyrics.Result{Content: remote.Content, Format: remote.Format, SyncType: remote.SyncType, Source: remote.Source}, track.Name, track.ArtistName, track.AlbumName, track.Duration)
+			if ok {
+				publish(lyricsLookupResult{track: trackRow, rich: rich})
+			}
 		}()
 	}
+
+	if musixEnabled && musixClient != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if fallbacks != nil {
+				release, _, _, ok := fallbacks.acquireFor(ctx, clientKey)
+				if !ok {
+					return
+				}
+				defer release()
+			}
+			track, err := musixClient.SearchTrack(ctx, trackName, artistName, albumName, duration)
+			if err != nil {
+				return
+			}
+			remote, err := musixClient.GetLyrics(ctx, track.CommonTrackID, track.ISRC)
+			if err != nil {
+				return
+			}
+			row := &lrclib.RemoteResult{TrackName: track.Name, ArtistName: track.ArtistName, AlbumName: track.AlbumName, Duration: track.Duration, PlainLyrics: remote.PlainLyrics}
+			trackRow, lyrics, ok := persistRemoteLyrics(ctx, metadataDB, lyricsDB, existingTrack, row, track.Name, track.ArtistName, track.AlbumName, track.Duration)
+			if ok {
+				publish(lyricsLookupResult{track: trackRow, lyrics: lyrics})
+			}
+		}()
+	}
+
 	wg.Wait()
 }
 

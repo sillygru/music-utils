@@ -13,9 +13,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sillygru/music-utils/internal/betterlyrics"
+	"github.com/sillygru/music-utils/internal/applemusic"
 	"github.com/sillygru/music-utils/internal/db"
 	"github.com/sillygru/music-utils/internal/lrclib"
+	"github.com/sillygru/music-utils/internal/musixmatch"
 	"github.com/sillygru/music-utils/internal/names"
 	"github.com/sillygru/music-utils/internal/richlyrics"
 )
@@ -89,6 +90,7 @@ type lyricsResponse struct {
 	SyncedLyrics string          `json:"syncedLyrics,omitempty"`
 	RichSync     *richSyncResult `json:"richSync,omitempty"`
 	Variants     []lyricsVariant `json:"variants,omitempty"`
+	Copyright    string          `json:"copyright,omitempty"`
 }
 
 type lyricsVariant struct {
@@ -112,7 +114,7 @@ type apiError struct {
 	Message string `json:"message"`
 }
 
-func getLyricsHandler(metadataDB, lyricsDB *sql.DB, client *lrclib.Client, richClient *richlyrics.Client, betterClient *betterlyrics.Client, lyricsMisses *lyricsMissCache, fallbacks *fallbackGuard, fallbackEnabled, richEnabled bool, prefetcher *prefetcher) http.HandlerFunc {
+func getLyricsHandler(metadataDB, lyricsDB *sql.DB, client *lrclib.Client, richClient *richlyrics.Client, appleClient *applemusic.Client, musixClient *musixmatch.Client, lyricsMisses *lyricsMissCache, fallbacks *fallbackGuard, fallbackEnabled, richEnabled, appleEnabled, musixEnabled bool, prefetcher *prefetcher) http.HandlerFunc {
 	lookupGroup := newLyricsLookupGroup()
 	return func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
@@ -187,7 +189,7 @@ func getLyricsHandler(metadataDB, lyricsDB *sql.DB, client *lrclib.Client, richC
 		}
 
 		parallelResult := lookupGroup.lookup(r.Context(), missKey, func(ctx context.Context, publish func(lyricsLookupResult)) {
-			runParallelLyricsGet(ctx, publish, metadataDB, lyricsDB, client, richClient, betterClient, lyricsMisses, fallbacks, fallbackEnabled, richEnabled, includeRichSync(r), clientIP(r, false), existingTrack, trackName, artistName, albumName, duration)
+			runParallelLyricsGet(ctx, publish, metadataDB, lyricsDB, client, richClient, appleClient, musixClient, lyricsMisses, fallbacks, fallbackEnabled, richEnabled, appleEnabled, musixEnabled, includeRichSync(r), clientIP(r, false), existingTrack, trackName, artistName, albumName, duration)
 		})
 		if parallelResult.upstream > 0 {
 			setUpstreamDuration(r, parallelResult.upstream)
@@ -419,6 +421,7 @@ func enrichLyricsSearchResponse(r *http.Request, lyricsDB *sql.DB, client *richl
 		return
 	}
 	if !validRichSyncType(remote.SyncType) {
+
 		setRequestIssue(r, slog.LevelWarn, "rich lyrics returned unsupported sync type")
 		return
 	}
@@ -658,6 +661,7 @@ func tryRichOnlyResponse(r *http.Request, metadataDB, lyricsDB *sql.DB, client *
 		return lyricsResponse{}, false
 	}
 	if !validRichSyncType(remote.SyncType) {
+
 		return lyricsResponse{}, false
 	}
 	track := db.Track{
@@ -696,6 +700,11 @@ func tryRichOnlyResponse(r *http.Request, metadataDB, lyricsDB *sql.DB, client *
 
 func enrichLyricsResponse(r *http.Request, track *db.Track, lyrics *db.Lyrics, lyricsDB *sql.DB, client *richlyrics.Client, fallbacks *fallbackGuard, enabled bool) lyricsResponse {
 	response := toLyricsResponse(track, lyrics)
+	if !includeRichSync(r) && track != nil && track.ID > 0 && response.SyncedLyrics == "" {
+		if cached, err := db.FindRichLyrics(r.Context(), lyricsDB, track.ID, ""); err == nil {
+			response.SyncedLyrics = compactRichSyncToLRC(cached)
+		}
+	}
 	if !enabled || client == nil || !includeRichSync(r) || track == nil || track.ID <= 0 {
 		return response
 	}
@@ -742,6 +751,7 @@ func enrichLyricsResponse(r *http.Request, track *db.Track, lyrics *db.Lyrics, l
 		return response
 	}
 	if !validRichSyncType(remote.SyncType) {
+
 		setRequestIssue(r, slog.LevelWarn, "rich lyrics returned unsupported sync type")
 		return response
 	}

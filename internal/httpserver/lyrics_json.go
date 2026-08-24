@@ -31,6 +31,9 @@ func writeLyricsResponseJSON(w io.Writer, res lyricsResponse) error {
 	if res.RichSync != nil {
 		fields = append(fields, renderedField{key: "richSync", body: buildRichSyncObject(*res.RichSync)})
 	}
+	if res.Copyright != "" {
+		appendJSON("copyright", res.Copyright)
+	}
 
 	var b bytes.Buffer
 	b.WriteString("{\n")

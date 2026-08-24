@@ -73,7 +73,7 @@ Full request and response reference is in [`API.md`](API.md).
 
 ## Local-first caching
 
-Metadata and lyrics are stored in independent SQLite files. Metadata and lyrics lookups check their respective local database before making an upstream request.
+Metadata and lyrics are stored in independent SQLite files. Metadata and lyrics lookups check their respective local database before making an upstream request. Lyrics misses can query LRCLIB, direct Apple Music TTML, and official Musixmatch in parallel when enabled; the former aggregation service is no longer used.
 
 Before local or upstream lookup, music names are cleaned consistently across metadata, lyrics, and cover endpoints: known media extensions and downloader/source labels (for example `Official Music Video`, `AMV`, `Visualizer`, `Lyrics`, `Nightcore`, `Hardstyle`, `Sped Up`, and `Slowed`) are removed, and `Artist - Song`/`Artist ｜ Song` filenames can supply a missing artist. Explicit `artist_name` values remain authoritative, and provider-returned canonical names are preserved in responses.
 Successful provider responses are upserted transactionally and subsequent
@@ -116,10 +116,10 @@ cold-lookup latency and has been removed.
 
 - **FTS5 search** — title, artist, album, and genre search over SQLite.
 - **Metadata fallback** — iTunes + Deezer provider chain with local caching.
-- **Lyrics fallback** — LRCLIB exact lookup and cache.
+- **Lyrics providers** — LRCLIB plus optional direct Apple Music TTML and official Musixmatch providers, all cached locally.
 - **Opt-in rich lyrics** — Unison-compatible word/syllable payloads are cached separately and returned alone with `include_rich_sync=true`; unavailable rich lyrics fall back to plain/LRC lyrics.
 - **Rate limiting** — per-client-IP limits with `Retry-After` headers.
-- **Upstream pacing** — every provider (LRCLIB, iTunes, Deezer, Last.fm) is
+- **Upstream pacing** — every provider (LRCLIB, Apple Music, Musixmatch, iTunes, Deezer, Last.fm) is
   paced process-wide to a fixed interval, so no client traffic can exceed a
   provider's rate limit or get the server's IP blocked.
 - **Lyrics negative caching** — LRCLIB misses are memoized in memory for 24
@@ -209,6 +209,16 @@ cold-lookup latency and has been removed.
 | `RICH_LYRICS_BASE_URL` | `https://unison.boidu.dev` | Unison-compatible rich lyrics API base URL. |
 | `RICH_LYRICS_USER_AGENT` | `music-utils/v0.6.0 (+https://gru0.dev)` | Rich lyrics provider User-Agent. |
 | `RICH_LYRICS_TIMEOUT_MS` | `5000` | Rich lyrics provider timeout. |
+| `APPLE_MUSIC_ENABLED` | `false` | Enable direct Apple Music catalog/TTML lookup. |
+| `APPLE_MUSIC_CATALOG_BASE_URL` | `https://api.music.apple.com` | Apple Music catalog API or compliant proxy base URL. |
+| `APPLE_MUSIC_LYRICS_BASE_URL` | `https://api.music.apple.com` | Apple Music lyrics API or compliant proxy base URL. |
+| `APPLE_MUSIC_STOREFRONT` | `us` | Apple Music storefront used for catalog and lyrics requests. |
+| `APPLE_MUSIC_MEDIA_USER_TOKENS` | *(empty)* | Comma-separated media-user tokens when the configured Apple Music endpoint requires them. |
+| `APPLE_MUSIC_TIMEOUT_MS` | `10000` | Apple Music provider timeout. |
+| `MUSIXMATCH_ENABLED` | `false` | Enable the official Musixmatch provider. |
+| `MUSIXMATCH_BASE_URL` | `https://api.musixmatch.com` | Musixmatch API base URL. |
+| `MUSIXMATCH_API_KEY` | *(empty)* | Required when Musixmatch is enabled; obtain and use it under the applicable Musixmatch plan and terms. |
+| `MUSIXMATCH_TIMEOUT_MS` | `10000` | Musixmatch provider timeout. |
 
 ## Database migration
 
@@ -287,6 +297,8 @@ internal/cover/          Last.fm + iTunes + Deezer album/artist cover providers 
 internal/db/             SQLite connections, independent schemas, migration, and queries
 internal/httpserver/     HTTP routes, handlers, middleware, rate limiting, cover refresh job
 internal/lrclib/         LRCLIB upstream client
+internal/applemusic/      Apple Music catalog and TTML lyrics client
+internal/musixmatch/      Official Musixmatch lyrics client
 internal/metadata/       iTunes + Deezer metadata providers and resolver
 internal/pacer/          shared upstream request pacing
 internal/reqlog/         storage-optimized per-request access log database

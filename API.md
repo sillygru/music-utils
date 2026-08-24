@@ -51,7 +51,7 @@ console.log(data.plainLyrics);
 | `GET /api/cover/artist` | Artist cover top result, with provider results included |
 | `GET /api/cover/album` | Album cover top result, with provider results included |
 | `GET /api/lyrics/get` | Exact/top lyrics lookup; returns one object |
-| `GET /api/lyrics/search` | LRCLIB-compatible multi-result lyrics search |
+| `GET /api/lyrics/search` | Multi-result lyrics search across the local catalog and enabled upstream providers |
 | `GET /api/stats/requests-today` | Requests served in the last 24 hours (rolling window, opt-in) |
 | `GET /api/stats/metadata` | Songs with cached metadata (opt-in) |
 | `GET /api/stats/lyrics` | Songs with cached lyrics (opt-in) |
@@ -350,7 +350,7 @@ internal error.
 ## `GET /api/lyrics/get`
 
 Exact lyrics lookup. Serves cached lyrics when available; on a miss it
-consults LRCLIB and caches the result.
+consults enabled lyrics providers (LRCLIB, Apple Music TTML, and/or official Musixmatch) and caches the result.
 
 Query parameters: required `track_name` and `artist_name`; optional
 `album_name`, non-negative `duration`, `include_rich_sync=true`, and optional
@@ -436,7 +436,7 @@ not returned.
 
 Query parameters: `q`, or one or more of `track_name`, `artist_name`,
 `album_name`; optional `limit` from `1–50`, default `20`. `q` is passed to
-LRCLIB's `/api/search`; the server applies the final limit after merging.
+LRCLIB's `/api/search`; the server applies the final limit after merging. Direct provider results are also merged when enabled.
 The optional `include_rich_sync=true` (also accepts `1` or `yes`) enriches
 results with the same opt-in `richSync` object as `/api/lyrics/get`, and
 `sync_type=word|syllable|richsync` selects a cached synchronization variant.

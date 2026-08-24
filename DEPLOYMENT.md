@@ -333,8 +333,11 @@ instance:
    FALLBACK_PER_MIN=60
    FALLBACK_MAX_QUEUE=50
    FALLBACK_QUEUE_WAIT_MS=10000
-   TRUST_PROXY=true
-   # optionally: LRCLIB_FALLBACK_ENABLED=false (serve only cached lyrics)
+   TRUST_PROXY=true    # optionally: LRCLIB_FALLBACK_ENABLED=false (serve only cached lyrics)
+    # optionally enable direct providers with APPLE_MUSIC_ENABLED=true or
+    # MUSIXMATCH_ENABLED=true; keep APPLE_MUSIC_MEDIA_USER_TOKENS and
+    # MUSIXMATCH_API_KEY in the secret manager, never in source control.
+
    ```
 
 3. **Protection that does not depend on IPs:** per-provider pacing is

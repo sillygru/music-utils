@@ -8,7 +8,7 @@ import (
 func TestSearchResponsePreservesDistinctProviderVariants(t *testing.T) {
 	response := lyricsResponse{TrackName: "Song", ArtistName: "Artist", PlainLyrics: "plain"}
 	line := lyricsResponse{TrackName: "Song", ArtistName: "Artist", PlainLyrics: "plain 2", SyncedLyrics: "[00:01.00]line"}
-	rich := lyricsResponse{TrackName: "Song", ArtistName: "Artist", RichSync: &richSyncResult{Source: "better_lyrics_portato", Format: "json", SyncType: "word", Content: "word"}}
+	rich := lyricsResponse{TrackName: "Song", ArtistName: "Artist", RichSync: &richSyncResult{Source: "apple_music", Format: "json", SyncType: "word", Content: "word"}}
 
 	appendLyricsVariant(&response, &response)
 	mergeSearchResponse(&response, &line)
@@ -29,7 +29,7 @@ func TestSearchResponsePreservesDistinctProviderVariants(t *testing.T) {
 	if len(decoded.Variants) != 3 {
 		t.Fatalf("expected three variants after cache round trip, got %d", len(decoded.Variants))
 	}
-	if decoded.Variants[0].Provider != "lrclib" || decoded.Variants[1].Provider != "lrclib" || decoded.Variants[2].Provider != "better_lyrics_portato" {
+	if decoded.Variants[0].Provider != "lrclib" || decoded.Variants[1].Provider != "lrclib" || decoded.Variants[2].Provider != "apple_music" {
 		t.Fatalf("unexpected variants: %+v", decoded.Variants)
 	}
 }
