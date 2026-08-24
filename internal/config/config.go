@@ -138,9 +138,10 @@ type Config struct {
 	PrefetchArtistCover bool
 }
 
-// Load reads configuration from the environment and applies defaults when a
-// setting is not provided or cannot be parsed.
+// Load reads configuration from the environment (and a local .env file if present)
+// and applies defaults when a setting is not provided or cannot be parsed.
 func Load() Config {
+	_ = LoadDotEnv(".env")
 	return Config{
 		Port:                      valueOrDefault("PORT", defaultPort),
 		LogLevel:                  valueOrDefault("LOG_LEVEL", defaultLogLevel),

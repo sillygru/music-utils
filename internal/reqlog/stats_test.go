@@ -2,6 +2,7 @@ package reqlog
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -153,3 +154,40 @@ func TestQueryStatsNonExistentPath(t *testing.T) {
 		t.Fatal("expected error on non-existent path")
 	}
 }
+
+func TestQueryStatsReadOnlyPermissions(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "request_log.db")
+
+	w, err := Open(dbPath, nil, testLogger())
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	w.Log(Record{
+		TS:        time.Now(),
+		Method:    "GET",
+		Endpoint:  "/api/lyrics/get",
+		Status:    200,
+		Outcome:   "local_hit",
+		CacheMs:   4,
+		UserAgent: "test-client",
+	})
+	if err := w.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	// Change file permissions to read-only (0400)
+	if err := os.Chmod(dbPath, 0o400); err != nil {
+		t.Fatalf("chmod 0400: %v", err)
+	}
+	defer func() { _ = os.Chmod(dbPath, 0o600) }()
+
+	report, err := QueryStats(context.Background(), dbPath, StatsOptions{})
+	if err != nil {
+		t.Fatalf("query stats on readonly file failed: %v", err)
+	}
+	if report.TotalRequests != 1 {
+		t.Errorf("expected 1 request, got %d", report.TotalRequests)
+	}
+}
+

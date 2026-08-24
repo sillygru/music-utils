@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"math"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
@@ -146,7 +147,7 @@ func QueryStats(ctx context.Context, dbPath string, opts StatsOptions) (*StatsRe
 		topLimit = 10
 	}
 
-	database, err := sql.Open("sqlite", dsn(dbPath))
+	database, err := sql.Open("sqlite", readOnlyDSN(dbPath))
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite database: %w", err)
 	}
@@ -552,3 +553,19 @@ func SortDaily(daily []DailyStat) {
 		return daily[i].Date < daily[j].Date
 	})
 }
+
+// readOnlyDSN builds a SQLite URI configured for read-only querying without
+// attempting to change journal modes or write to auto-vacuum metadata.
+func readOnlyDSN(path string) string {
+	base := "file:" + url.PathEscape(path)
+	if path == ":memory:" {
+		base = "file::memory:"
+	}
+	return base + "?" + strings.Join([]string{
+		"mode=ro",
+		"_pragma=query_only(ON)",
+		"_pragma=busy_timeout(5000)",
+		"_pragma=temp_store(MEMORY)",
+	}, "&")
+}
+
