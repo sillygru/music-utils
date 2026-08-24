@@ -88,11 +88,14 @@ func newFallbackGuard(cfg config.Config) *fallbackGuard {
 // response. It lets request coalescers reserve budget only for the leader of
 // an identical lookup; waiters share that leader's result and consume nothing.
 func (g *fallbackGuard) acquire(r *http.Request) (release func(), status, retryAfter int, proceed bool) {
-	ip := clientIP(r, g.trustProxy)
-	if allowed, retry := g.budget.allow(ip); !allowed {
+	return g.acquireFor(r.Context(), clientIP(r, g.trustProxy))
+}
+
+func (g *fallbackGuard) acquireFor(ctx context.Context, key string) (release func(), status, retryAfter int, proceed bool) {
+	if allowed, retry := g.budget.allow(key); !allowed {
 		return nil, http.StatusTooManyRequests, retry, false
 	}
-	release, ok := g.gate.acquire(r.Context(), g.queueWait)
+	release, ok := g.gate.acquire(ctx, g.queueWait)
 	if !ok {
 		return nil, http.StatusServiceUnavailable, int(upstreamQueueRetryAfter), false
 	}

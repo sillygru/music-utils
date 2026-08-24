@@ -237,7 +237,7 @@ func TestCoverSearchFreeTextMixed(t *testing.T) {
 
 func TestCoverSearchFreeTextNarrowedByType(t *testing.T) {
 	metadataResolver := metadata.NewResolver(&metadataStubProvider{
-		name: "itunes",
+		name:   "itunes",
 		tracks: []*db.Track{{Name: "Example Song", ArtistName: "Example Artist", CoverURL: "http://img/song.jpg", CoverURLSource: "itunes"}},
 	})
 	coverResolver := cover.NewResolver(&coverStubProvider{

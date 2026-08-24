@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sillygru/music-utils/internal/betterlyrics"
 	"github.com/sillygru/music-utils/internal/config"
 	"github.com/sillygru/music-utils/internal/cover"
 	"github.com/sillygru/music-utils/internal/db"
@@ -142,6 +143,7 @@ func NewWithLogger(cfg config.Config, metadataDB, lyricsDB, coverDB *sql.DB, log
 	}
 	client := newLRCLIBClient(cfg, logger)
 	richClient := newRichLyricsClient(cfg, logger)
+	betterClient := newBetterLyricsClient(cfg, logger)
 	richLyricsMigrationStop := startRichLyricsMigration(lyricsDB, logger)
 	var requestLogs *reqlog.Writer
 	if cfg.RequestLogEnabled {
@@ -198,8 +200,8 @@ func NewWithLogger(cfg config.Config, metadataDB, lyricsDB, coverDB *sql.DB, log
 			mux.HandleFunc("GET "+statsSongsPath, statsSongsHandler(metadataDB))
 		}
 	}
-	mux.HandleFunc("GET /api/lyrics/get", getLyricsHandler(metadataDB, lyricsDB, client, richClient, lyricsMisses, fallbacks, cfg.LRCLIBFallbackEnabled, cfg.RichLyricsEnabled, prefetcher))
-	mux.HandleFunc("GET /api/lyrics/search", searchLyricsHandlerWithUpstream(metadataDB, lyricsDB, client, richClient, fallbacks, cfg.LRCLIBFallbackEnabled, cfg.RichLyricsEnabled))
+	mux.HandleFunc("GET /api/lyrics/get", getLyricsHandler(metadataDB, lyricsDB, client, richClient, betterClient, lyricsMisses, fallbacks, cfg.LRCLIBFallbackEnabled, cfg.RichLyricsEnabled, prefetcher))
+	mux.HandleFunc("GET /api/lyrics/search", searchLyricsHandlerParallel(metadataDB, lyricsDB, client, richClient, fallbacks, cfg.LRCLIBFallbackEnabled, cfg.RichLyricsEnabled))
 	mux.HandleFunc("GET /api/metadata/get", getMetadataHandler(metadataDB, metadataResolver, fallbacks, cfg.MetadataFallbackEnabled, prefetcher))
 	mux.HandleFunc("GET /api/metadata/search", searchMetadataHandlerWithUpstream(metadataDB, metadataResolver, fallbacks, cfg.MetadataFallbackEnabled))
 	mux.HandleFunc("GET /api/cover/get", getCoverTopHandler(metadataDB, coverDB, coverResolver, fallbacks, cfg.CoverFallbackEnabled, prefetcher))
@@ -323,6 +325,18 @@ func startRichLyricsMigration(lyricsDB *sql.DB, logger *slog.Logger) func() {
 		}
 	}()
 	return cancel
+}
+
+func newBetterLyricsClient(cfg config.Config, logger *slog.Logger) *betterlyrics.Client {
+	if !cfg.BetterLyricsEnabled || strings.TrimSpace(cfg.BetterLyricsBaseURL) == "" {
+		return nil
+	}
+	client, err := betterlyrics.New(cfg.BetterLyricsBaseURL, cfg.RichLyricsUserAgent, cfg.BetterLyricsToken, time.Duration(cfg.BetterLyricsTimeoutMS)*time.Millisecond)
+	if err != nil {
+		logger.Error("configure Better Lyrics client", "error", err)
+		return nil
+	}
+	return client
 }
 
 func newRichLyricsClient(cfg config.Config, logger *slog.Logger) *richlyrics.Client {

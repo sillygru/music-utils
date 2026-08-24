@@ -46,7 +46,8 @@ func TestCompactRichSyncContent(t *testing.T) {
 		t.Fatalf("unexpected compact fields: %s", encoded)
 	}
 	lines, ok := decoded["lines"].([]any)
-	if !ok || len(lines) != 1 {			t.Fatalf("unexpected compact lines: %s", encoded)
+	if !ok || len(lines) != 1 {
+		t.Fatalf("unexpected compact lines: %s", encoded)
 	}
 	lineTuple, ok := lines[0].([]any)
 	if !ok || len(lineTuple) != 4 || lineTuple[2] != "I've been so busy," {
