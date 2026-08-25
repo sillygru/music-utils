@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"database/sql"
 	"flag"
 	"fmt"
 	"io"
@@ -12,12 +13,13 @@ import (
 	"unicode/utf8"
 
 	"github.com/sillygru/music-utils/internal/config"
+	"github.com/sillygru/music-utils/internal/db"
 	"github.com/sillygru/music-utils/internal/reqlog"
 )
 
 // RunStats implements `music-utils stats`, which reads the request log SQLite
 // database and prints performance, activity, and traffic statistics formatted
-// in ASCII/Unicode boxes.
+// in ASCII/Unicode boxes, alongside cached catalog counts.
 func RunStats(args []string) int {
 	return RunStatsTo(os.Stdout, os.Stderr, args)
 }
@@ -27,6 +29,9 @@ func RunStatsTo(out, errOut io.Writer, args []string) int {
 	flags := flag.NewFlagSet("stats", flag.ContinueOnError)
 	flags.SetOutput(errOut)
 	dbPath := flags.String("db", "", "request log database path (defaults to REQUEST_LOG_DB_PATH)")
+	metadataPath := flags.String("metadata", "", "metadata database path (defaults to METADATA_DB_PATH)")
+	lyricsPath := flags.String("lyrics", "", "lyrics database path (defaults to LYRICS_DB_PATH)")
+	coverPath := flags.String("cover", "", "cover database path (defaults to COVER_DB_PATH)")
 	days := flags.Int("days", 14, "number of days for daily activity histogram")
 	top := flags.Int("top", 10, "number of top endpoints and user agents to show")
 
@@ -38,6 +43,15 @@ func RunStatsTo(out, errOut io.Writer, args []string) int {
 	if strings.TrimSpace(*dbPath) == "" {
 		*dbPath = cfg.RequestLogDBPath
 	}
+	if strings.TrimSpace(*metadataPath) == "" {
+		*metadataPath = cfg.MetadataDBPath
+	}
+	if strings.TrimSpace(*lyricsPath) == "" {
+		*lyricsPath = cfg.LyricsDBPath
+	}
+	if strings.TrimSpace(*coverPath) == "" {
+		*coverPath = cfg.CoverDBPath
+	}
 
 	if _, err := os.Stat(*dbPath); err != nil {
 		fmt.Fprintf(errOut, "stats: cannot open database %s: %v\n", *dbPath, err)
@@ -46,6 +60,34 @@ func RunStatsTo(out, errOut io.Writer, args []string) int {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
+
+	var metadataDB, lyricsDB, coverDB *sql.DB
+	dbCfg := db.Config{
+		MmapSize:     64 * 1024 * 1024,
+		CacheSizeKB:  -8000,
+		MaxOpenConns: 1,
+	}
+
+	if _, err := os.Stat(*metadataPath); err == nil {
+		if mDB, err := db.Open(*metadataPath, dbCfg); err == nil {
+			metadataDB = mDB
+			defer metadataDB.Close()
+		}
+	}
+	if _, err := os.Stat(*lyricsPath); err == nil {
+		if lDB, err := db.Open(*lyricsPath, dbCfg); err == nil {
+			lyricsDB = lDB
+			defer lyricsDB.Close()
+		}
+	}
+	if _, err := os.Stat(*coverPath); err == nil {
+		if cDB, err := db.Open(*coverPath, dbCfg); err == nil {
+			coverDB = cDB
+			defer coverDB.Close()
+		}
+	}
+
+	cacheStats, _ := db.GetCacheStats(ctx, metadataDB, lyricsDB, coverDB)
 
 	report, err := reqlog.QueryStats(ctx, *dbPath, reqlog.StatsOptions{
 		DailyDays: *days,
@@ -56,19 +98,27 @@ func RunStatsTo(out, errOut io.Writer, args []string) int {
 		return 1
 	}
 
-	renderStatsReport(out, report)
+	renderStatsReport(out, report, &cacheStats)
 	return 0
 }
 
 const totalBoxWidth = 82
 
-func renderStatsReport(w io.Writer, r *reqlog.StatsReport) {
+func renderStatsReport(w io.Writer, r *reqlog.StatsReport, c *db.CacheStats) {
 	if r.TotalRequests == 0 {
 		renderEmptyBox(w, r)
+		if c != nil {
+			fmt.Fprintln(w)
+			renderCachedContentBox(w, c)
+		}
 		return
 	}
 
 	renderOverviewBox(w, r)
+	if c != nil {
+		fmt.Fprintln(w)
+		renderCachedContentBox(w, c)
+	}
 	fmt.Fprintln(w)
 	renderWindowsBox(w, r)
 	if len(r.Daily) > 0 {
@@ -83,6 +133,23 @@ func renderStatsReport(w io.Writer, r *reqlog.StatsReport) {
 		fmt.Fprintln(w)
 		renderBreakdownsBox(w, r)
 	}
+}
+
+func renderCachedContentBox(w io.Writer, c *db.CacheStats) {
+	printHeaderWithTitle(w, "CACHED CONTENT", totalBoxWidth)
+	printBoxLine(w, fmt.Sprintf("Unique Songs:       %10s individual songs", formatNumber(c.UniqueSongs)), totalBoxWidth)
+	printBoxLine(w, fmt.Sprintf("Total Cached:       %10s items", formatNumber(c.TotalCached)), totalBoxWidth)
+	printBoxDivider(w, totalBoxWidth)
+	printBoxLine(w, "CACHE BREAKDOWN:", totalBoxWidth)
+	printBoxLine(w, fmt.Sprintf("  • Song Metadata:  %10s songs", formatNumber(c.MetadataSongs)), totalBoxWidth)
+	printBoxLine(w, fmt.Sprintf("  • Song Lyrics:    %10s songs", formatNumber(c.LyricsSongs)), totalBoxWidth)
+	printBoxLine(w, fmt.Sprintf("  • Song Covers:    %10s songs", formatNumber(c.SongCovers)), totalBoxWidth)
+	if c.AlbumCovers > 0 || c.ArtistCovers > 0 {
+		printBoxLine(w, fmt.Sprintf("  • Album Covers:   %10s covers", formatNumber(c.AlbumCovers)), totalBoxWidth)
+		printBoxLine(w, fmt.Sprintf("  • Artist Covers:  %10s covers", formatNumber(c.ArtistCovers)), totalBoxWidth)
+		printBoxLine(w, fmt.Sprintf("  • Total Covers:   %10s covers", formatNumber(c.TotalCovers)), totalBoxWidth)
+	}
+	printBoxBottom(w, totalBoxWidth)
 }
 
 func renderEmptyBox(w io.Writer, r *reqlog.StatsReport) {

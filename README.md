@@ -264,19 +264,20 @@ operational data (timestamps, client params, latency) and is likewise never
 exported. Cover URLs can rotate at their CDNs, so treat a cover dump as a
 cache seed, not a permanent store.
 
-## Request stats
+## Request & cache stats
 
-`music-utils stats` (or `go run ./cmd/server stats`) reads the operational
-request log database and prints request volume, performance percentiles,
-activity windows (24h, 7d, 30d, all-time), daily histograms, top endpoints,
-and client User-Agents formatted in ASCII/Unicode boxes:
+`music-utils stats` (or `go run ./cmd/server stats`) reads the SQLite databases
+and prints cached content inventory (unique individual songs, total cached items,
+and breakdowns of song metadata, lyrics, and covers) alongside operational
+request performance percentiles, activity windows (24h, 7d, 30d, all-time),
+daily histograms, top endpoints, and client User-Agents in ASCII/Unicode boxes:
 
 ```sh
-# Inspect the default request log database (REQUEST_LOG_DB_PATH)
+# Inspect the default databases (REQUEST_LOG_DB_PATH, METADATA_DB_PATH, LYRICS_DB_PATH, COVER_DB_PATH)
 go run ./cmd/server stats
 
-# Or point at a custom database path with custom daily window and top list size:
-./bin/music-utils stats -db ./data/request_log.db -days 30 -top 15
+# Or point at custom database paths with custom daily window and top list size:
+./bin/music-utils stats -db ./data/request_log.db -metadata ./data/metadata.db -lyrics ./data/lyrics.db -cover ./data/cover.db -days 30 -top 15
 ```
 
 ## Running a public instance

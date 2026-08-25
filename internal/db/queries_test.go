@@ -236,3 +236,78 @@ func TestCountHelpersRequireDatabase(t *testing.T) {
 		t.Fatal("expected CountCovers(nil, nil) to fail")
 	}
 }
+
+func TestGetCacheStats(t *testing.T) {
+	metadataDB, lyricsDB := testDatabases(t)
+	coverDB, err := Open(":memory:", Config{MmapSize: 512 * 1024 * 1024, CacheSizeKB: -64000, MaxOpenConns: 1})
+	if err != nil {
+		t.Fatalf("open cover test database: %v", err)
+	}
+	t.Cleanup(func() { _ = coverDB.Close() })
+	ctx := context.Background()
+	if err := MigrateCover(ctx, coverDB); err != nil {
+		t.Fatalf("migrate cover test database: %v", err)
+	}
+
+	// Empty databases
+	stats, err := GetCacheStats(ctx, metadataDB, lyricsDB, coverDB)
+	if err != nil {
+		t.Fatalf("get cache stats on empty: %v", err)
+	}
+	if stats.MetadataSongs != 0 || stats.LyricsSongs != 0 || stats.SongCovers != 0 || stats.AlbumCovers != 0 || stats.ArtistCovers != 0 || stats.TotalCovers != 0 || stats.UniqueSongs != 0 || stats.TotalCached != 0 {
+		t.Fatalf("expected all zeros, got %+v", stats)
+	}
+
+	// Insert test data
+	tracks := []Track{
+		{Name: "Song One", ArtistName: "Artist A", AlbumName: "Album A", Duration: 200, CoverURL: "http://cover/1"},
+		{Name: "song one", ArtistName: "Artist B", AlbumName: "Album B", Duration: 210, CoverURL: "http://cover/2"},
+		{Name: "Song Two", ArtistName: "Artist A", AlbumName: "Album A", Duration: 180},
+	}
+	for i, track := range tracks {
+		if i < 2 {
+			_, _, err = InsertTrackWithLyrics(ctx, metadataDB, lyricsDB, track, Lyrics{PlainLyrics: "lyrics text"})
+		} else {
+			_, err = UpsertTrackMetadata(ctx, metadataDB, track)
+		}
+		if err != nil {
+			t.Fatalf("insert track %d: %v", i, err)
+		}
+	}
+	if err := UpsertCoverArt(ctx, coverDB, CoverAlbum, "Artist A", "Album A", "http://cover/album", "deezer"); err != nil {
+		t.Fatalf("insert album cover: %v", err)
+	}
+	if err := UpsertCoverArt(ctx, coverDB, CoverArtist, "Artist A", "", "http://cover/artist", "deezer"); err != nil {
+		t.Fatalf("insert artist cover: %v", err)
+	}
+
+	stats, err = GetCacheStats(ctx, metadataDB, lyricsDB, coverDB)
+	if err != nil {
+		t.Fatalf("get cache stats: %v", err)
+	}
+	if stats.MetadataSongs != 3 {
+		t.Errorf("expected MetadataSongs=3, got %d", stats.MetadataSongs)
+	}
+	if stats.UniqueSongs != 2 {
+		t.Errorf("expected UniqueSongs=2, got %d", stats.UniqueSongs)
+	}
+	if stats.LyricsSongs != 2 {
+		t.Errorf("expected LyricsSongs=2, got %d", stats.LyricsSongs)
+	}
+	if stats.SongCovers != 2 {
+		t.Errorf("expected SongCovers=2, got %d", stats.SongCovers)
+	}
+	if stats.AlbumCovers != 1 {
+		t.Errorf("expected AlbumCovers=1, got %d", stats.AlbumCovers)
+	}
+	if stats.ArtistCovers != 1 {
+		t.Errorf("expected ArtistCovers=1, got %d", stats.ArtistCovers)
+	}
+	if stats.TotalCovers != 4 {
+		t.Errorf("expected TotalCovers=4, got %d", stats.TotalCovers)
+	}
+	// TotalCached = MetadataSongs (3) + LyricsSongs (2) + TotalCovers (4) = 9
+	if stats.TotalCached != 9 {
+		t.Errorf("expected TotalCached=9, got %d", stats.TotalCached)
+	}
+}

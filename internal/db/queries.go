@@ -513,6 +513,69 @@ func SearchTracks(ctx context.Context, metadataDB, lyricsDB *sql.DB, query strin
 	return result, nil
 }
 
+// CacheStats holds the complete breakdown of cached content counts across
+// metadata, lyrics, and cover databases.
+type CacheStats struct {
+	MetadataSongs int64
+	LyricsSongs   int64
+	SongCovers    int64
+	AlbumCovers   int64
+	ArtistCovers  int64
+	TotalCovers   int64
+	UniqueSongs   int64
+	TotalCached   int64
+}
+
+// GetCacheStats computes the aggregated cache statistics across metadata, lyrics,
+// and cover databases.
+func GetCacheStats(ctx context.Context, metadataDB, lyricsDB, coverDB *sql.DB) (CacheStats, error) {
+	var stats CacheStats
+	if metadataDB != nil {
+		if count, err := CountTracks(ctx, metadataDB); err == nil {
+			stats.MetadataSongs = count
+		} else if !isNoSuchTable(err) {
+			return stats, err
+		}
+		if count, err := CountDistinctTrackNames(ctx, metadataDB); err == nil {
+			stats.UniqueSongs = count
+		} else if !isNoSuchTable(err) {
+			return stats, err
+		}
+		if counts, err := CountCovers(ctx, metadataDB, coverDB); err == nil {
+			stats.SongCovers = counts.Songs
+			stats.AlbumCovers = counts.Albums
+			stats.ArtistCovers = counts.Artists
+			stats.TotalCovers = counts.Total()
+		} else if !isNoSuchTable(err) {
+			return stats, err
+		}
+	} else if coverDB != nil {
+		if counts, err := CountCovers(ctx, nil, coverDB); err == nil {
+			stats.AlbumCovers = counts.Albums
+			stats.ArtistCovers = counts.Artists
+			stats.TotalCovers = counts.Total()
+		} else if !isNoSuchTable(err) {
+			return stats, err
+		}
+	}
+	if lyricsDB != nil {
+		if count, err := CountLyricsTracks(ctx, lyricsDB); err == nil {
+			stats.LyricsSongs = count
+		} else if !isNoSuchTable(err) {
+			return stats, err
+		}
+	}
+	stats.TotalCached = stats.MetadataSongs + stats.LyricsSongs + stats.TotalCovers
+	return stats, nil
+}
+
+func isNoSuchTable(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "no such table")
+}
+
 // CoverCounts breaks down cached cover entries by what they cover. Songs come
 // from the metadata cache (a track with a cover URL), albums and artists from
 // the dedicated cover URL cache.
@@ -549,10 +612,15 @@ func CountLyricsTracks(ctx context.Context, database *sql.DB) (int64, error) {
 // URL cache. Negative cache rows (a checked miss with an empty URL) are not
 // counted. A nil coverDB leaves the album and artist counts at zero.
 func CountCovers(ctx context.Context, metadataDB, coverDB *sql.DB) (CoverCounts, error) {
+	if metadataDB == nil && coverDB == nil {
+		return CoverCounts{}, fmt.Errorf("count covers: %w", errors.New("database is nil"))
+	}
 	var counts CoverCounts
 	var err error
-	if counts.Songs, err = countQuery(ctx, metadataDB, `SELECT COUNT(*) FROM tracks WHERE cover_url IS NOT NULL AND cover_url <> ''`, "count song covers"); err != nil {
-		return CoverCounts{}, err
+	if metadataDB != nil {
+		if counts.Songs, err = countQuery(ctx, metadataDB, `SELECT COUNT(*) FROM tracks WHERE cover_url IS NOT NULL AND cover_url <> ''`, "count song covers"); err != nil {
+			return CoverCounts{}, err
+		}
 	}
 	if coverDB != nil {
 		if counts.Albums, err = countQuery(ctx, coverDB, `SELECT COUNT(*) FROM cover_urls WHERE entity_type = 'album' AND cover_url IS NOT NULL AND cover_url <> ''`, "count album covers"); err != nil {
