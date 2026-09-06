@@ -26,7 +26,7 @@ func TestClientSearchAndLyrics(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	track, err := client.SearchTrack(context.Background(), "Song", "Artist", "Album", 200)
+	track, err := client.SearchTrack(context.Background(), "Song", "Artist", "Album")
 	if err != nil || track.ID != "42" {
 		t.Fatalf("track=%+v err=%v", track, err)
 	}

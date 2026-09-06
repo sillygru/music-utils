@@ -14,8 +14,11 @@ func TestClientGetUnisonEnvelope(t *testing.T) {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
 		query := r.URL.Query()
-		if query.Get("song") != "Example Song" || query.Get("artist") != "Example Artist" || query.Get("album") != "Example Album" || query.Get("duration") != "203.5" {
+		if query.Get("song") != "Example Song" || query.Get("artist") != "Example Artist" || query.Get("album") != "Example Album" {
 			t.Fatalf("unexpected query: %v", query)
+		}
+		if _, ok := query["duration"]; ok {
+			t.Fatalf("duration must never be sent upstream: %v", query)
 		}
 		if r.Header.Get("User-Agent") != "test-agent" {
 			t.Fatalf("unexpected user agent: %q", r.Header.Get("User-Agent"))
@@ -29,7 +32,7 @@ func TestClientGetUnisonEnvelope(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create client: %v", err)
 	}
-	result, err := client.Get(context.Background(), "Example Song", "Example Artist", "Example Album", 203.5)
+	result, err := client.Get(context.Background(), "Example Song", "Example Artist", "Example Album")
 	if err != nil {
 		t.Fatalf("get rich lyrics: %v", err)
 	}
@@ -53,11 +56,11 @@ func TestClientGetDirectPayloadAndMiss(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create client: %v", err)
 	}
-	result, err := client.Get(context.Background(), "Song", "Artist", "", 0)
+	result, err := client.Get(context.Background(), "Song", "Artist", "")
 	if err != nil || result.SyncType != "syllable" || result.Format != "lrc" {
 		t.Fatalf("unexpected direct result: %+v, %v", result, err)
 	}
-	if _, err := client.Get(context.Background(), "Missing", "Artist", "", 0); err != ErrNotFound {
+	if _, err := client.Get(context.Background(), "Missing", "Artist", ""); err != ErrNotFound {
 		t.Fatalf("expected ErrNotFound, got %v", err)
 	}
 }

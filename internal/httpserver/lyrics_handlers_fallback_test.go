@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -287,5 +288,93 @@ func TestGetLyricsFallbackTimeoutReturnsNotFound(t *testing.T) {
 	}
 	if time.Since(started) > time.Second {
 		t.Fatal("timeout fallback took too long")
+	}
+}
+
+func TestGetLyricsStrictThenCachedArtistAlbumFallback(t *testing.T) {
+	var mu sync.Mutex
+	var getQueries []url.Values
+	var searchQueries []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query := r.URL.Query()
+		// Duration and any other metadata must never reach upstream.
+		if _, ok := query["duration"]; ok {
+			t.Errorf("duration must never be sent upstream: %v", query)
+		}
+		switch r.URL.Path {
+		case "/api/get":
+			mu.Lock()
+			getQueries = append(getQueries, query)
+			mu.Unlock()
+			if query.Get("track_name") == "Fallback Song" && query.Get("artist_name") == "Fallback Artist" {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"trackName":"Fallback Song","artistName":"Fallback Artist","albumName":"Fallback Album","duration":200,"instrumental":false,"plainLyrics":"fallback lyrics","syncedLyrics":""}`))
+				return
+			}
+			http.NotFound(w, r)
+		case "/api/search":
+			mu.Lock()
+			searchQueries = append(searchQueries, query.Get("q"))
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[]`))
+		default:
+			t.Errorf("unexpected upstream path: %s", r.URL.Path)
+		}
+	}))
+	defer upstream.Close()
+
+	metadataDB, lyricsDB := testHTTPDatabases(t)
+	// Metadata-only row (no lyrics): provides the cached artist/album for the
+	// fallback retry without serving a local hit.
+	if _, err := db.UpsertTrackMetadata(context.Background(), metadataDB, db.Track{
+		Name: "Fallback Song", ArtistName: "Fallback Artist", AlbumName: "Fallback Album", Duration: 200, Source: "test",
+	}); err != nil {
+		t.Fatalf("seed metadata: %v", err)
+	}
+	server := NewWithConfig(fallbackConfig(upstream.URL+"/api"), metadataDB, lyricsDB)
+	cleanupHTTPServer(t, server)
+
+	// Track-only request: strict title-only search first, then an exact get
+	// with artist/album backfilled from cached metadata.
+	response := performRequest(t, server.Handler, "/api/lyrics/get?track_name=Fallback+Song")
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected fallback 200, got %d: %s", response.Code, response.Body.String())
+	}
+	var got lyricsResponse
+	if err := json.NewDecoder(response.Body).Decode(&got); err != nil {
+		t.Fatalf("decode fallback response: %v", err)
+	}
+	if got.PlainLyrics != "fallback lyrics" {
+		t.Fatalf("unexpected fallback response: %+v", got)
+	}
+	mu.Lock()
+	if len(searchQueries) != 1 || searchQueries[0] != "Fallback Song" {
+		mu.Unlock()
+		t.Fatalf("expected one strict title-only search, got %v", searchQueries)
+	}
+	if len(getQueries) != 1 {
+		mu.Unlock()
+		t.Fatalf("expected one exact get, got %v", getQueries)
+	}
+	if getQueries[0].Get("artist_name") != "Fallback Artist" || getQueries[0].Get("album_name") != "Fallback Album" {
+		mu.Unlock()
+		t.Fatalf("expected exact get with cached artist/album, got %v", getQueries[0])
+	}
+	phaseOneGets := len(getQueries)
+	mu.Unlock()
+
+	// A user-provided artist is authoritative: the fallback must fill only the
+	// blank album and must never replace the artist, so this stays a miss.
+	miss := performRequest(t, server.Handler, "/api/lyrics/get?track_name=Fallback+Song&artist_name=Wrong+Artist")
+	if miss.Code != http.StatusNotFound {
+		t.Fatalf("expected miss 404, got %d: %s", miss.Code, miss.Body.String())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, q := range getQueries[phaseOneGets:] {
+		if q.Get("artist_name") != "Wrong Artist" {
+			t.Fatalf("user-provided artist was overwritten upstream: %v", q)
+		}
 	}
 }

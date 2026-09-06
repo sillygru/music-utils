@@ -227,14 +227,16 @@ func (p *prefetcher) prefetchLyrics(ctx context.Context, job prefetchJob) {
 	if !errors.Is(err, sql.ErrNoRows) {
 		return
 	}
-	missKey := lyricsMissKey(job.trackName, job.artistName, job.albumName, job.duration)
+	missKey := lyricsMissKey(job.trackName, job.artistName, job.albumName)
 	if p.lyricsMisses.Has(missKey, time.Now()) {
 		return
 	}
 	if !p.allow() {
 		return
 	}
-	remote, remoteErr := lookupRemoteLyrics(ctx, p.lrclibClient, job.trackName, job.artistName, job.albumName, job.duration)
+	// Strictly the queued identity (title/artist/album only): duration is
+	// local-cache context, never an upstream filter.
+	remote, remoteErr := lookupRemoteLyrics(ctx, p.lrclibClient, job.trackName, job.artistName, job.albumName)
 	if remoteErr != nil {
 		// Memoize genuine misses so the budget is not spent on them again for
 		// the TTL window. Artist-less lookups resolve through search and are not
@@ -347,6 +349,5 @@ func (p *prefetcher) prefetchArtistCover(ctx context.Context, job prefetchJob) {
 func prefetchJobKey(job prefetchJob) string {
 	return strings.ToLower(strings.TrimSpace(job.trackName)) + "\x00" +
 		strings.ToLower(strings.TrimSpace(job.artistName)) + "\x00" +
-		strings.ToLower(strings.TrimSpace(job.albumName)) + "\x00" +
-		lyricsMissDurationBucket(job.duration)
+		strings.ToLower(strings.TrimSpace(job.albumName))
 }

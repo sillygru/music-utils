@@ -44,8 +44,11 @@ func TestGetExact(t *testing.T) {
 			t.Fatalf("unexpected user agent: %q", got)
 		}
 		query := r.URL.Query()
-		if query.Get("track_name") != "Track Name" || query.Get("artist_name") != "Artist" || query.Get("album_name") != "Album" || query.Get("duration") != "123.5" {
+		if query.Get("track_name") != "Track Name" || query.Get("artist_name") != "Artist" || query.Get("album_name") != "Album" {
 			t.Fatalf("unexpected query: %v", query)
+		}
+		if _, ok := query["duration"]; ok {
+			t.Fatalf("duration must never be sent upstream: %v", query)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"trackName":"Track Name","artistName":"Artist","albumName":"Album","duration":123.5,"instrumental":false,"plainLyrics":"lyrics","syncedLyrics":"[00:01]lyrics"}`))
@@ -56,7 +59,7 @@ func TestGetExact(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
-	result, err := client.GetExact(context.Background(), "Nightcore - Track Name (Official Music Video).mp3", "Artist", "Album (Official Audio)", 123.5)
+	result, err := client.GetExact(context.Background(), "Nightcore - Track Name (Official Music Video).mp3", "Artist", "Album (Official Audio)")
 	if err != nil {
 		t.Fatalf("get exact: %v", err)
 	}
@@ -72,7 +75,7 @@ func TestGetExactNotFound(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
-	_, err = client.GetExact(context.Background(), "Track", "Artist", "", 0)
+	_, err = client.GetExact(context.Background(), "Track", "Artist", "")
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected ErrNotFound, got %v", err)
 	}

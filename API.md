@@ -354,7 +354,12 @@ consults enabled lyrics providers (LRCLIB, Apple Music TTML, and/or official Mus
 
 Query parameters: required `track_name` and `artist_name`; optional
 `album_name`, non-negative `duration`, `include_rich_sync=true`, and optional
-`sync_type=word|syllable|richsync`. Without `include_rich_sync=true`, the
+`sync_type=word|syllable|richsync`. Upstream lyrics providers receive at most
+`track_name`, `artist_name`, and `album_name`: `duration` is used only for
+local cache matching and is never forwarded. When `artist_name`/`album_name`
+are omitted, the server first queries providers with exactly what was
+supplied and only retries once with artist/album backfilled from cached
+metadata if that finds nothing. Without `include_rich_sync=true`, the
 response contains the available plain and/or line-synchronized lyrics. With
 `include_rich_sync=true`, the server first tries an additional
 Unison-compatible lookup; a successful rich lookup returns only `richSync`,

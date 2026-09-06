@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
@@ -100,7 +99,10 @@ func (c *Client) Search(ctx context.Context, query string) ([]RemoteResult, erro
 }
 
 // GetExact performs one request and returns ErrNotFound for a remote 404.
-func (c *Client) GetExact(ctx context.Context, trackName, artistName, albumName string, duration float64) (*RemoteResult, error) {
+// Only title, artist, and album are ever sent: duration and all other
+// metadata are deliberately excluded so a duration mismatch can never filter
+// out the correct recording upstream.
+func (c *Client) GetExact(ctx context.Context, trackName, artistName, albumName string) (*RemoteResult, error) {
 	input := names.Normalize(trackName, artistName, albumName)
 	trackName, artistName, albumName = input.TrackName, input.ArtistName, input.AlbumName
 	if c == nil || c.http == nil {
@@ -115,9 +117,6 @@ func (c *Client) GetExact(ctx context.Context, trackName, artistName, albumName 
 	query.Set("artist_name", artistName)
 	if strings.TrimSpace(albumName) != "" {
 		query.Set("album_name", albumName)
-	}
-	if duration > 0 {
-		query.Set("duration", strconv.FormatFloat(duration, 'f', -1, 64))
 	}
 	endpoint.RawQuery = query.Encode()
 

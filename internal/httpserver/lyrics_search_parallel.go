@@ -221,7 +221,7 @@ func runParallelLyricsSearch(
 					}
 					defer release()
 				}
-				remote, err := richClient.Get(ctx, current[index].TrackName, current[index].ArtistName, current[index].AlbumName, current[index].Duration)
+				remote, err := richClient.Get(ctx, current[index].TrackName, current[index].ArtistName, current[index].AlbumName)
 				if err != nil || !validRichSyncType(remote.SyncType) {
 					return
 				}

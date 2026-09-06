@@ -62,11 +62,13 @@ func New(catalogBaseURL, lyricsBaseURL, storefront, userAgent string, mediaToken
 	}, nil
 }
 
-// SearchTrack resolves a track through the Apple Music catalog. The catalog
-// path and response shape are compatible with Apple Music's public catalog
-// search API; a developer token is required when the configured endpoint needs
-// authentication.
-func (c *Client) SearchTrack(ctx context.Context, trackName, artistName, albumName string, duration float64) (*Track, error) {
+// SearchTrack resolves a track through the Apple Music catalog. Only title,
+// artist, and album influence the match: duration and all other metadata are
+// deliberately excluded so a duration mismatch can never skew the choice
+// upstream. The catalog path and response shape are compatible with Apple
+// Music's public catalog search API; a developer token is required when the
+// configured endpoint needs authentication.
+func (c *Client) SearchTrack(ctx context.Context, trackName, artistName, albumName string) (*Track, error) {
 	if c == nil || c.http == nil {
 		return nil, errors.New("Apple Music client is nil")
 	}
@@ -84,7 +86,7 @@ func (c *Client) SearchTrack(ctx context.Context, trackName, artistName, albumNa
 	if err := c.doJSON(ctx, endpoint.String(), &response); err != nil {
 		return nil, err
 	}
-	best := chooseTrack(response.Results.Songs.Data, input, duration)
+	best := chooseTrack(response.Results.Songs.Data, input)
 	if best == nil {
 		return nil, ErrNotFound
 	}
@@ -188,7 +190,7 @@ func chooseTrack(items []struct {
 		DurationMS float64 `json:"durationInMillis"`
 		ISRC       string  `json:"isrc"`
 	} `json:"attributes"`
-}, input names.Input, duration float64) *Track {
+}, input names.Input) *Track {
 	var best *Track
 	bestScore := -1.0
 	for _, item := range items {
@@ -196,13 +198,6 @@ func chooseTrack(items []struct {
 		score := similarityScore(candidate.TrackName, input.TrackName)*3 + similarityScore(candidate.ArtistName, input.ArtistName)*3
 		if input.AlbumName != "" {
 			score += similarityScore(candidate.AlbumName, input.AlbumName)
-		}
-		if duration > 0 && item.Attributes.DurationMS > 0 {
-			diff := item.Attributes.DurationMS/1000 - duration
-			if diff < 0 {
-				diff = -diff
-			}
-			score += 1 / (1 + diff)
 		}
 		if score > bestScore {
 			bestScore = score

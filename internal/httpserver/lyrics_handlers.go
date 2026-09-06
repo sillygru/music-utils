@@ -165,62 +165,128 @@ func getLyricsHandler(metadataDB, lyricsDB *sql.DB, client *lrclib.Client, richC
 			return
 		}
 
-		missKey := lyricsMissKey(trackName, artistName, albumName, duration)
-		if lyricsMisses.Has(missKey, time.Now()) {
-			if richResponse, ok := tryRichOnlyResponse(r, metadataDB, lyricsDB, richClient, fallbacks, richEnabled, existingTrack, trackName, artistName, albumName, duration); ok {
-				setOutcome(r, "rich_lyrics_fallback_hit")
-				writeJSON(w, http.StatusOK, richResponse)
-				return
+		// resolveUpstream runs the full miss path for one identity: memoized-miss
+		// check, rich-only attempt, then the parallel provider fan-out. The
+		// identity is used exactly as given: callers pass strictly
+		// user-provided values first and only retry with cached artist/album
+		// when that fails. It reports whether the request was served; miss is
+		// true only for a genuine miss (never for rate limiting or an
+		// upstream-busy response, which are terminal).
+		resolveUpstream := func(lookupTrack, lookupArtist, lookupAlbum string, existing *db.Track) (served, miss bool) {
+			missKey := lyricsMissKey(lookupTrack, lookupArtist, lookupAlbum)
+			if lyricsMisses.Has(missKey, time.Now()) {
+				if richResponse, ok := tryRichOnlyResponse(r, metadataDB, lyricsDB, richClient, fallbacks, richEnabled, existing, lookupTrack, lookupArtist, lookupAlbum, duration); ok {
+					setOutcome(r, "rich_lyrics_fallback_hit")
+					writeJSON(w, http.StatusOK, richResponse)
+					return true, false
+				}
+				return false, true
 			}
+
+			if !fallbackEnabled || client == nil {
+				if richResponse, ok := tryRichOnlyResponse(r, metadataDB, lyricsDB, richClient, fallbacks, richEnabled, existing, lookupTrack, lookupArtist, lookupAlbum, duration); ok {
+					setOutcome(r, "rich_lyrics_fallback_hit")
+					writeJSON(w, http.StatusOK, richResponse)
+					return true, false
+				}
+				return false, true
+			}
+
+			parallelResult := lookupGroup.lookup(r.Context(), missKey, func(ctx context.Context, publish func(lyricsLookupResult)) {
+				runParallelLyricsGet(ctx, publish, metadataDB, lyricsDB, client, richClient, appleClient, musixClient, lyricsMisses, fallbacks, fallbackEnabled, richEnabled, appleEnabled, musixEnabled, includeRichSync(r), clientIP(r, false), existing, lookupTrack, lookupArtist, lookupAlbum, duration)
+			})
+			if parallelResult.upstream > 0 {
+				setUpstreamDuration(r, parallelResult.upstream)
+			}
+			if parallelResult.status == http.StatusTooManyRequests {
+				setOutcome(r, "rate_limited")
+				writeRateLimitResponse(w, parallelResult.retry)
+				return true, false
+			}
+			if parallelResult.status == http.StatusServiceUnavailable {
+				w.Header().Set("Retry-After", strconv.Itoa(parallelResult.retry))
+				setOutcome(r, "upstream_busy")
+				writeJSON(w, http.StatusServiceUnavailable, apiError{Code: http.StatusServiceUnavailable, Message: "Upstream busy, try again shortly"})
+				return true, false
+			}
+			if response, ok := responseFromParallelLookup(parallelResult, includeRichSync(r)); ok {
+				if parallelResult.rich != nil && includeRichSync(r) {
+					setOutcome(r, "rich_lyrics_fallback_hit")
+				} else {
+					setOutcome(r, "lrclib_fallback_hit")
+				}
+				if parallelResult.track != nil {
+					prefetcher.Enqueue(parallelResult.track.Name, parallelResult.track.ArtistName, parallelResult.track.AlbumName, parallelResult.track.Duration)
+				}
+				writeJSON(w, http.StatusOK, response)
+				return true, false
+			}
+			return false, true
+		}
+
+		if served, _ := resolveUpstream(trackName, artistName, albumName, existingTrack); served {
+			return
+		}
+		// Strict user-only lookup failed. Retry once with artist/album
+		// backfilled from cached metadata (blanks only; user values win).
+		// Duration is never backfilled and never sent upstream.
+		fbArtist, fbAlbum, ok := fallbackLyricsIdentity(r.Context(), metadataDB, trackName, artistName, albumName, existingTrack)
+		if !ok {
 			setOutcome(r, "miss")
 			writeJSON(w, http.StatusNotFound, apiError{Code: http.StatusNotFound, Message: "Track not found"})
 			return
 		}
-
-		if !fallbackEnabled || client == nil {
-			if richResponse, ok := tryRichOnlyResponse(r, metadataDB, lyricsDB, richClient, fallbacks, richEnabled, existingTrack, trackName, artistName, albumName, duration); ok {
-				setOutcome(r, "rich_lyrics_fallback_hit")
-				writeJSON(w, http.StatusOK, richResponse)
-				return
-			}
-			setOutcome(r, "miss")
-			writeJSON(w, http.StatusNotFound, apiError{Code: http.StatusNotFound, Message: "Track not found"})
+		setRequestIssue(r, slog.LevelInfo, "lyrics retry with cached artist/album")
+		cacheStart = time.Now()
+		fbTrack, fbLyrics, fbErr := db.FindTrackExact(r.Context(), metadataDB, lyricsDB, trackName, fbArtist, fbAlbum, duration)
+		setCacheDuration(r, time.Since(cacheStart))
+		if fbErr == nil && lyricsAvailable(fbLyrics) {
+			setOutcome(r, "local_hit")
+			prefetcher.Enqueue(fbTrack.Name, fbTrack.ArtistName, fbTrack.AlbumName, fbTrack.Duration)
+			writeJSON(w, http.StatusOK, enrichLyricsResponse(r, fbTrack, fbLyrics, lyricsDB, richClient, fallbacks, richEnabled))
 			return
 		}
-
-		parallelResult := lookupGroup.lookup(r.Context(), missKey, func(ctx context.Context, publish func(lyricsLookupResult)) {
-			runParallelLyricsGet(ctx, publish, metadataDB, lyricsDB, client, richClient, appleClient, musixClient, lyricsMisses, fallbacks, fallbackEnabled, richEnabled, appleEnabled, musixEnabled, includeRichSync(r), clientIP(r, false), existingTrack, trackName, artistName, albumName, duration)
-		})
-		if parallelResult.upstream > 0 {
-			setUpstreamDuration(r, parallelResult.upstream)
+		fbExisting := existingTrack
+		if fbErr == nil {
+			fbExisting = fbTrack
 		}
-		if parallelResult.status == http.StatusTooManyRequests {
-			setOutcome(r, "rate_limited")
-			writeRateLimitResponse(w, parallelResult.retry)
-			return
-		}
-		if parallelResult.status == http.StatusServiceUnavailable {
-			w.Header().Set("Retry-After", strconv.Itoa(parallelResult.retry))
-			setOutcome(r, "upstream_busy")
-			writeJSON(w, http.StatusServiceUnavailable, apiError{Code: http.StatusServiceUnavailable, Message: "Upstream busy, try again shortly"})
-			return
-		}
-		if response, ok := responseFromParallelLookup(parallelResult, includeRichSync(r)); ok {
-			if parallelResult.rich != nil && includeRichSync(r) {
-				setOutcome(r, "rich_lyrics_fallback_hit")
-			} else {
-				setOutcome(r, "lrclib_fallback_hit")
-			}
-			if parallelResult.track != nil {
-				prefetcher.Enqueue(parallelResult.track.Name, parallelResult.track.ArtistName, parallelResult.track.AlbumName, parallelResult.track.Duration)
-			}
-			writeJSON(w, http.StatusOK, response)
+		if served, _ := resolveUpstream(trackName, fbArtist, fbAlbum, fbExisting); served {
 			return
 		}
 		setOutcome(r, "miss")
 		writeJSON(w, http.StatusNotFound, apiError{Code: http.StatusNotFound, Message: "Track not found"})
 		return
 	}
+}
+
+// fallbackLyricsIdentity backfills artist/album the user did not provide from
+// cached metadata. It never overwrites user-provided values and never touches
+// any other field (in particular duration). The exact-match metadata row is
+// preferred when it carries the missing fields; otherwise the local catalog
+// is searched by track name only. ok is true only when at least one blank
+// field gained a value worth retrying.
+func fallbackLyricsIdentity(ctx context.Context, metadataDB *sql.DB, trackName, artistName, albumName string, existing *db.Track) (fbArtist, fbAlbum string, ok bool) {
+	fbArtist, fbAlbum = strings.TrimSpace(artistName), strings.TrimSpace(albumName)
+	fill := func(artist, album string) {
+		if fbArtist == "" {
+			fbArtist = strings.TrimSpace(artist)
+		}
+		if fbAlbum == "" {
+			fbAlbum = strings.TrimSpace(album)
+		}
+	}
+	if existing != nil {
+		fill(existing.ArtistName, existing.AlbumName)
+	}
+	if (fbArtist == "" || fbAlbum == "") && metadataDB != nil && strings.TrimSpace(trackName) != "" {
+		if tracks, err := db.SearchTracks(ctx, metadataDB, nil, trackName, 1); err == nil {
+			for i := range tracks {
+				fill(tracks[i].Track.ArtistName, tracks[i].Track.AlbumName)
+			}
+		}
+	}
+	ok = fbArtist != strings.TrimSpace(artistName) || fbAlbum != strings.TrimSpace(albumName)
+	return fbArtist, fbAlbum, ok
 }
 
 func searchLyricsHandlerWithUpstream(metadataDB, lyricsDB *sql.DB, client *lrclib.Client, richClient *richlyrics.Client, fallbacks *fallbackGuard, fallbackEnabled, richEnabled bool) http.HandlerFunc {
@@ -412,7 +478,7 @@ func enrichLyricsSearchResponse(r *http.Request, lyricsDB *sql.DB, client *richl
 	}
 	defer release()
 	started := time.Now()
-	remote, err := client.Get(r.Context(), response.TrackName, response.ArtistName, response.AlbumName, response.Duration)
+	remote, err := client.Get(r.Context(), response.TrackName, response.ArtistName, response.AlbumName)
 	setUpstreamDuration(r, time.Since(started))
 	if err != nil {
 		if !errors.Is(err, richlyrics.ErrNotFound) {
@@ -509,10 +575,12 @@ func remoteLyricsMatchesInput(input names.Input, result *lrclib.RemoteResult) bo
 	return true
 }
 
-// lookupRemoteLyrics resolves lyrics upstream. LRCLIB's exact endpoint requires
-// an artist, so an artist-less request resolves through search and selects the
-// best result instead.
-func lookupRemoteLyrics(ctx context.Context, client *lrclib.Client, trackName, artistName, albumName string, duration float64) (*lrclib.RemoteResult, error) {
+// lookupRemoteLyrics resolves lyrics upstream. Only title, artist, and album
+// are ever sent: duration and all other metadata are deliberately excluded so
+// a duration mismatch can never filter out the correct recording. LRCLIB's
+// exact endpoint requires an artist, so an artist-less request resolves
+// through search and selects the best result instead.
+func lookupRemoteLyrics(ctx context.Context, client *lrclib.Client, trackName, artistName, albumName string) (*lrclib.RemoteResult, error) {
 	var lastErr error
 	for _, candidate := range names.Candidates(trackName, artistName, albumName) {
 		if candidate.ArtistName == "" {
@@ -527,7 +595,7 @@ func lookupRemoteLyrics(ctx context.Context, client *lrclib.Client, trackName, a
 			lastErr = lrclib.ErrNotFound
 			continue
 		}
-		remote, err := client.GetExact(ctx, candidate.TrackName, candidate.ArtistName, candidate.AlbumName, duration)
+		remote, err := client.GetExact(ctx, candidate.TrackName, candidate.ArtistName, candidate.AlbumName)
 		if err == nil {
 			if remoteLyricsMatchesInput(candidate, remote) && remoteLyricsAvailable(remote) {
 				return remote, nil
@@ -640,19 +708,10 @@ func tryRichOnlyResponse(r *http.Request, metadataDB, lyricsDB *sql.DB, client *
 	}
 	defer release()
 	started := time.Now()
-	lookupTrack := strings.TrimSpace(trackName)
-	if lookupTrack == "" && existingTrack != nil {
-		lookupTrack = existingTrack.Name
-	}
-	lookupArtist := strings.TrimSpace(artistName)
-	if lookupArtist == "" && existingTrack != nil {
-		lookupArtist = existingTrack.ArtistName
-	}
-	lookupAlbum := strings.TrimSpace(albumName)
-	if lookupAlbum == "" && existingTrack != nil {
-		lookupAlbum = existingTrack.AlbumName
-	}
-	remote, err := client.Get(r.Context(), lookupTrack, lookupArtist, lookupAlbum, duration)
+	// Strictly what the caller passed: no auto-fill from the cached metadata
+	// row here. The getLyricsHandler retries with cached artist/album only
+	// after this strict attempt misses, and duration is never sent upstream.
+	remote, err := client.Get(r.Context(), strings.TrimSpace(trackName), strings.TrimSpace(artistName), strings.TrimSpace(albumName))
 	setUpstreamDuration(r, time.Since(started))
 	if err != nil {
 		if !errors.Is(err, richlyrics.ErrNotFound) {
@@ -728,21 +787,29 @@ func enrichLyricsResponse(r *http.Request, track *db.Track, lyrics *db.Lyrics, l
 	query := r.URL.Query()
 	candidates := names.Candidates(query.Get("track_name"), query.Get("artist_name"), query.Get("album_name"))
 	input := candidates[0]
+	// Strict first attempt: exactly what the user provided, never auto-filled
+	// from the cached track row and never carrying duration upstream.
 	lookupTrack := input.TrackName
-	if lookupTrack == "" && track != nil {
+	if lookupTrack == "" {
 		lookupTrack = track.Name
 	}
-	lookupArtist := input.ArtistName
-	if lookupArtist == "" && track != nil {
-		lookupArtist = track.ArtistName
+	remote, err := client.Get(r.Context(), lookupTrack, input.ArtistName, input.AlbumName)
+	if err != nil && track != nil &&
+		(strings.TrimSpace(input.ArtistName) == "" || strings.TrimSpace(input.AlbumName) == "") {
+		// Strict lookup failed: retry once with artist/album backfilled from
+		// the cached track row (blanks only; user values win). Duration is
+		// never backfilled and never sent upstream.
+		fbArtist, fbAlbum := strings.TrimSpace(input.ArtistName), strings.TrimSpace(input.AlbumName)
+		if fbArtist == "" {
+			fbArtist = strings.TrimSpace(track.ArtistName)
+		}
+		if fbAlbum == "" {
+			fbAlbum = strings.TrimSpace(track.AlbumName)
+		}
+		if fbArtist != strings.TrimSpace(input.ArtistName) || fbAlbum != strings.TrimSpace(input.AlbumName) {
+			remote, err = client.Get(r.Context(), lookupTrack, fbArtist, fbAlbum)
+		}
 	}
-	lookupAlbum := input.AlbumName
-	if lookupAlbum == "" && track != nil {
-		lookupAlbum = track.AlbumName
-	}
-	lookupDuration, _ := optionalDuration(query.Get("duration"))
-
-	remote, err := client.Get(r.Context(), lookupTrack, lookupArtist, lookupAlbum, lookupDuration)
 	setUpstreamDuration(r, time.Since(started))
 	if err != nil {
 		if !errors.Is(err, richlyrics.ErrNotFound) {

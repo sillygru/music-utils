@@ -47,7 +47,7 @@ func New(baseURL, apiKey, userAgent string, timeout time.Duration) (*Client, err
 	return &Client{baseURL: baseURL, apiKey: strings.TrimSpace(apiKey), userAgent: userAgent, http: &http.Client{Timeout: timeout}, pace: pacer.New(200 * time.Millisecond)}, nil
 }
 
-func (c *Client) SearchTrack(ctx context.Context, trackName, artistName, albumName string, duration float64) (*Track, error) {
+func (c *Client) SearchTrack(ctx context.Context, trackName, artistName, albumName string) (*Track, error) {
 	input := names.Normalize(trackName, artistName, albumName)
 	endpoint, err := url.Parse(c.baseURL + "/ws/1.1/track.search")
 	if err != nil {
@@ -67,7 +67,7 @@ func (c *Client) SearchTrack(ctx context.Context, trackName, artistName, albumNa
 	if err := c.doJSON(ctx, endpoint.String(), &response); err != nil {
 		return nil, err
 	}
-	best := chooseTrack(response.Message.Body.TrackList, input, duration)
+	best := chooseTrack(response.Message.Body.TrackList, input)
 	if best == nil {
 		return nil, ErrNotFound
 	}
@@ -176,7 +176,7 @@ func chooseTrack(items []struct {
 		TrackLength   float64 `json:"track_length"`
 		ISRC          string  `json:"track_isrc"`
 	} `json:"track"`
-}, input names.Input, duration float64) *Track {
+}, input names.Input) *Track {
 	var best *Track
 	bestScore := -1.0
 	for _, item := range items {
@@ -185,13 +185,6 @@ func chooseTrack(items []struct {
 		score := match(normalized.TrackName, input.TrackName)*3 + match(normalized.ArtistName, input.ArtistName)*3
 		if input.AlbumName != "" {
 			score += match(normalized.AlbumName, input.AlbumName)
-		}
-		if duration > 0 && t.TrackLength > 0 {
-			d := t.TrackLength - duration
-			if d < 0 {
-				d = -d
-			}
-			score += 1 / (1 + d)
 		}
 		if score > bestScore {
 			bestScore = score

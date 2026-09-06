@@ -1,7 +1,6 @@
 package httpserver
 
 import (
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -58,19 +57,11 @@ func (c *lyricsMissCache) Set(key string, now time.Time) {
 	c.entries[key] = now.Add(lyricsMissCacheTTL)
 }
 
-// lyricsMissKey builds a cache key that collapses durations to a 2-second
-// stride so provider second-level rounding does not split an identical track
-// into separate miss entries.
-func lyricsMissKey(trackName, artistName, albumName string, duration float64) string {
+// lyricsMissKey builds a cache key from title, artist, and album only.
+// Duration is deliberately excluded: upstream lyrics lookups never receive it,
+// so misses must not be split by it either.
+func lyricsMissKey(trackName, artistName, albumName string) string {
 	return strings.ToLower(strings.TrimSpace(trackName)) + "\x00" +
 		strings.ToLower(strings.TrimSpace(artistName)) + "\x00" +
-		strings.ToLower(strings.TrimSpace(albumName)) + "\x00" +
-		lyricsMissDurationBucket(duration)
-}
-
-func lyricsMissDurationBucket(duration float64) string {
-	if duration <= 0 {
-		return "*"
-	}
-	return strconv.Itoa(int(duration/2) * 2)
+		strings.ToLower(strings.TrimSpace(albumName))
 }

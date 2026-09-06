@@ -50,11 +50,11 @@ func runParallelLyricsGet(
 				defer release()
 			}
 			started := time.Now()
-			remote, err := lookupRemoteLyricsBroad(ctx, client, trackName, artistName, albumName, duration)
+			remote, err := lookupRemoteLyricsBroad(ctx, client, trackName, artistName, albumName)
 			elapsed := time.Since(started)
 			if err != nil {
 				if errors.Is(err, lrclib.ErrNotFound) && lyricsMisses != nil && artistName != "" {
-					lyricsMisses.Set(lyricsMissKey(trackName, artistName, albumName, duration), time.Now())
+					lyricsMisses.Set(lyricsMissKey(trackName, artistName, albumName), time.Now())
 				}
 				publish(lyricsLookupResult{err: err, upstream: elapsed})
 				return
@@ -83,7 +83,7 @@ func runParallelLyricsGet(
 				}
 				defer release()
 			}
-			remote, err := richClient.Get(ctx, trackName, artistName, albumName, duration)
+			remote, err := richClient.Get(ctx, trackName, artistName, albumName)
 			if err != nil || !validRichSyncType(remote.SyncType) {
 				if err != nil {
 					publish(lyricsLookupResult{err: err})
@@ -109,7 +109,7 @@ func runParallelLyricsGet(
 				}
 				defer release()
 			}
-			track, err := appleClient.SearchTrack(ctx, trackName, artistName, albumName, duration)
+			track, err := appleClient.SearchTrack(ctx, trackName, artistName, albumName)
 			if err != nil {
 				return
 			}
@@ -135,7 +135,7 @@ func runParallelLyricsGet(
 				}
 				defer release()
 			}
-			track, err := musixClient.SearchTrack(ctx, trackName, artistName, albumName, duration)
+			track, err := musixClient.SearchTrack(ctx, trackName, artistName, albumName)
 			if err != nil {
 				return
 			}
@@ -154,8 +154,8 @@ func runParallelLyricsGet(
 	wg.Wait()
 }
 
-func lookupRemoteLyricsBroad(ctx context.Context, client *lrclib.Client, trackName, artistName, albumName string, duration float64) (*lrclib.RemoteResult, error) {
-	remote, err := lookupRemoteLyrics(ctx, client, trackName, artistName, albumName, duration)
+func lookupRemoteLyricsBroad(ctx context.Context, client *lrclib.Client, trackName, artistName, albumName string) (*lrclib.RemoteResult, error) {
+	remote, err := lookupRemoteLyrics(ctx, client, trackName, artistName, albumName)
 	if err == nil || !errors.Is(err, lrclib.ErrNotFound) || artistName == "" || albumName == "" {
 		return remote, err
 	}

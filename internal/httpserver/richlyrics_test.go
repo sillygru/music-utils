@@ -436,6 +436,12 @@ func TestGetLyricsRichSyncPassesOnlyUserSuppliedParameters(t *testing.T) {
 			t.Fatalf("unexpected rich upstream path: %s", r.URL.Path)
 		}
 		requestedQueries = append(requestedQueries, r.URL.RawQuery)
+		// Artist-less lookups miss upstream so the cached-metadata fallback
+		// path is exercised.
+		if r.URL.Query().Get("artist") == "" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"success":true,"data":{"lyrics":"<tt>test</tt>","format":"ttml","syncType":"word"}}`))
 	}))
@@ -455,16 +461,21 @@ func TestGetLyricsRichSyncPassesOnlyUserSuppliedParameters(t *testing.T) {
 	server := NewWithConfig(cfg, metadataDB, lyricsDB)
 	cleanupHTTPServer(t, server)
 
-	// Case 1: user provides track_name only (artist and album filled from DB, duration never filled)
+	// Case 1: user provides track_name only. The first upstream call is
+	// strictly user-supplied (title only, never duration); only after it
+	// misses does the retry backfill artist/album from cached metadata.
 	resp := performRequest(t, server.Handler, "/api/lyrics/get?track_name=Example+Song&include_rich_sync=true")
 	if resp.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.Code)
 	}
-	if len(requestedQueries) != 1 {
-		t.Fatalf("expected 1 upstream call, got %d", len(requestedQueries))
+	if len(requestedQueries) != 2 {
+		t.Fatalf("expected 2 upstream calls, got %d: %v", len(requestedQueries), requestedQueries)
 	}
-	if query := requestedQueries[0]; query != "album=Example+Album&artist=Example+Artist&song=Example+Song" {
-		t.Fatalf("expected query with artist/album filled from DB and no duration, got: %s", query)
+	if query := requestedQueries[0]; query != "song=Example+Song" {
+		t.Fatalf("expected strict title-only first call with no duration, got: %s", query)
+	}
+	if query := requestedQueries[1]; query != "album=Example+Album&artist=Example+Artist&song=Example+Song" {
+		t.Fatalf("expected fallback call with artist/album from DB and no duration, got: %s", query)
 	}
 
 	// Reset rich cache for track 1
@@ -472,15 +483,16 @@ func TestGetLyricsRichSyncPassesOnlyUserSuppliedParameters(t *testing.T) {
 		t.Fatalf("clear rich cache: %v", err)
 	}
 
-	// Case 2: user provides track_name and artist_name, but overrides album_name and provides duration
+	// Case 2: user provides track_name and artist_name, but overrides album_name and provides duration.
+	// Upstream receives exactly the user values; duration is never forwarded.
 	resp2 := performRequest(t, server.Handler, "/api/lyrics/get?track_name=Example+Song&artist_name=Custom+Artist&album_name=Custom+Album&duration=180&include_rich_sync=true")
 	if resp2.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp2.Code)
 	}
-	if len(requestedQueries) != 2 {
-		t.Fatalf("expected 2 upstream calls, got %d", len(requestedQueries))
+	if len(requestedQueries) != 3 {
+		t.Fatalf("expected 3 upstream calls, got %d: %v", len(requestedQueries), requestedQueries)
 	}
-	if query := requestedQueries[1]; query != "album=Custom+Album&artist=Custom+Artist&duration=180&song=Example+Song" {
-		t.Fatalf("expected query with user-provided overrides and duration, got: %s", query)
+	if query := requestedQueries[2]; query != "album=Custom+Album&artist=Custom+Artist&song=Example+Song" {
+		t.Fatalf("expected query with user-provided values and no duration, got: %s", query)
 	}
 }

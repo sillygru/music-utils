@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
@@ -60,10 +59,12 @@ func New(baseURL, userAgent string, timeout time.Duration) (*Client, error) {
 	}, nil
 }
 
-// Get resolves a rich/syllable lyrics payload by song metadata. Unison uses
-// song/artist/album/duration parameter names; the same shape is accepted by
-// compatible mirrors.
-func (c *Client) Get(ctx context.Context, trackName, artistName, albumName string, duration float64) (*Result, error) {
+// Get resolves a rich/syllable lyrics payload by song metadata. Only title,
+// artist, and album are ever sent: duration and all other metadata are
+// deliberately excluded so a duration mismatch can never filter out the
+// correct recording upstream. Unison uses song/artist/album parameter names;
+// the same shape is accepted by compatible mirrors.
+func (c *Client) Get(ctx context.Context, trackName, artistName, albumName string) (*Result, error) {
 	if c == nil || c.http == nil {
 		return nil, errors.New("rich lyrics client is nil")
 	}
@@ -79,9 +80,6 @@ func (c *Client) Get(ctx context.Context, trackName, artistName, albumName strin
 	}
 	if input.AlbumName != "" {
 		query.Set("album", input.AlbumName)
-	}
-	if duration > 0 {
-		query.Set("duration", strconv.FormatFloat(duration, 'f', -1, 64))
 	}
 	endpoint.RawQuery = query.Encode()
 
