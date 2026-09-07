@@ -16,7 +16,7 @@ import (
 	"github.com/sillygru/music-utils/internal/names"
 )
 
-func searchLyricsHandlerParallel(metadataDB, lyricsDB *sql.DB, providers *lyricsProviders, fallbacks *fallbackGuard) http.HandlerFunc {
+func searchLyricsHandlerParallel(metadataDB, lyricsDB *sql.DB, providers *lyricsProviders, fallbacks *fallbackGuard, enricher *enricher) http.HandlerFunc {
 	group := newLyricsSearchGroup()
 	return func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
@@ -47,6 +47,14 @@ func searchLyricsHandlerParallel(metadataDB, lyricsDB *sql.DB, providers *lyrics
 			var cachedResults []lyricsResponse
 			if json.Unmarshal(cached, &cachedResults) == nil {
 				setOutcome(r, "local_hit")
+				if enricher != nil {
+					for _, res := range cachedResults {
+						if res.ID > 0 {
+							track := &db.Track{ID: res.ID, Name: res.TrackName, ArtistName: res.ArtistName, AlbumName: res.AlbumName, Duration: res.Duration}
+							enricher.Enqueue(track, videoID)
+						}
+					}
+				}
 				writeJSON(w, http.StatusOK, cachedResults)
 				return
 			}
@@ -86,6 +94,11 @@ func searchLyricsHandlerParallel(metadataDB, lyricsDB *sql.DB, providers *lyrics
 			setOutcome(r, "miss")
 		} else if len(localTracks) > 0 {
 			setOutcome(r, "local_hit")
+			if enricher != nil {
+				for _, t := range localTracks {
+					enricher.Enqueue(&t.Track, videoID)
+				}
+			}
 		} else {
 			setOutcome(r, "lrclib_fallback_hit")
 		}

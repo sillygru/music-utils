@@ -85,3 +85,18 @@ func lyricsMissKeyWithVideo(trackName, artistName, albumName, videoID string) st
 		strings.ToLower(strings.TrimSpace(albumName)) + "\x00" +
 		strings.ToLower(strings.TrimSpace(videoID))
 }
+
+// providerMissKey adds the provider dimension so each upstream is memoized independently.
+func providerMissKey(provider, trackName, artistName, albumName, videoID string) string {
+	return strings.ToLower(strings.TrimSpace(provider)) + "\x00" + lyricsMissKeyWithVideo(trackName, artistName, albumName, videoID)
+}
+
+// HasProvider reports whether a miss for provider+key is still cached.
+func (c *lyricsMissCache) HasProvider(provider, trackName, artistName, albumName, videoID string, now time.Time) bool {
+	return c.Has(providerMissKey(provider, trackName, artistName, albumName, videoID), now)
+}
+
+// SetProvider records a provider-scoped miss until now+TTL.
+func (c *lyricsMissCache) SetProvider(provider, trackName, artistName, albumName, videoID string, now time.Time) {
+	c.Set(providerMissKey(provider, trackName, artistName, albumName, videoID), now)
+}

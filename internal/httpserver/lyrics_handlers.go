@@ -112,7 +112,7 @@ type apiError struct {
 	Message string `json:"message"`
 }
 
-func getLyricsHandler(metadataDB, lyricsDB *sql.DB, providers *lyricsProviders, lyricsMisses *lyricsMissCache, fallbacks *fallbackGuard, prefetcher *prefetcher) http.HandlerFunc {
+func getLyricsHandler(metadataDB, lyricsDB *sql.DB, providers *lyricsProviders, lyricsMisses *lyricsMissCache, fallbacks *fallbackGuard, prefetcher *prefetcher, enricher *enricher) http.HandlerFunc {
 	lookupGroup := newLyricsLookupGroup()
 	return func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
@@ -152,6 +152,9 @@ func getLyricsHandler(metadataDB, lyricsDB *sql.DB, providers *lyricsProviders, 
 		if err == nil && lyricsAvailable(lyrics) {
 			setOutcome(r, "local_hit")
 			prefetcher.Enqueue(track.Name, track.ArtistName, track.AlbumName, track.Duration)
+			if enricher != nil {
+				enricher.Enqueue(track, videoID)
+			}
 			writeJSON(w, http.StatusOK, enrichLyricsResponse(r, track, lyrics, lyricsDB, providers.rich, fallbacks, providers.richEnabled))
 			return
 		}
@@ -250,6 +253,9 @@ func getLyricsHandler(metadataDB, lyricsDB *sql.DB, providers *lyricsProviders, 
 		if fbErr == nil && lyricsAvailable(fbLyrics) {
 			setOutcome(r, "local_hit")
 			prefetcher.Enqueue(fbTrack.Name, fbTrack.ArtistName, fbTrack.AlbumName, fbTrack.Duration)
+			if enricher != nil {
+				enricher.Enqueue(fbTrack, videoID)
+			}
 			writeJSON(w, http.StatusOK, enrichLyricsResponse(r, fbTrack, fbLyrics, lyricsDB, providers.rich, fallbacks, providers.richEnabled))
 			return
 		}

@@ -88,6 +88,10 @@ const (
 	defaultPrefetchLyrics       = true
 	defaultPrefetchAlbumCover   = true
 	defaultPrefetchArtistCover  = true
+	defaultEnrichEnabled        = true
+	defaultEnrichPerMin         = 20
+	defaultEnrichConcurrency    = 2
+	defaultEnrichQueueSize      = 64
 )
 
 // Config contains the settings needed to start the server.
@@ -186,6 +190,11 @@ type Config struct {
 	PrefetchLyrics      bool
 	PrefetchAlbumCover  bool
 	PrefetchArtistCover bool
+
+	EnrichEnabled     bool
+	EnrichPerMin      int
+	EnrichConcurrency int
+	EnrichQueueSize   int
 }
 
 // Load reads configuration from the environment (and a local .env file if present)
@@ -287,6 +296,11 @@ func Load() Config {
 		PrefetchLyrics:      boolOrDefault("PREFETCH_LYRICS", defaultPrefetchLyrics),
 		PrefetchAlbumCover:  boolOrDefault("PREFETCH_ALBUM_COVER", defaultPrefetchAlbumCover),
 		PrefetchArtistCover: boolOrDefault("PREFETCH_ARTIST_COVER", defaultPrefetchArtistCover),
+
+		EnrichEnabled:     boolOrDefault("ENRICH_ENABLED", defaultEnrichEnabled),
+		EnrichPerMin:      intOrDefault("ENRICH_PER_MIN", defaultEnrichPerMin),
+		EnrichConcurrency: intOrDefault("ENRICH_CONCURRENCY", defaultEnrichConcurrency),
+		EnrichQueueSize:   intOrDefault("ENRICH_QUEUE_SIZE", defaultEnrichQueueSize),
 	}
 }
 
@@ -375,6 +389,15 @@ func (c Config) Validate() error {
 	if c.PrefetchQueueSize < 1 {
 		return fmt.Errorf("PREFETCH_QUEUE_SIZE must be positive")
 	}
+	if c.EnrichPerMin < 1 {
+		return fmt.Errorf("ENRICH_PER_MIN must be positive")
+	}
+	if c.EnrichConcurrency < 1 {
+		return fmt.Errorf("ENRICH_CONCURRENCY must be positive")
+	}
+	if c.EnrichQueueSize < 1 {
+		return fmt.Errorf("ENRICH_QUEUE_SIZE must be positive")
+	}
 	if strings.TrimSpace(c.LRCLIBUserAgent) == "" {
 		return fmt.Errorf("LRCLIB_USER_AGENT must not be empty")
 	}
@@ -451,7 +474,7 @@ func validateEnvironment() error {
 	if err := validateIntEnv("DB_CACHE_SIZE_KB"); err != nil {
 		return err
 	}
-	for _, name := range []string{"DB_MAX_OPEN_CONNS", "RATE_LIMIT_PER_SEC", "RATE_LIMIT_PER_MIN", "FALLBACK_PER_MIN", "FALLBACK_MAX_QUEUE", "FALLBACK_QUEUE_WAIT_MS", "COVER_REFRESH_AFTER_DAYS", "COVER_REFRESH_MAX_ROWS", "COVER_REFRESH_MAX_RECHECK", "LRCLIB_TIMEOUT_MS", "RICH_LYRICS_TIMEOUT_MS", "APPLE_MUSIC_TIMEOUT_MS", "MUSIXMATCH_TIMEOUT_MS", "METADATA_TIMEOUT_MS", "COVER_TIMEOUT_MS", "PREFETCH_PER_MIN", "PREFETCH_CONCURRENCY", "PREFETCH_QUEUE_SIZE", "BETTERLYRICS_TIMEOUT_MS", "KUGOU_TIMEOUT_MS", "PAXSENIX_TIMEOUT_MS", "LYRICSPLUS_TIMEOUT_MS", "ZEMER_TIMEOUT_MS", "YOUTUBE_TIMEOUT_MS"} {
+	for _, name := range []string{"DB_MAX_OPEN_CONNS", "RATE_LIMIT_PER_SEC", "RATE_LIMIT_PER_MIN", "FALLBACK_PER_MIN", "FALLBACK_MAX_QUEUE", "FALLBACK_QUEUE_WAIT_MS", "COVER_REFRESH_AFTER_DAYS", "COVER_REFRESH_MAX_ROWS", "COVER_REFRESH_MAX_RECHECK", "LRCLIB_TIMEOUT_MS", "RICH_LYRICS_TIMEOUT_MS", "APPLE_MUSIC_TIMEOUT_MS", "MUSIXMATCH_TIMEOUT_MS", "METADATA_TIMEOUT_MS", "COVER_TIMEOUT_MS", "PREFETCH_PER_MIN", "PREFETCH_CONCURRENCY", "PREFETCH_QUEUE_SIZE", "ENRICH_PER_MIN", "ENRICH_CONCURRENCY", "ENRICH_QUEUE_SIZE", "BETTERLYRICS_TIMEOUT_MS", "KUGOU_TIMEOUT_MS", "PAXSENIX_TIMEOUT_MS", "LYRICSPLUS_TIMEOUT_MS", "ZEMER_TIMEOUT_MS", "YOUTUBE_TIMEOUT_MS"} {
 		if err := validatePositiveIntEnv(name); err != nil {
 			return err
 		}
@@ -465,7 +488,7 @@ func validateEnvironment() error {
 			return fmt.Errorf("REQUEST_LOG_RETENTION_DAYS must be an integer >= -1 (-1 means keep forever)")
 		}
 	}
-	for _, name := range []string{"TRUST_PROXY", "LRCLIB_FALLBACK_ENABLED", "RICH_LYRICS_ENABLED", "APPLE_MUSIC_ENABLED", "MUSIXMATCH_ENABLED", "METADATA_FALLBACK_ENABLED", "COVER_FALLBACK_ENABLED", "COVER_REFRESH_ENABLED", "REQUEST_LOG_ENABLED", "REQUEST_LOG_UA_OPTIMIZE", "REQUEST_LOG_UA_SAVE_UNKNOWN", "REQUESTS_TODAY_ENABLED", "PREFETCH_ENABLED", "PREFETCH_LYRICS", "PREFETCH_ALBUM_COVER", "PREFETCH_ARTIST_COVER", "BETTERLYRICS_ENABLED", "KUGOU_ENABLED", "PAXSENIX_ENABLED", "LYRICSPLUS_ENABLED", "ZEMER_ENABLED", "YOUTUBE_LYRICS_ENABLED", "YOUTUBE_SUBTITLE_ENABLED"} {
+	for _, name := range []string{"TRUST_PROXY", "LRCLIB_FALLBACK_ENABLED", "RICH_LYRICS_ENABLED", "APPLE_MUSIC_ENABLED", "MUSIXMATCH_ENABLED", "METADATA_FALLBACK_ENABLED", "COVER_FALLBACK_ENABLED", "COVER_REFRESH_ENABLED", "REQUEST_LOG_ENABLED", "REQUEST_LOG_UA_OPTIMIZE", "REQUEST_LOG_UA_SAVE_UNKNOWN", "REQUESTS_TODAY_ENABLED", "PREFETCH_ENABLED", "PREFETCH_LYRICS", "PREFETCH_ALBUM_COVER", "PREFETCH_ARTIST_COVER", "ENRICH_ENABLED", "BETTERLYRICS_ENABLED", "KUGOU_ENABLED", "PAXSENIX_ENABLED", "LYRICSPLUS_ENABLED", "ZEMER_ENABLED", "YOUTUBE_LYRICS_ENABLED", "YOUTUBE_SUBTITLE_ENABLED"} {
 		if value := strings.TrimSpace(os.Getenv(name)); value != "" {
 			if _, err := strconv.ParseBool(value); err != nil {
 				return fmt.Errorf("%s must be a boolean", name)

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // FindTrackExact loads metadata from metadataDB and lyrics from lyricsDB.
@@ -269,6 +270,80 @@ WHERE id=? AND format='ttml' COLLATE NOCASE`, content, format, richContentHash(c
 		}
 	}
 	return migrated, nil
+}
+
+// ProviderFetchStaleTTL is how long a failed provider fetch is remembered.
+const ProviderFetchStaleTTL = 24 * time.Hour
+
+// UpsertProviderFetch records that provider was tried for trackID.
+func UpsertProviderFetch(ctx context.Context, database *sql.DB, trackID int64, provider string, success bool) error {
+	if database == nil {
+		return errors.New("lyrics database is nil")
+	}
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if trackID <= 0 || provider == "" {
+		return errors.New("track and provider are required")
+	}
+	_, err := database.ExecContext(ctx, `INSERT INTO lyrics_provider_fetches (track_id, provider, last_fetched_at, last_success)
+VALUES (?, ?, CURRENT_TIMESTAMP, ?)
+ON CONFLICT(track_id, provider) DO UPDATE SET last_fetched_at=CURRENT_TIMESTAMP, last_success=excluded.last_success`, trackID, provider, success)
+	if err != nil {
+		return fmt.Errorf("upsert provider fetch: %w", err)
+	}
+	return nil
+}
+
+// HasRecentProviderFetch reports whether provider was tried for trackID within ttl.
+func HasRecentProviderFetch(ctx context.Context, database *sql.DB, trackID int64, provider string, ttl time.Duration) (bool, error) {
+	if database == nil {
+		return false, errors.New("lyrics database is nil")
+	}
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if trackID <= 0 || provider == "" {
+		return false, nil
+	}
+	var last string
+	err := database.QueryRowContext(ctx, `SELECT last_fetched_at FROM lyrics_provider_fetches WHERE track_id=? AND provider=?`, trackID, provider).Scan(&last)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("check provider fetch: %w", err)
+	}
+	// Parse as stored CURRENT_TIMESTAMP (UTC, "2006-01-02 15:04:05").
+	t, err := time.Parse("2006-01-02 15:04:05", last)
+	if err != nil {
+		// Fallback: try RFC3339.
+		t, _ = time.Parse(time.RFC3339, last)
+	}
+	return time.Since(t) < ttl, nil
+}
+
+// ListRichLyricsSources returns every (source,sync_type) pair cached for a track.
+func ListRichLyricsSources(ctx context.Context, database *sql.DB, trackID int64) (map[string]struct{}, error) {
+	if database == nil {
+		return nil, errors.New("lyrics database is nil")
+	}
+	rows, err := database.QueryContext(ctx, `SELECT source, sync_type FROM lyrics_sync_variants WHERE track_id=?`, trackID)
+	if err != nil {
+		return nil, fmt.Errorf("list rich lyrics sources: %w", err)
+	}
+	defer rows.Close()
+	sources := make(map[string]struct{})
+	for rows.Next() {
+		var source, syncType string
+		if err := rows.Scan(&source, &syncType); err != nil {
+			return nil, fmt.Errorf("scan rich lyrics source: %w", err)
+		}
+		key := strings.ToLower(strings.TrimSpace(source)) + "\x00" + strings.ToLower(strings.TrimSpace(syncType))
+		sources[key] = struct{}{}
+		// Also index by source alone for quick existence check.
+		sources[strings.ToLower(strings.TrimSpace(source))] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate rich lyrics sources: %w", err)
+	}
+	return sources, nil
 }
 
 // FindRichLyrics returns the best cached rich payload for a track. A requested
