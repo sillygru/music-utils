@@ -223,6 +223,7 @@ func (e *enricher) process(ctx context.Context, job enrichJob) {
 		needVid bool
 	}
 	specs := []spec{
+		{"lrclib", e.providers.lrclibEnabled && e.providers.lrclib != nil, false, false},
 		{"betterlyrics", e.providers.betterEnabled && e.providers.better != nil, hasRichSource(existingSources, "betterlyrics"), false},
 		{"paxsenix", e.providers.paxsenixEnabled && e.providers.paxsenix != nil, hasRichSource(existingSources, "paxsenix"), false},
 		{"lyricsplus", e.providers.lyricsPlusEnabled && e.providers.lyricsPlus != nil, hasRichSource(existingSources, "lyricsplus"), false},
@@ -235,6 +236,17 @@ func (e *enricher) process(ctx context.Context, job enrichJob) {
 	}
 	for i := range specs {
 		switch specs[i].name {
+		case "lrclib":
+			if !needsSynced {
+				// If we already have synced lyrics, only re-check if stale
+				if job.trackID > 0 && e.lyricsDB != nil {
+					if recent, err := db.HasRecentProviderFetch(ctx, e.lyricsDB, job.trackID, "lrclib", db.ProviderFetchStaleTTL); err == nil && recent {
+						specs[i].enabled = false
+					}
+				} else {
+					specs[i].enabled = false
+				}
+			}
 		case "kugou":
 			if !needsSynced {
 				specs[i].enabled = false
@@ -249,7 +261,13 @@ func (e *enricher) process(ctx context.Context, job enrichJob) {
 			if isEnrichWordEmpty(job.trackID, specs[i].name, e.lyricsDB) {
 				specs[i].has = false
 			} else {
-				specs[i].enabled = false
+				if job.trackID > 0 && e.lyricsDB != nil {
+					if recent, err := db.HasRecentProviderFetch(ctx, e.lyricsDB, job.trackID, specs[i].name, db.ProviderFetchStaleTTL); err == nil && recent {
+						specs[i].enabled = false
+					}
+				} else {
+					specs[i].enabled = false
+				}
 			}
 		}
 		if specs[i].enabled && e.lyricsMisses != nil && e.lyricsMisses.HasProvider(specs[i].name, job.trackName, job.artistName, job.albumName, job.videoID, time.Now()) {
@@ -285,9 +303,34 @@ func (e *enricher) process(ctx context.Context, job enrichJob) {
 			continue
 		}
 		if !e.allow() {
-			break
+			continue
 		}
 		switch s.name {
+		case "lrclib":
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				remote, err := lookupRemoteLyricsBroadWithDuration(bgCtx, e.providers.lrclib, job.trackName, job.artistName, job.albumName, job.duration)
+				if err != nil {
+					if e.lyricsMisses != nil {
+						e.lyricsMisses.Set(lyricsMissKeyWithVideo(job.trackName, job.artistName, job.albumName, job.videoID), time.Now())
+					}
+					if e.lyricsDB != nil && job.trackID > 0 {
+						_ = db.UpsertProviderFetch(bgCtx, e.lyricsDB, job.trackID, "lrclib", false)
+					}
+					return
+				}
+				if !remoteLyricsAvailable(remote) {
+					return
+				}
+				existing := &db.Track{ID: job.trackID, Name: job.trackName, ArtistName: job.artistName, AlbumName: job.albumName, Duration: job.duration}
+				row := &lrclib.RemoteResult{TrackName: remote.TrackName, ArtistName: remote.ArtistName, AlbumName: remote.AlbumName, Duration: remote.Duration, PlainLyrics: remote.PlainLyrics, SyncedLyrics: remote.SyncedLyrics, Instrumental: remote.Instrumental}
+				if _, _, ok := persistProviderLyrics(bgCtx, e.metadataDB, e.lyricsDB, existing, row, job.trackName, job.artistName, job.albumName, job.duration, "lrclib"); ok {
+					if e.lyricsDB != nil && job.trackID > 0 {
+						_ = db.UpsertProviderFetch(bgCtx, e.lyricsDB, job.trackID, "lrclib", true)
+					}
+				}
+			}()
 		case "betterlyrics":
 			wg.Add(1)
 			go func() {

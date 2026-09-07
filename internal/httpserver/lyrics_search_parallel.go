@@ -78,10 +78,27 @@ func (g *lyricsSearchGroup) lookup(ctx context.Context, key string, start func(c
 
 	timer := time.NewTimer(lyricsResponseWait)
 	defer timer.Stop()
+	var graceTimer *time.Timer
+	defer func() {
+		if graceTimer != nil {
+			graceTimer.Stop()
+		}
+	}()
 	for {
+		var graceC <-chan time.Time
+		if graceTimer != nil {
+			graceC = graceTimer.C
+		}
 		select {
 		case <-job.wake:
+			if snap := job.snapshot(); len(snap) > 0 {
+				if graceTimer == nil {
+					graceTimer = time.NewTimer(100 * time.Millisecond)
+				}
+			}
 			continue
+		case <-graceC:
+			return job.snapshot()
 		case <-job.done:
 			return job.snapshot()
 		case <-timer.C:

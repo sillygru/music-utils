@@ -844,7 +844,6 @@ func enrichLyricsResponseWithClient(r *http.Request, track *db.Track, lyrics *db
 			setRichOnlyResponse(&response, cached)
 			return response
 		}
-		// Empty-word cache is stale – fall through to live fetch to replace it
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		setRequestIssue(r, slog.LevelWarn, err.Error())
 		return response
@@ -880,84 +879,99 @@ func enrichLyricsResponseWithClient(r *http.Request, track *db.Track, lyrics *db
 	query := r.URL.Query()
 	candidates := names.Candidates(query.Get("track_name"), query.Get("artist_name"), query.Get("album_name"))
 	input := candidates[0]
-	// Strict first attempt: exactly what the user provided, never auto-filled
-	// from the cached track row and never carrying duration upstream.
 	lookupTrack := input.TrackName
 	if lookupTrack == "" {
 		lookupTrack = track.Name
 	}
-	remote, err := client.Get(r.Context(), lookupTrack, input.ArtistName, input.AlbumName)
-	if err != nil && track != nil &&
-		(strings.TrimSpace(input.ArtistName) == "" || strings.TrimSpace(input.AlbumName) == "") {
-		// Strict lookup failed: retry once with artist/album backfilled from
-		// the cached track row (blanks only; user values win). Duration is
-		// never backfilled and never sent upstream.
-		fbArtist, fbAlbum := strings.TrimSpace(input.ArtistName), strings.TrimSpace(input.AlbumName)
-		if fbArtist == "" {
-			fbArtist = strings.TrimSpace(track.ArtistName)
-		}
-		if fbAlbum == "" {
-			fbAlbum = strings.TrimSpace(track.AlbumName)
-		}
-		if fbArtist != strings.TrimSpace(input.ArtistName) || fbAlbum != strings.TrimSpace(input.AlbumName) {
-			remote, err = client.Get(r.Context(), lookupTrack, fbArtist, fbAlbum)
-		}
-	}
-	setUpstreamDuration(r, time.Since(started))
-	if err != nil {
-		if !errors.Is(err, richlyrics.ErrNotFound) {
-			setRequestIssue(r, slog.LevelWarn, err.Error())
-			return response
-		}
-		// Unison miss – try live lyricsplus (prjktla qq) immediately per plan yes
-		if providers != nil && providers.lyricsPlusEnabled && providers.lyricsPlus != nil && track != nil && track.ID > 0 {
-			if fallbacks != nil {
-				// Already holding one fallback slot; reuse it for the extra call
-			}
-			lpRemote, lpErr := providers.lyricsPlus.Get(r.Context(), lookupTrack, input.ArtistName, input.AlbumName, track.Duration, track.ISRC)
-			if lpErr == nil && lpRemote != nil && lpRemote.WordSynced {
-				var lpRich db.RichLyrics
-				if strings.TrimSpace(lpRemote.TTML) != "" {
-					c, f, conv := compactRichSyncForStorage(lpRemote.TTML, "ttml")
-					if !conv {
-						c, f = lpRemote.TTML, "ttml"
-					}
-					lpRich = db.RichLyrics{TrackID: track.ID, Content: c, Format: f, SyncType: "word", Source: "lyricsplus"}
-				} else if strings.TrimSpace(lpRemote.RichJSON) != "" {
-					lpRich = db.RichLyrics{TrackID: track.ID, Content: lpRemote.RichJSON, Format: "json", SyncType: "word", Source: "lyricsplus"}
-				}
-				if lpRich.Content != "" && !isWordRichEmpty(&lpRich) {
-					if err2 := db.UpsertRichLyrics(r.Context(), lyricsDB, lpRich); err2 == nil {
-						if stored, err3 := db.FindRichLyrics(r.Context(), lyricsDB, track.ID, "word"); err3 == nil && !isWordRichEmpty(stored) {
-							setRichOnlyResponse(&response, stored)
-							return response
-						}
-						setRichOnlyResponse(&response, &lpRich)
-						return response
-					}
-				}
-			}
-		}
-		return response
-	}
-	if !validRichSyncType(remote.SyncType) {
 
-		setRequestIssue(r, slog.LevelWarn, "rich lyrics returned unsupported sync type")
-		return response
+	type richCandidate struct {
+		rich     *db.RichLyrics
+		priority int
 	}
-	content, format, converted := compactRichSyncForStorage(remote.Content, remote.Format)
-	if !converted {
-		content, format = remote.Content, remote.Format
+	var best richCandidate
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+
+	updateBest := func(c richCandidate) {
+		mu.Lock()
+		defer mu.Unlock()
+		if c.rich == nil || isWordRichEmpty(c.rich) {
+			return
+		}
+		if best.rich == nil || c.priority > best.priority {
+			best = c
+		}
 	}
-	cached := db.RichLyrics{TrackID: track.ID, Content: content, Format: format, SyncType: remote.SyncType, Source: remote.Source}
-	if isWordRichEmpty(&cached) {
-		return response
+
+	// Unison in parallel
+	if enabled && client != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			remote, err := client.Get(r.Context(), lookupTrack, input.ArtistName, input.AlbumName)
+			if err != nil && track != nil &&
+				(strings.TrimSpace(input.ArtistName) == "" || strings.TrimSpace(input.AlbumName) == "") {
+				fbArtist, fbAlbum := strings.TrimSpace(input.ArtistName), strings.TrimSpace(input.AlbumName)
+				if fbArtist == "" {
+					fbArtist = strings.TrimSpace(track.ArtistName)
+				}
+				if fbAlbum == "" {
+					fbAlbum = strings.TrimSpace(track.AlbumName)
+				}
+				if fbArtist != strings.TrimSpace(input.ArtistName) || fbAlbum != strings.TrimSpace(input.AlbumName) {
+					remote, err = client.Get(r.Context(), lookupTrack, fbArtist, fbAlbum)
+				}
+			}
+			if err != nil || remote == nil || !validRichSyncType(remote.SyncType) {
+				return
+			}
+			content, format, converted := compactRichSyncForStorage(remote.Content, remote.Format)
+			if !converted {
+				content, format = remote.Content, remote.Format
+			}
+			cached := db.RichLyrics{TrackID: track.ID, Content: content, Format: format, SyncType: remote.SyncType, Source: remote.Source}
+			if !isWordRichEmpty(&cached) {
+				_ = db.UpsertRichLyrics(r.Context(), lyricsDB, cached)
+				updateBest(richCandidate{rich: &cached, priority: 2})
+			}
+		}()
 	}
-	if err := db.UpsertRichLyrics(r.Context(), lyricsDB, cached); err != nil {
-		setRequestIssue(r, slog.LevelWarn, err.Error())
-		return response
+
+	// LyricsPlus in parallel (CONCURRENT, NOT SEQUENTIAL)
+	if providers != nil && providers.lyricsPlusEnabled && providers.lyricsPlus != nil && track != nil && track.ID > 0 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			lpRemote, lpErr := providers.lyricsPlus.Get(r.Context(), lookupTrack, input.ArtistName, input.AlbumName, track.Duration, track.ISRC)
+			if lpErr != nil || lpRemote == nil || !lpRemote.WordSynced {
+				return
+			}
+			var lpRich db.RichLyrics
+			if strings.TrimSpace(lpRemote.TTML) != "" {
+				c, f, conv := compactRichSyncForStorage(lpRemote.TTML, "ttml")
+				if !conv {
+					c, f = lpRemote.TTML, "ttml"
+				}
+				lpRich = db.RichLyrics{TrackID: track.ID, Content: c, Format: f, SyncType: "word", Source: "lyricsplus"}
+			} else if strings.TrimSpace(lpRemote.RichJSON) != "" {
+				lpRich = db.RichLyrics{TrackID: track.ID, Content: lpRemote.RichJSON, Format: "json", SyncType: "word", Source: "lyricsplus"}
+			}
+			if lpRich.Content != "" && !isWordRichEmpty(&lpRich) {
+				_ = db.UpsertRichLyrics(r.Context(), lyricsDB, lpRich)
+				if stored, err3 := db.FindRichLyrics(r.Context(), lyricsDB, track.ID, "word"); err3 == nil && !isWordRichEmpty(stored) {
+					updateBest(richCandidate{rich: stored, priority: 3})
+				} else {
+					updateBest(richCandidate{rich: &lpRich, priority: 3})
+				}
+			}
+		}()
 	}
-	setRichOnlyResponse(&response, &cached)
+
+	wg.Wait()
+	setUpstreamDuration(r, time.Since(started))
+	if best.rich != nil {
+		setRichOnlyResponse(&response, best.rich)
+	}
 	return response
 }
 

@@ -9,8 +9,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sillygru/music-utils/internal/config"
 	"github.com/sillygru/music-utils/internal/db"
 	"github.com/sillygru/music-utils/internal/lrclib"
+	"github.com/sillygru/music-utils/internal/lyricsplus"
+	"github.com/sillygru/music-utils/internal/richlyrics"
 )
 
 func testHTTPDatabases(t *testing.T) (*sql.DB, *sql.DB) {
@@ -247,3 +250,99 @@ func TestMatchLyricsByNameSkipsSynthesized(t *testing.T) {
 		t.Fatalf("expected real match, got %+v", match)
 	}
 }
+
+func TestLyricsSearchCacheFirstImmediate(t *testing.T) {
+	metadataDB, lyricsDB := testHTTPDatabases(t)
+	cached := []lyricsResponse{
+		{
+			ID:           1,
+			TrackName:    "Make Me Wanna Die",
+			ArtistName:   "The Pretty Reckless",
+			AlbumName:    "Light Me Up",
+			Duration:     236,
+			SyncedLyrics: "[00:30.97]Take me, I'm alive",
+		},
+	}
+	encoded, err := json.Marshal(cached)
+	if err != nil {
+		t.Fatalf("marshal cached: %v", err)
+	}
+	key := lyricsSearchCacheKeyWithVideo("make me wanna die", 10, true, "word", "")
+	if err := db.UpsertLyricsSearchCache(context.Background(), lyricsDB, key, encoded); err != nil {
+		t.Fatalf("seed search cache: %v", err)
+	}
+
+	cfg := config.Config{Port: "8080"}
+	server := NewWithConfig(cfg, metadataDB, lyricsDB)
+	cleanupHTTPServer(t, server)
+
+	start := time.Now()
+	resp := performRequest(t, server.Handler, "/api/lyrics/search?q=make+me+wanna+die&limit=10&include_rich_sync=true&sync_type=word")
+	elapsed := time.Since(start)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	if elapsed > 100*time.Millisecond {
+		t.Fatalf("expected immediate cache-first return (<100ms), took %v", elapsed)
+	}
+	var results []lyricsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&results); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(results) != 1 || results[0].TrackName != "Make Me Wanna Die" {
+		t.Fatalf("unexpected results: %+v", results)
+	}
+}
+
+func TestFetchLiveRichForSearchResultsParallel(t *testing.T) {
+	unisonServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(150 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":true,"data":{"lyrics":"<tt><p begin=\"0s\"><span begin=\"0s\" end=\"1s\">Word</span></p></tt>","format":"ttml","syncType":"word"}}`))
+	}))
+	defer unisonServer.Close()
+
+	lpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(150 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"word_synced":true,"ttml":"<tt><p begin=\"0s\"><span begin=\"0s\" end=\"1s\">Word</span></p></tt>"}`))
+	}))
+	defer lpServer.Close()
+
+	metadataDB, lyricsDB := testHTTPDatabases(t)
+	seedHTTPTrack(t, metadataDB, lyricsDB)
+
+	richClient, _ := richlyrics.New(unisonServer.URL, "test", 1*time.Second)
+	lpClient, _ := lyricsplus.New(lpServer.URL, nil, "test", 1*time.Second)
+	providers := &lyricsProviders{
+		rich:              richClient,
+		richEnabled:       true,
+		lyricsPlus:        lpClient,
+		lyricsPlusEnabled: true,
+	}
+
+	results := []lyricsResponse{
+		{
+			ID:         1,
+			TrackName:  "Example Song",
+			ArtistName: "Example Artist",
+		},
+	}
+
+	start := time.Now()
+	err := fetchLiveRichForSearchResults(context.Background(), lyricsDB, providers, nil, results, "word", "client")
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// If run sequentially, it would take >= 300ms. If run in parallel, it takes ~150-250ms.
+	if elapsed >= 280*time.Millisecond {
+		t.Fatalf("expected parallel execution (<280ms), took %v", elapsed)
+	}
+	if results[0].RichSync == nil {
+		t.Fatal("expected richSync to be populated")
+	}
+}
+
