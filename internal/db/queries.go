@@ -370,6 +370,68 @@ ORDER BY CASE sync_type WHEN 'word' THEN 0 WHEN 'syllable' THEN 1 WHEN 'richsync
 	return rich, nil
 }
 
+// FindRichLyricsByName returns the best cached rich payload for any track
+// sharing the normalized track and artist name. This is used as a generic
+// cross-album fallback when a specific track_id has no rich variant but a
+// sibling row for the same song does. Artist must match; album and duration
+// are intentionally ignored. It uses metadataDB to resolve candidate track
+// ids and lyricsDB to fetch the variant, because the two databases are
+// separate SQLite files.
+func FindRichLyricsByName(ctx context.Context, metadataDB, lyricsDB *sql.DB, trackName, artistName, syncType string) (*RichLyrics, error) {
+	if lyricsDB == nil {
+		return nil, errors.New("lyrics database is nil")
+	}
+	if metadataDB == nil {
+		return nil, errors.New("metadata database is nil")
+	}
+	trackName = strings.TrimSpace(trackName)
+	artistName = strings.TrimSpace(artistName)
+	if trackName == "" || artistName == "" {
+		return nil, sql.ErrNoRows
+	}
+	syncType = strings.ToLower(strings.TrimSpace(syncType))
+	nameLower := normalize(trackName)
+	artistLower := normalize(artistName)
+	rows, err := metadataDB.QueryContext(ctx, `SELECT id FROM tracks WHERE name_lower=? AND artist_name_lower=?`, nameLower, artistLower)
+	if err != nil {
+		return nil, fmt.Errorf("find rich lyrics by name: %w", err)
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("find rich lyrics by name: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("find rich lyrics by name: %w", err)
+	}
+	if len(ids) == 0 {
+		return nil, sql.ErrNoRows
+	}
+	query := `SELECT id,track_id,content,format,sync_type,source,content_hash
+FROM lyrics_sync_variants
+WHERE track_id IN (` + strings.Repeat("?,", len(ids)-1) + `?) AND (?='' OR sync_type=?)
+ORDER BY CASE sync_type WHEN 'word' THEN 0 WHEN 'syllable' THEN 1 WHEN 'richsync' THEN 2 ELSE 3 END,
+         CASE source WHEN 'unison' THEN 0 ELSE 1 END, id DESC LIMIT 1`
+	args := make([]any, 0, len(ids)+2)
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	args = append(args, syncType, syncType)
+	rich := &RichLyrics{}
+	err = lyricsDB.QueryRowContext(ctx, query, args...).Scan(&rich.ID, &rich.TrackID, &rich.Content, &rich.Format, &rich.SyncType, &rich.Source, &rich.Hash)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, sql.ErrNoRows
+		}
+		return nil, fmt.Errorf("find rich lyrics by name: %w", err)
+	}
+	return rich, nil
+}
+
 // FindLyricsByID reads one row from the lyrics database.
 func FindLyricsByID(ctx context.Context, database *sql.DB, lyricsID int64) (*Lyrics, error) {
 	if database == nil {

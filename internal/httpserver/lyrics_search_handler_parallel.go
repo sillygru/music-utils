@@ -47,6 +47,41 @@ func searchLyricsHandlerParallel(metadataDB, lyricsDB *sql.DB, providers *lyrics
 			var cachedResults []lyricsResponse
 			if json.Unmarshal(cached, &cachedResults) == nil {
 				setOutcome(r, "local_hit")
+				if includeRich {
+					for i := range cachedResults {
+						if cachedResults[i].ID > 0 {
+							if rich, err := db.FindRichLyrics(r.Context(), lyricsDB, cachedResults[i].ID, syncType); err == nil {
+								if !isWordRichEmpty(rich) {
+									setRichOnlyResponse(&cachedResults[i], rich)
+								}
+							} else if enriched := tryEnrichSearchResultFromDB(r, metadataDB, lyricsDB, &cachedResults[i], syncType); enriched {
+							} else if byName, err := db.FindRichLyricsByName(r.Context(), metadataDB, lyricsDB, cachedResults[i].TrackName, cachedResults[i].ArtistName, syncType); err == nil && !isWordRichEmpty(byName) {
+								setRichOnlyResponse(&cachedResults[i], byName)
+							} else if syncType != "" {
+								if byName2, err := db.FindRichLyricsByName(r.Context(), metadataDB, lyricsDB, cachedResults[i].TrackName, cachedResults[i].ArtistName, ""); err == nil && !isWordRichEmpty(byName2) {
+									setRichOnlyResponse(&cachedResults[i], byName2)
+								}
+							}
+						}
+					}
+					// If still without valid word rich, try live lyricsplus/paxsenix now (not just background queue)
+					needsLive := false
+					for i := range cachedResults {
+						if cachedResults[i].ID > 0 && cachedResults[i].RichSync == nil {
+							needsLive = true
+							break
+						}
+					}
+					if needsLive {
+						liveCtx, cancel := context.WithTimeout(r.Context(), 4*time.Second)
+						_ = fetchLiveRichForSearchResults(liveCtx, lyricsDB, providers, fallbacks, cachedResults, syncType, clientIP(r, false))
+						cancel()
+						// Update cache with enriched results for next hit
+						if encoded, err := json.Marshal(cachedResults); err == nil {
+							_ = db.UpsertLyricsSearchCache(context.Background(), lyricsDB, cacheKey, encoded)
+						}
+					}
+				}
 				if enricher != nil {
 					for _, res := range cachedResults {
 						if res.ID > 0 {
@@ -74,7 +109,7 @@ func searchLyricsHandlerParallel(metadataDB, lyricsDB *sql.DB, providers *lyrics
 		// LRCLIB search budget merely to rediscover release variants.
 		skipRemote := includeRich && len(localTracks) > 0
 		results := group.lookup(r.Context(), cacheKey, func(ctx context.Context, publish func([]lyricsResponse)) {
-			runParallelLyricsSearch(ctx, publish, metadataDB, lyricsDB, providers, fallbacks, includeRich, skipRemote, clientIP(r, false), searchQuery, hintTrack, hintArtist, hintAlbum, videoID, limit, cacheKey)
+			runParallelLyricsSearch(ctx, publish, metadataDB, lyricsDB, providers, fallbacks, includeRich, syncType, skipRemote, clientIP(r, false), searchQuery, hintTrack, hintArtist, hintAlbum, videoID, limit, cacheKey)
 		})
 		if results == nil {
 			results = []lyricsResponse{}
@@ -131,4 +166,169 @@ func searchPersistResponse(ctx context.Context, metadataDB, lyricsDB *sql.DB, re
 	response := toLyricsResponse(&track, &lyrics)
 	appendLyricsVariant(&response, &response)
 	return response
+}
+
+func isWordRichEmpty(rich *db.RichLyrics) bool {
+	if rich == nil || rich.SyncType != "word" {
+		return false
+	}
+	parsed, ok := parseStoredCompactRichSync(rich.Content)
+	if !ok {
+		return false
+	}
+	if len(parsed.Lines) == 0 {
+		return true
+	}
+	for _, line := range parsed.Lines {
+		if len(line.Words) > 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func tryEnrichSearchResultFromDB(r *http.Request, metadataDB, lyricsDB *sql.DB, response *lyricsResponse, syncType string) bool {
+	if response == nil || response.ID <= 0 || lyricsDB == nil {
+		return false
+	}
+	if rich, err := db.FindRichLyrics(r.Context(), lyricsDB, response.ID, syncType); err == nil {
+		if isWordRichEmpty(rich) && syncType == "word" {
+			return false
+		}
+		setRichOnlyResponse(response, rich)
+		return true
+	}
+	if syncType != "" {
+		if rich, err := db.FindRichLyrics(r.Context(), lyricsDB, response.ID, ""); err == nil {
+			if isWordRichEmpty(rich) && syncType == "word" {
+				return false
+			}
+			setRichOnlyResponse(response, rich)
+			return true
+		}
+	}
+	if metadataDB != nil && response.ArtistName != "" {
+		if byName, err := db.FindRichLyricsByName(r.Context(), metadataDB, lyricsDB, response.TrackName, response.ArtistName, syncType); err == nil && !isWordRichEmpty(byName) {
+			setRichOnlyResponse(response, byName)
+			return true
+		}
+		if syncType != "" {
+			if byName, err := db.FindRichLyricsByName(r.Context(), metadataDB, lyricsDB, response.TrackName, response.ArtistName, ""); err == nil && !isWordRichEmpty(byName) {
+				setRichOnlyResponse(response, byName)
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func fetchLiveRichForSearchResults(ctx context.Context, lyricsDB *sql.DB, providers *lyricsProviders, fallbacks *fallbackGuard, results []lyricsResponse, syncType, clientKey string) error {
+	if providers == nil || lyricsDB == nil || len(results) == 0 {
+		return nil
+	}
+	for i := range results {
+		if results[i].RichSync != nil || results[i].ID <= 0 {
+			continue
+		}
+		// Prefer cached non-empty already handled; now try live
+		tryLive := func(get func(context.Context) (*db.RichLyrics, error)) bool {
+			if fallbacks != nil {
+				release, _, _, ok := fallbacks.acquireFor(ctx, clientKey)
+				if !ok {
+					return false
+				}
+				defer release()
+			}
+			rich, err := get(ctx)
+			if err != nil || rich == nil {
+				return false
+			}
+			setRichOnlyResponse(&results[i], rich)
+			return true
+		}
+		// LyricsPlus (prjktla) word-rich first – your best source
+		if providers.lyricsPlusEnabled && providers.lyricsPlus != nil {
+			_ = tryLive(func(c context.Context) (*db.RichLyrics, error) {
+				remote, err := providers.lyricsPlus.Get(c, results[i].TrackName, results[i].ArtistName, results[i].AlbumName, results[i].Duration, "")
+				if err != nil || !remote.WordSynced {
+					return nil, err
+				}
+				var rich db.RichLyrics
+				if strings.TrimSpace(remote.TTML) != "" {
+					content, format, converted := compactRichSyncForStorage(remote.TTML, "ttml")
+					if !converted {
+						content, format = remote.TTML, "ttml"
+					}
+					rich = db.RichLyrics{TrackID: results[i].ID, Content: content, Format: format, SyncType: "word", Source: "lyricsplus"}
+					if err := db.UpsertRichLyrics(c, lyricsDB, rich); err != nil {
+						return nil, err
+					}
+					if stored, err := db.FindRichLyrics(c, lyricsDB, results[i].ID, "word"); err == nil {
+						return stored, nil
+					}
+					return &rich, nil
+				}
+				if strings.TrimSpace(remote.RichJSON) != "" {
+					rich = db.RichLyrics{TrackID: results[i].ID, Content: remote.RichJSON, Format: "json", SyncType: "word", Source: "lyricsplus"}
+					if err := db.UpsertRichLyrics(c, lyricsDB, rich); err != nil {
+						return nil, err
+					}
+					if stored, err := db.FindRichLyrics(c, lyricsDB, results[i].ID, "word"); err == nil {
+						return stored, nil
+					}
+					return &rich, nil
+				}
+				return nil, err
+			})
+			if results[i].RichSync != nil {
+				continue
+			}
+		}
+		// Paxsenix as fallback
+		if providers.paxsenixEnabled && providers.paxsenix != nil {
+			_ = tryLive(func(c context.Context) (*db.RichLyrics, error) {
+				remote, err := providers.paxsenix.Get(c, results[i].TrackName, results[i].ArtistName, results[i].AlbumName)
+				if err != nil || !remote.WordSynced || strings.TrimSpace(remote.TTML) == "" {
+					return nil, err
+				}
+				content, format, converted := compactRichSyncForStorage(remote.TTML, "ttml")
+				if !converted {
+					content, format = remote.TTML, "ttml"
+				}
+				rich := db.RichLyrics{TrackID: results[i].ID, Content: content, Format: format, SyncType: "word", Source: "paxsenix"}
+				if err := db.UpsertRichLyrics(c, lyricsDB, rich); err != nil {
+					return nil, err
+				}
+				if stored, err := db.FindRichLyrics(c, lyricsDB, results[i].ID, "word"); err == nil && !isWordRichEmpty(stored) {
+					return stored, nil
+				}
+				if isWordRichEmpty(&rich) {
+					return nil, err
+				}
+				return &rich, nil
+			})
+			if results[i].RichSync != nil {
+				continue
+			}
+		}
+		// Unison last
+		if providers.richEnabled && providers.rich != nil {
+			_ = tryLive(func(c context.Context) (*db.RichLyrics, error) {
+				remote, err := providers.rich.Get(c, results[i].TrackName, results[i].ArtistName, results[i].AlbumName)
+				if err != nil || !validRichSyncType(remote.SyncType) {
+					return nil, err
+				}
+				content, format, converted := compactRichSyncForStorage(remote.Content, remote.Format)
+				if !converted {
+					content, format = remote.Content, remote.Format
+				}
+				rich := db.RichLyrics{TrackID: results[i].ID, Content: content, Format: format, SyncType: remote.SyncType, Source: remote.Source}
+				if err := db.UpsertRichLyrics(c, lyricsDB, rich); err != nil {
+					return nil, err
+				}
+				return &rich, nil
+			})
+		}
+	}
+	return nil
 }

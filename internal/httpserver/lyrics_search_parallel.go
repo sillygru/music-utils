@@ -109,7 +109,9 @@ func runParallelLyricsSearch(
 	metadataDB, lyricsDB *sql.DB,
 	providers *lyricsProviders,
 	fallbacks *fallbackGuard,
-	richRequested, skipRemote bool,
+	richRequested bool,
+	syncType string,
+	skipRemote bool,
 	clientKey, query string,
 	hintTrack, hintArtist, hintAlbum, videoID string,
 	limit int,
@@ -161,6 +163,26 @@ func runParallelLyricsSearch(
 		for i := range tracks {
 			response := toLyricsResponse(&tracks[i].Track, &tracks[i].Lyrics)
 			appendLyricsVariant(&response, &response)
+			if richRequested && response.ID > 0 && lyricsDB != nil {
+				if rich, err := db.FindRichLyrics(ctx, lyricsDB, response.ID, syncType); err == nil {
+					if !isWordRichEmpty(rich) {
+						setRichOnlyResponse(&response, rich)
+					}
+				} else if syncType != "" {
+					if rich2, err2 := db.FindRichLyrics(ctx, lyricsDB, response.ID, ""); err2 == nil && !isWordRichEmpty(rich2) {
+						setRichOnlyResponse(&response, rich2)
+					}
+				}
+				if response.RichSync == nil && metadataDB != nil && response.ArtistName != "" {
+					if byName, err := db.FindRichLyricsByName(ctx, metadataDB, lyricsDB, response.TrackName, response.ArtistName, syncType); err == nil && !isWordRichEmpty(byName) {
+						setRichOnlyResponse(&response, byName)
+					} else if syncType != "" {
+						if byName2, err2 := db.FindRichLyricsByName(ctx, metadataDB, lyricsDB, response.TrackName, response.ArtistName, ""); err2 == nil && !isWordRichEmpty(byName2) {
+							setRichOnlyResponse(&response, byName2)
+						}
+					}
+				}
+			}
 			local = append(local, response)
 		}
 		merge(local)
@@ -181,11 +203,20 @@ func runParallelLyricsSearch(
 			if err != nil {
 				return
 			}
+			// Generic dedup: LRCLIB returns near-duplicate release variants for
+			// the same song (different album/duration). Persist only first per
+			// normalized track+artist to avoid cache pollution.
+			seenRemote := make(map[string]struct{}, len(remote))
 			remoteResults := make([]lyricsResponse, 0, len(remote))
 			for _, result := range remote {
 				if synthesizedLyricsResult(result) || !remoteLyricsAvailable(&result) {
 					continue
 				}
+				identity := searchLyricsIdentity(result.TrackName, result.ArtistName)
+				if _, ok := seenRemote[identity]; ok {
+					continue
+				}
+				seenRemote[identity] = struct{}{}
 				remoteResults = append(remoteResults, searchPersistResponse(ctx, metadataDB, lyricsDB, result, "lrclib_fallback"))
 			}
 			merge(remoteResults)
@@ -196,7 +227,8 @@ func runParallelLyricsSearch(
 	// free-text query as title). Each persists its own hits, which are merged
 	// into the same ranked set.
 	title := searchProviderTitle(hintTrack, query)
-	if title != "" && !skipRemote {
+	allowMetadataRich := richRequested
+	if title != "" && (!skipRemote || allowMetadataRich) {
 		if providers.betterEnabled && providers.better != nil && hintArtist != "" {
 			ordinaryWG.Add(1)
 			go func() {
@@ -406,6 +438,27 @@ func runParallelLyricsSearch(
 			if current[i].ID <= 0 {
 				continue
 			}
+			// Prefer cached rich – satisfies stale-but-quick + enqueues via handler.
+			if rich, err := db.FindRichLyrics(ctx, lyricsDB, current[i].ID, syncType); err == nil && !isWordRichEmpty(rich) {
+				setRichOnlyResponse(&current[i], rich)
+				continue
+			} else if syncType != "" {
+				if rich2, err2 := db.FindRichLyrics(ctx, lyricsDB, current[i].ID, ""); err2 == nil && !isWordRichEmpty(rich2) {
+					setRichOnlyResponse(&current[i], rich2)
+					continue
+				}
+			}
+			if metadataDB != nil && current[i].ArtistName != "" {
+				if byName, err := db.FindRichLyricsByName(ctx, metadataDB, lyricsDB, current[i].TrackName, current[i].ArtistName, syncType); err == nil && !isWordRichEmpty(byName) {
+					setRichOnlyResponse(&current[i], byName)
+					continue
+				} else if syncType != "" {
+					if byName2, err2 := db.FindRichLyricsByName(ctx, metadataDB, lyricsDB, current[i].TrackName, current[i].ArtistName, ""); err2 == nil && !isWordRichEmpty(byName2) {
+						setRichOnlyResponse(&current[i], byName2)
+						continue
+					}
+				}
+			}
 			richWG.Add(1)
 			go func(index int) {
 				defer richWG.Done()
@@ -432,7 +485,22 @@ func runParallelLyricsSearch(
 			}(i)
 		}
 		richWG.Wait()
-		merge(current)
+		// Merge back – handles both cached-sync and live-fetched.
+		mu.Lock()
+		hasRich := false
+		for _, r := range current {
+			if r.RichSync != nil {
+				hasRich = true
+				break
+			}
+		}
+		mu.Unlock()
+		if hasRich {
+			merge(current)
+		} else {
+			// Even without new rich, re-merge cached enriched locals if they had rich before Wait
+			merge(current)
+		}
 	}
 }
 

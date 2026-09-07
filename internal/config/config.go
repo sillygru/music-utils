@@ -63,7 +63,7 @@ const (
 	defaultPaxsenixProxyBaseURL     = "https://lyrics.paxsenix.org"
 	defaultPaxsenixAppleBaseURL     = "https://beta.music.apple.com"
 	defaultPaxsenixTimeoutMS        = 10000
-	defaultLyricsPlusEnabled        = false
+	defaultLyricsPlusEnabled        = true
 	defaultLyricsPlusAPIBaseURL     = "https://lyrics-api.binimum.org"
 	defaultLyricsPlusTimeoutMS      = 10000
 	defaultZemerEnabled             = true

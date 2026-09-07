@@ -173,6 +173,27 @@ func hasRichSource(sources map[string]struct{}, source string) bool {
 	return ok
 }
 
+func isEnrichWordEmpty(trackID int64, provider string, lyricsDB *sql.DB) bool {
+	if trackID <= 0 || lyricsDB == nil {
+		return false
+	}
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	// Only word-synced providers can be empty-word stale.
+	if provider != "paxsenix" && provider != "betterlyrics" && provider != "lyricsplus" && provider != "unison" {
+		return false
+	}
+	// Direct provider row check.
+	var content, format, syncType string
+	err := lyricsDB.QueryRow(`SELECT content, format, sync_type FROM lyrics_sync_variants WHERE track_id=? AND source=? AND sync_type='word' LIMIT 1`, trackID, provider).Scan(&content, &format, &syncType)
+	if err != nil {
+		return false
+	}
+	// Reuse existing empty-word detector (via compact parse).
+	// We avoid importing parse function directly – inline check: if content is JSON with words empty.
+	rich := &db.RichLyrics{TrackID: trackID, Content: content, Format: format, SyncType: syncType, Source: provider}
+	return isWordRichEmpty(rich)
+}
+
 func (e *enricher) process(ctx context.Context, job enrichJob) {
 	defer e.finish(job)
 	if e.providers == nil || e.lyricsDB == nil {
@@ -224,14 +245,24 @@ func (e *enricher) process(ctx context.Context, job enrichJob) {
 			}
 		}
 		if specs[i].has {
-			specs[i].enabled = false
+			// Empty-word word variants don't count as having rich – allow retry with better source.
+			if isEnrichWordEmpty(job.trackID, specs[i].name, e.lyricsDB) {
+				specs[i].has = false
+			} else {
+				specs[i].enabled = false
+			}
 		}
 		if specs[i].enabled && e.lyricsMisses != nil && e.lyricsMisses.HasProvider(specs[i].name, job.trackName, job.artistName, job.albumName, job.videoID, time.Now()) {
 			specs[i].enabled = false
 		}
 		if specs[i].enabled && job.trackID > 0 && e.lyricsDB != nil {
 			if recent, err := db.HasRecentProviderFetch(ctx, e.lyricsDB, job.trackID, specs[i].name, db.ProviderFetchStaleTTL); err == nil && recent {
-				specs[i].enabled = false
+				// If the last fetch was word-empty, don't treat it as recent success – retry quickly.
+				if isEnrichWordEmpty(job.trackID, specs[i].name, e.lyricsDB) {
+					// Allow immediate retry by ignoring the stale TTL.
+				} else {
+					specs[i].enabled = false
+				}
 			}
 		}
 	}
