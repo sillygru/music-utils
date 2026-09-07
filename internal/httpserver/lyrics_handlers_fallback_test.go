@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -89,7 +90,15 @@ func TestGetLyricsDoesNotReturnEmptyCachedLyrics(t *testing.T) {
 			_, _ = w.Write([]byte(`{"id":14306,"trackName":"No Surprises","artistName":"Radiohead","albumName":"OK Computer","duration":229.12,"instrumental":false,"plainLyrics":"","syncedLyrics":""}`))
 		case "/api/search":
 			searchCalls.Add(1)
-			if got := r.URL.Query().Get("q"); got != "No Surprises Radiohead" {
+			// The multi-strategy fallback queries by typed parameters first
+			// and free text later; every shape for this song resolves to the
+			// same release variant, mirroring LRCLIB's cross-release match.
+			query := r.URL.Query()
+			if track := query.Get("track_name"); track != "" {
+				if track != "No Surprises" {
+					t.Fatalf("unexpected search track: %q", track)
+				}
+			} else if got := query.Get("q"); !strings.Contains(got, "No Surprises") {
 				t.Fatalf("unexpected search query: %q", got)
 			}
 			w.Header().Set("Content-Type", "application/json")
@@ -206,6 +215,12 @@ func TestGetLyricsRejectsWrongUpstreamSong(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
 		w.Header().Set("Content-Type", "application/json")
+		// Search endpoints return arrays, the exact endpoint one object; every
+		// shape carries the wrong recording so nothing may be cached.
+		if strings.HasPrefix(r.URL.Path, "/api/search") {
+			_, _ = w.Write([]byte(`[{"trackName":"Different Song","artistName":"Same Artist","albumName":"Album","duration":200,"instrumental":false,"plainLyrics":"wrong lyrics","syncedLyrics":""}]`))
+			return
+		}
 		_, _ = w.Write([]byte(`{"trackName":"Different Song","artistName":"Same Artist","albumName":"Album","duration":200,"instrumental":false,"plainLyrics":"wrong lyrics","syncedLyrics":""}`))
 	}))
 	defer upstream.Close()
@@ -218,8 +233,10 @@ func TestGetLyricsRejectsWrongUpstreamSong(t *testing.T) {
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("expected wrong upstream result to be rejected with 404, got %d: %s", response.Code, response.Body.String())
 	}
-	if calls.Load() != 1 {
-		t.Fatalf("expected one upstream request, got %d", calls.Load())
+	// One exact lookup plus the five multi-strategy fallback searches, all
+	// returning the wrong recording: nothing may be cached.
+	if calls.Load() != 6 {
+		t.Fatalf("expected six upstream requests, got %d", calls.Load())
 	}
 	if _, _, err := db.FindTrackExact(context.Background(), metadataDB, lyricsDB, "Requested Song", "Same Artist", "", 0); err == nil {
 		t.Fatal("wrong upstream result was cached under the requested song")
@@ -263,8 +280,10 @@ func TestGetLyricsNegativeCacheSkipsUpstreamRepeat(t *testing.T) {
 			t.Fatalf("expected 404, got %d: %s", response.Code, response.Body.String())
 		}
 	}
-	if calls.Load() != 1 {
-		t.Fatalf("expected one upstream request after negative caching, got %d", calls.Load())
+	// One exact lookup plus the five multi-strategy fallback searches on the
+	// first miss; repeats are memoized and never re-hit upstream.
+	if calls.Load() != 6 {
+		t.Fatalf("expected six upstream requests after negative caching, got %d", calls.Load())
 	}
 }
 

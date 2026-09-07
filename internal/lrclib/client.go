@@ -98,6 +98,120 @@ func (c *Client) Search(ctx context.Context, query string) ([]RemoteResult, erro
 	return results, nil
 }
 
+// SearchFiltered searches with typed track/artist/album parameters and picks
+// the closest match. It backs the multi-strategy exact lookup below.
+func (c *Client) SearchFiltered(ctx context.Context, trackName, artistName, albumName string) ([]RemoteResult, error) {
+	if c == nil || c.http == nil {
+		return nil, errors.New("LRCLIB client is nil")
+	}
+	endpoint, err := url.Parse(c.baseURL + "/search")
+	if err != nil {
+		return nil, fmt.Errorf("build LRCLIB URL: %w", err)
+	}
+	params := endpoint.Query()
+	if strings.TrimSpace(trackName) != "" {
+		params.Set("track_name", strings.TrimSpace(trackName))
+	}
+	if strings.TrimSpace(artistName) != "" {
+		params.Set("artist_name", strings.TrimSpace(artistName))
+	}
+	if strings.TrimSpace(albumName) != "" {
+		params.Set("album_name", strings.TrimSpace(albumName))
+	}
+	endpoint.RawQuery = params.Encode()
+	var results []RemoteResult
+	if err := c.doJSON(ctx, endpoint.String(), &results); err != nil {
+		return nil, err
+	}
+	return results, nil
+}
+
+// GetWithFallbacks runs the multi-strategy exact lookup: typed
+// track+artist+album, track only, free-text "artist title", title only, then
+// the original un-cleaned names. Duration (seconds, <=0 unknown) is never
+// sent upstream; it only ranks candidates locally (±2s strict, ±5s relaxed).
+func (c *Client) GetWithFallbacks(ctx context.Context, trackName, artistName, albumName string, duration float64) (*RemoteResult, error) {
+	input := names.Normalize(trackName, artistName, albumName)
+	type strategy struct {
+		track, artist, album string
+		freeText             string
+	}
+	strategies := []strategy{
+		{track: input.TrackName, artist: input.ArtistName, album: input.AlbumName},
+		{track: input.TrackName},
+		{freeText: strings.TrimSpace(input.ArtistName + " " + input.TrackName)},
+		{freeText: input.TrackName},
+		{track: strings.TrimSpace(trackName), artist: strings.TrimSpace(artistName)},
+	}
+	var relaxed *RemoteResult
+	for _, item := range strategies {
+		var results []RemoteResult
+		var err error
+		if item.freeText != "" {
+			results, err = c.Search(ctx, item.freeText)
+		} else {
+			results, err = c.SearchFiltered(ctx, item.track, item.artist, item.album)
+		}
+		if err != nil {
+			if errors.Is(err, ErrNotFound) {
+				continue
+			}
+			return nil, err
+		}
+		if match := bestMatch(results, input.TrackName, input.ArtistName, duration, 2); match != nil {
+			return match, nil
+		}
+		if relaxed == nil {
+			relaxed = bestMatch(results, input.TrackName, input.ArtistName, duration, 5)
+		}
+	}
+	if relaxed != nil {
+		return relaxed, nil
+	}
+	return nil, ErrNotFound
+}
+
+// bestMatch picks the first result whose track/artist names match and whose
+// duration falls within tolerance seconds of the hint (when both are known).
+func bestMatch(results []RemoteResult, trackName, artistName string, duration, tolerance float64) *RemoteResult {
+	for i := range results {
+		result := &results[i]
+		if !nameMatches(result.TrackName, trackName) {
+			continue
+		}
+		if strings.TrimSpace(artistName) != "" && !nameMatches(result.ArtistName, artistName) {
+			continue
+		}
+		if result.PlainLyrics == "" && result.SyncedLyrics == "" && !result.Instrumental {
+			continue
+		}
+		if duration > 0 && result.Duration > 0 && absDuration(result.Duration-duration) > tolerance {
+			continue
+		}
+		return result
+	}
+	return nil
+}
+
+func nameMatches(candidate, want string) bool {
+	candidate = strings.ToLower(strings.TrimSpace(candidate))
+	want = strings.ToLower(strings.TrimSpace(want))
+	if candidate == "" || want == "" {
+		return false
+	}
+	if candidate == want {
+		return true
+	}
+	return strings.Contains(candidate, want) || strings.Contains(want, candidate)
+}
+
+func absDuration(value float64) float64 {
+	if value < 0 {
+		return -value
+	}
+	return value
+}
+
 // GetExact performs one request and returns ErrNotFound for a remote 404.
 // Only title, artist, and album are ever sent: duration and all other
 // metadata are deliberately excluded so a duration mismatch can never filter

@@ -13,10 +13,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sillygru/music-utils/internal/applemusic"
 	"github.com/sillygru/music-utils/internal/db"
 	"github.com/sillygru/music-utils/internal/lrclib"
-	"github.com/sillygru/music-utils/internal/musixmatch"
 	"github.com/sillygru/music-utils/internal/names"
 	"github.com/sillygru/music-utils/internal/richlyrics"
 )
@@ -114,7 +112,7 @@ type apiError struct {
 	Message string `json:"message"`
 }
 
-func getLyricsHandler(metadataDB, lyricsDB *sql.DB, client *lrclib.Client, richClient *richlyrics.Client, appleClient *applemusic.Client, musixClient *musixmatch.Client, lyricsMisses *lyricsMissCache, fallbacks *fallbackGuard, fallbackEnabled, richEnabled, appleEnabled, musixEnabled bool, prefetcher *prefetcher) http.HandlerFunc {
+func getLyricsHandler(metadataDB, lyricsDB *sql.DB, providers *lyricsProviders, lyricsMisses *lyricsMissCache, fallbacks *fallbackGuard, prefetcher *prefetcher) http.HandlerFunc {
 	lookupGroup := newLyricsLookupGroup()
 	return func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
@@ -126,6 +124,10 @@ func getLyricsHandler(metadataDB, lyricsDB *sql.DB, client *lrclib.Client, richC
 			writeJSON(w, http.StatusBadRequest, apiError{Code: http.StatusBadRequest, Message: "track_name is required"})
 			return
 		}
+		// video_id is an optional hint forwarded only to video-keyed providers
+		// (Zemer, YouTube official lyrics, YouTube subtitles). An invalid value
+		// is ignored rather than rejected so older clients keep working.
+		videoID := sanitizeVideoID(query.Get("video_id"))
 
 		duration, err := optionalDuration(query.Get("duration"))
 		if err != nil {
@@ -150,7 +152,7 @@ func getLyricsHandler(metadataDB, lyricsDB *sql.DB, client *lrclib.Client, richC
 		if err == nil && lyricsAvailable(lyrics) {
 			setOutcome(r, "local_hit")
 			prefetcher.Enqueue(track.Name, track.ArtistName, track.AlbumName, track.Duration)
-			writeJSON(w, http.StatusOK, enrichLyricsResponse(r, track, lyrics, lyricsDB, richClient, fallbacks, richEnabled))
+			writeJSON(w, http.StatusOK, enrichLyricsResponse(r, track, lyrics, lyricsDB, providers.rich, fallbacks, providers.richEnabled))
 			return
 		}
 		// A metadata row can exist before lyrics have been fetched. Treat an
@@ -173,9 +175,10 @@ func getLyricsHandler(metadataDB, lyricsDB *sql.DB, client *lrclib.Client, richC
 		// true only for a genuine miss (never for rate limiting or an
 		// upstream-busy response, which are terminal).
 		resolveUpstream := func(lookupTrack, lookupArtist, lookupAlbum string, existing *db.Track) (served, miss bool) {
-			missKey := lyricsMissKey(lookupTrack, lookupArtist, lookupAlbum)
+			missKey := lyricsMissKeyWithVideo(lookupTrack, lookupArtist, lookupAlbum, videoID)
+			lookupKey := missKey
 			if lyricsMisses.Has(missKey, time.Now()) {
-				if richResponse, ok := tryRichOnlyResponse(r, metadataDB, lyricsDB, richClient, fallbacks, richEnabled, existing, lookupTrack, lookupArtist, lookupAlbum, duration); ok {
+				if richResponse, ok := tryRichOnlyResponse(r, metadataDB, lyricsDB, providers.rich, fallbacks, providers.richEnabled, existing, lookupTrack, lookupArtist, lookupAlbum, duration); ok {
 					setOutcome(r, "rich_lyrics_fallback_hit")
 					writeJSON(w, http.StatusOK, richResponse)
 					return true, false
@@ -183,8 +186,8 @@ func getLyricsHandler(metadataDB, lyricsDB *sql.DB, client *lrclib.Client, richC
 				return false, true
 			}
 
-			if !fallbackEnabled || client == nil {
-				if richResponse, ok := tryRichOnlyResponse(r, metadataDB, lyricsDB, richClient, fallbacks, richEnabled, existing, lookupTrack, lookupArtist, lookupAlbum, duration); ok {
+			if !providers.anyEnabled(includeRichSync(r)) {
+				if richResponse, ok := tryRichOnlyResponse(r, metadataDB, lyricsDB, providers.rich, fallbacks, providers.richEnabled, existing, lookupTrack, lookupArtist, lookupAlbum, duration); ok {
 					setOutcome(r, "rich_lyrics_fallback_hit")
 					writeJSON(w, http.StatusOK, richResponse)
 					return true, false
@@ -192,8 +195,12 @@ func getLyricsHandler(metadataDB, lyricsDB *sql.DB, client *lrclib.Client, richC
 				return false, true
 			}
 
-			parallelResult := lookupGroup.lookup(r.Context(), missKey, func(ctx context.Context, publish func(lyricsLookupResult)) {
-				runParallelLyricsGet(ctx, publish, metadataDB, lyricsDB, client, richClient, appleClient, musixClient, lyricsMisses, fallbacks, fallbackEnabled, richEnabled, appleEnabled, musixEnabled, includeRichSync(r), clientIP(r, false), existing, lookupTrack, lookupArtist, lookupAlbum, duration)
+			isrc := ""
+			if existing != nil {
+				isrc = existing.ISRC
+			}
+			parallelResult := lookupGroup.lookup(r.Context(), lookupKey, func(ctx context.Context, publish func(lyricsLookupResult)) {
+				runParallelLyricsGet(ctx, publish, metadataDB, lyricsDB, providers, lyricsMisses, fallbacks, includeRichSync(r), clientIP(r, false), existing, lookupTrack, lookupArtist, lookupAlbum, duration, videoID, isrc)
 			})
 			if parallelResult.upstream > 0 {
 				setUpstreamDuration(r, parallelResult.upstream)
@@ -243,7 +250,7 @@ func getLyricsHandler(metadataDB, lyricsDB *sql.DB, client *lrclib.Client, richC
 		if fbErr == nil && lyricsAvailable(fbLyrics) {
 			setOutcome(r, "local_hit")
 			prefetcher.Enqueue(fbTrack.Name, fbTrack.ArtistName, fbTrack.AlbumName, fbTrack.Duration)
-			writeJSON(w, http.StatusOK, enrichLyricsResponse(r, fbTrack, fbLyrics, lyricsDB, richClient, fallbacks, richEnabled))
+			writeJSON(w, http.StatusOK, enrichLyricsResponse(r, fbTrack, fbLyrics, lyricsDB, providers.rich, fallbacks, providers.richEnabled))
 			return
 		}
 		fbExisting := existingTrack
@@ -577,10 +584,17 @@ func remoteLyricsMatchesInput(input names.Input, result *lrclib.RemoteResult) bo
 
 // lookupRemoteLyrics resolves lyrics upstream. Only title, artist, and album
 // are ever sent: duration and all other metadata are deliberately excluded so
-// a duration mismatch can never filter out the correct recording. LRCLIB's
-// exact endpoint requires an artist, so an artist-less request resolves
-// through search and selects the best result instead.
+// a duration mismatch can never filter out the correct recording. Duration is
+// used only to rank candidates locally. LRCLIB's exact endpoint requires an
+// artist, so an artist-less request resolves through search and selects the
+// best result instead.
 func lookupRemoteLyrics(ctx context.Context, client *lrclib.Client, trackName, artistName, albumName string) (*lrclib.RemoteResult, error) {
+	return lookupRemoteLyricsWithDuration(ctx, client, trackName, artistName, albumName, 0)
+}
+
+// lookupRemoteLyricsWithDuration is lookupRemoteLyrics plus the local duration
+// hint used by the multi-strategy fallback chain (±2s strict, ±5s relaxed).
+func lookupRemoteLyricsWithDuration(ctx context.Context, client *lrclib.Client, trackName, artistName, albumName string, duration float64) (*lrclib.RemoteResult, error) {
 	var lastErr error
 	for _, candidate := range names.Candidates(trackName, artistName, albumName) {
 		if candidate.ArtistName == "" {
@@ -601,9 +615,22 @@ func lookupRemoteLyrics(ctx context.Context, client *lrclib.Client, trackName, a
 				return remote, nil
 			}
 			// A successful HTTP response is not necessarily the requested
-			// recording. Treat an identity mismatch like a miss so a different
-			// song can never be persisted under this request's cache key.
+			// recording. Fall through to the multi-strategy search before
+			// treating this as a miss.
 			err = lrclib.ErrNotFound
+		}
+		if err != nil && !errors.Is(err, lrclib.ErrNotFound) {
+			lastErr = err
+			continue
+		}
+		if fallback, fallbackErr := client.GetWithFallbacks(ctx, candidate.TrackName, candidate.ArtistName, candidate.AlbumName, duration); fallbackErr == nil {
+			if remoteLyricsMatchesInput(candidate, fallback) && remoteLyricsAvailable(fallback) {
+				return fallback, nil
+			}
+			err = lrclib.ErrNotFound
+		} else if !errors.Is(fallbackErr, lrclib.ErrNotFound) {
+			lastErr = fallbackErr
+			continue
 		}
 		lastErr = err
 	}

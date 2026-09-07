@@ -72,7 +72,7 @@ func sqliteDSN(path string, cfg Config) string {
 	}
 
 	pragmas := fmt.Sprintf(
-		"_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=temp_store(MEMORY)&_pragma=mmap_size(%s)&_pragma=cache_size(%s)&_pragma=foreign_keys(ON)&_pragma=busy_timeout(%d)",
+		"_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=temp_store(MEMORY)&_pragma=mmap_size(%s)&_pragma=cache_size(%s)&_pragma=foreign_keys(ON)&_pragma=busy_timeout(%d)&_pragma=journal_size_limit(67108864)&_pragma=wal_autocheckpoint(1000)",
 		strconv.FormatInt(cfg.MmapSize, 10),
 		strconv.FormatInt(cfg.CacheSizeKB, 10),
 		defaultBusyTimeoutMS,

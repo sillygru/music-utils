@@ -146,6 +146,12 @@ func NewWithLogger(cfg config.Config, metadataDB, lyricsDB, coverDB *sql.DB, log
 	richClient := newRichLyricsClient(cfg, logger)
 	appleClient := newAppleMusicClient(cfg, logger)
 	musixClient := newMusixmatchClient(cfg, logger)
+	betterClient := newBetterLyricsClient(cfg, logger)
+	kugouClient := newKugouClient(cfg, logger)
+	paxsenixClient := newPaxsenixClient(cfg, logger)
+	lyricsPlusClient := newLyricsPlusClient(cfg, logger)
+	zemerClient := newZemerClient(cfg, logger)
+	tubeClient := newInnerTubeClient(cfg, logger)
 	richLyricsMigrationStop := startRichLyricsMigration(lyricsDB, logger)
 	var requestLogs *reqlog.Writer
 	if cfg.RequestLogEnabled {
@@ -202,8 +208,8 @@ func NewWithLogger(cfg config.Config, metadataDB, lyricsDB, coverDB *sql.DB, log
 			mux.HandleFunc("GET "+statsSongsPath, statsSongsHandler(metadataDB))
 		}
 	}
-	mux.HandleFunc("GET /api/lyrics/get", getLyricsHandler(metadataDB, lyricsDB, client, richClient, appleClient, musixClient, lyricsMisses, fallbacks, cfg.LRCLIBFallbackEnabled, cfg.RichLyricsEnabled, cfg.AppleMusicEnabled, cfg.MusixmatchEnabled, prefetcher))
-	mux.HandleFunc("GET /api/lyrics/search", searchLyricsHandlerParallel(metadataDB, lyricsDB, client, richClient, fallbacks, cfg.LRCLIBFallbackEnabled, cfg.RichLyricsEnabled))
+	mux.HandleFunc("GET /api/lyrics/get", getLyricsHandler(metadataDB, lyricsDB, newLyricsProviders(client, richClient, appleClient, musixClient, betterClient, kugouClient, paxsenixClient, lyricsPlusClient, zemerClient, tubeClient, cfg), lyricsMisses, fallbacks, prefetcher))
+	mux.HandleFunc("GET /api/lyrics/search", searchLyricsHandlerParallel(metadataDB, lyricsDB, newLyricsProviders(client, richClient, appleClient, musixClient, betterClient, kugouClient, paxsenixClient, lyricsPlusClient, zemerClient, tubeClient, cfg), fallbacks))
 	mux.HandleFunc("GET /api/metadata/get", getMetadataHandler(metadataDB, metadataResolver, fallbacks, cfg.MetadataFallbackEnabled, prefetcher))
 	mux.HandleFunc("GET /api/metadata/search", searchMetadataHandlerWithUpstream(metadataDB, metadataResolver, fallbacks, cfg.MetadataFallbackEnabled))
 	mux.HandleFunc("GET /api/cover/get", getCoverTopHandler(metadataDB, coverDB, coverResolver, fallbacks, cfg.CoverFallbackEnabled, prefetcher))

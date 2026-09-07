@@ -14,10 +14,9 @@ import (
 	"github.com/sillygru/music-utils/internal/db"
 	"github.com/sillygru/music-utils/internal/lrclib"
 	"github.com/sillygru/music-utils/internal/names"
-	"github.com/sillygru/music-utils/internal/richlyrics"
 )
 
-func searchLyricsHandlerParallel(metadataDB, lyricsDB *sql.DB, client *lrclib.Client, richClient *richlyrics.Client, fallbacks *fallbackGuard, fallbackEnabled, richEnabled bool) http.HandlerFunc {
+func searchLyricsHandlerParallel(metadataDB, lyricsDB *sql.DB, providers *lyricsProviders, fallbacks *fallbackGuard) http.HandlerFunc {
 	group := newLyricsSearchGroup()
 	return func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
@@ -38,7 +37,11 @@ func searchLyricsHandlerParallel(metadataDB, lyricsDB *sql.DB, client *lrclib.Cl
 		}
 		includeRich := includeRichSync(r)
 		syncType := requestedRichSyncType(r)
-		cacheKey := lyricsSearchCacheKey(searchQuery, limit, includeRich, syncType)
+		videoID := sanitizeVideoID(query.Get("video_id"))
+		hintTrack := strings.TrimSpace(query.Get("track_name"))
+		hintArtist := strings.TrimSpace(query.Get("artist_name"))
+		hintAlbum := strings.TrimSpace(query.Get("album_name"))
+		cacheKey := lyricsSearchCacheKeyWithVideo(searchQuery, limit, includeRich, syncType, videoID)
 
 		if cached, cacheErr := db.FindLyricsSearchCache(r.Context(), lyricsDB, cacheKey, lyricsSearchCacheTTL); cacheErr == nil {
 			var cachedResults []lyricsResponse
@@ -63,7 +66,7 @@ func searchLyricsHandlerParallel(metadataDB, lyricsDB *sql.DB, client *lrclib.Cl
 		// LRCLIB search budget merely to rediscover release variants.
 		skipRemote := includeRich && len(localTracks) > 0
 		results := group.lookup(r.Context(), cacheKey, func(ctx context.Context, publish func([]lyricsResponse)) {
-			runParallelLyricsSearch(ctx, publish, metadataDB, lyricsDB, client, richClient, fallbacks, fallbackEnabled, richEnabled, includeRich, skipRemote, clientIP(r, false), searchQuery, limit, cacheKey)
+			runParallelLyricsSearch(ctx, publish, metadataDB, lyricsDB, providers, fallbacks, includeRich, skipRemote, clientIP(r, false), searchQuery, hintTrack, hintArtist, hintAlbum, videoID, limit, cacheKey)
 		})
 		if results == nil {
 			results = []lyricsResponse{}
@@ -88,4 +91,31 @@ func searchLyricsHandlerParallel(metadataDB, lyricsDB *sql.DB, client *lrclib.Cl
 		}
 		writeJSON(w, http.StatusOK, results)
 	}
+}
+
+func lyricsSearchCacheKeyWithVideo(query string, limit int, includeRich bool, syncType, videoID string) string {
+	return lyricsSearchCacheKey(query, limit, includeRich, syncType) + "\x00" + canonicalPart(videoID)
+}
+
+// searchProviderTitle resolves the title hint for metadata providers: an
+// explicit track_name wins, otherwise the free-text query is used as-is.
+func searchProviderTitle(hintTrack, query string) string {
+	if hintTrack != "" {
+		return hintTrack
+	}
+	return query
+}
+
+// searchPersistResponse stores one provider result and converts it, tagging
+// the variant with the provider source for future provenance use.
+func searchPersistResponse(ctx context.Context, metadataDB, lyricsDB *sql.DB, result lrclib.RemoteResult, source string) lyricsResponse {
+	track := db.Track{Name: result.TrackName, ArtistName: result.ArtistName, AlbumName: result.AlbumName, Duration: result.Duration, Source: source}
+	lyrics := db.Lyrics{PlainLyrics: result.PlainLyrics, SyncedLyrics: result.SyncedLyrics, Instrumental: result.Instrumental, Source: source}
+	trackID, _, persistErr := db.InsertTrackWithLyrics(ctx, metadataDB, lyricsDB, track, lyrics)
+	if persistErr == nil {
+		track.ID = trackID
+	}
+	response := toLyricsResponse(&track, &lyrics)
+	appendLyricsVariant(&response, &response)
+	return response
 }

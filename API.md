@@ -350,13 +350,21 @@ internal error.
 ## `GET /api/lyrics/get`
 
 Exact lyrics lookup. Serves cached lyrics when available; on a miss it
-consults enabled lyrics providers (LRCLIB, Apple Music TTML, and/or official Musixmatch) and caches the result.
+consults every enabled lyrics provider in parallel — LRCLIB, BetterLyrics
+(TTML), KuGou, Paxsenix (Apple Music catalog + proxy), LyricsPlus
+(Binimum + mirrors), plus Zemer and YouTube (official shelf + transcript)
+when a `video_id` hint is supplied, plus Apple Music TTML and/or official
+Musixmatch when enabled — races them within a 3s response window, and caches
+every result. Late providers that finish after the window still persist for
+later requests.
 
-Query parameters: required `track_name` and `artist_name`; optional
-`album_name`, non-negative `duration`, `include_rich_sync=true`, and optional
-`sync_type=word|syllable|richsync`. Upstream lyrics providers receive at most
-`track_name`, `artist_name`, and `album_name`: `duration` is used only for
-local cache matching and is never forwarded. When `artist_name`/`album_name`
+Query parameters: required `track_name`; optional `artist_name`,
+`album_name`, non-negative `duration`, `include_rich_sync=true` with optional
+`sync_type=word|syllable|richsync`, and optional `video_id` (YouTube videoId,
+`^[A-Za-z0-9_-]{6,16}$`; invalid values are ignored). Text providers receive
+at most `track_name`, `artist_name`, and `album_name`; `duration` is used
+only for local cache matching and is never forwarded, while `video_id` is
+forwarded only to Zemer and YouTube. When `artist_name`/`album_name`
 are omitted, the server first queries providers with exactly what was
 supplied and only retries once with artist/album backfilled from cached
 metadata if that finds nothing. Without `include_rich_sync=true`, the
@@ -433,15 +441,18 @@ found (memoized for 24 hours) · `429` rate limited · `503` upstream busy ·
 
 ## `GET /api/lyrics/search`
 
-Searches the local catalog and merges it with LRCLIB's `/api/search`
-results. Each result carries the compact fields `id`, `name`, `trackName`,
+Searches the local catalog and merges it with every enabled lyrics provider —
+LRCLIB plus BetterLyrics, KuGou, Paxsenix, and LyricsPlus on structured hints,
+and Zemer/YouTube when a `video_id` hint is supplied — plus any cached local
+rows. Each result carries the compact fields `id`, `name`, `trackName`,
 `artistName`, `albumName`, `duration`, `instrumental`, `plainLyrics`, and
 `syncedLyrics` when available. The redundant LRCLIB `lyricsfile` YAML field is
 not returned.
 
 Query parameters: `q`, or one or more of `track_name`, `artist_name`,
-`album_name`; optional `limit` from `1–50`, default `20`. `q` is passed to
-LRCLIB's `/api/search`; the server applies the final limit after merging. Direct provider results are also merged when enabled.
+`album_name`; optional `limit` from `1–50`, default `20`, and optional
+`video_id` hint for the video-keyed providers. `q` is passed to
+LRCLIB's `/api/search` and the structured hints to the other providers; the server applies the final limit after merging. Direct provider results are also merged when enabled.
 The optional `include_rich_sync=true` (also accepts `1` or `yes`) enriches
 results with the same opt-in `richSync` object as `/api/lyrics/get`, and
 `sync_type=word|syllable|richsync` selects a cached synchronization variant.

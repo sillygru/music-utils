@@ -1,10 +1,23 @@
 package httpserver
 
 import (
+	"regexp"
 	"strings"
 	"sync"
 	"time"
 )
+
+var videoIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{6,16}$`)
+
+// sanitizeVideoID normalizes an optional YouTube videoId hint. Invalid values
+// are dropped (empty) rather than rejected so older clients keep working.
+func sanitizeVideoID(value string) string {
+	value = strings.TrimSpace(value)
+	if !videoIDPattern.MatchString(value) {
+		return ""
+	}
+	return value
+}
 
 const (
 	lyricsMissCacheTTL        = 24 * time.Hour
@@ -61,7 +74,14 @@ func (c *lyricsMissCache) Set(key string, now time.Time) {
 // Duration is deliberately excluded: upstream lyrics lookups never receive it,
 // so misses must not be split by it either.
 func lyricsMissKey(trackName, artistName, albumName string) string {
+	return lyricsMissKeyWithVideo(trackName, artistName, albumName, "")
+}
+
+// lyricsMissKeyWithVideo extends the miss key with the videoId hint so
+// video-keyed lookups never share memoization with text-only lookups.
+func lyricsMissKeyWithVideo(trackName, artistName, albumName, videoID string) string {
 	return strings.ToLower(strings.TrimSpace(trackName)) + "\x00" +
 		strings.ToLower(strings.TrimSpace(artistName)) + "\x00" +
-		strings.ToLower(strings.TrimSpace(albumName))
+		strings.ToLower(strings.TrimSpace(albumName)) + "\x00" +
+		strings.ToLower(strings.TrimSpace(videoID))
 }

@@ -44,7 +44,7 @@ const (
 	defaultRichLyricsEnabled        = true
 	defaultRichLyricsBaseURL        = "https://unison.boidu.dev"
 	defaultRichLyricsTimeoutMS      = 5000
-	defaultAppleMusicEnabled        = false
+	defaultAppleMusicEnabled         = false
 	defaultAppleMusicCatalogBaseURL = "https://api.music.apple.com"
 	defaultAppleMusicLyricsBaseURL  = "https://api.music.apple.com"
 	defaultAppleMusicStorefront     = "us"
@@ -52,6 +52,27 @@ const (
 	defaultMusixmatchEnabled        = false
 	defaultMusixmatchBaseURL        = "https://api.musixmatch.com"
 	defaultMusixmatchTimeoutMS      = 10000
+	defaultBetterLyricsEnabled      = true
+	defaultBetterLyricsBaseURL      = "https://lyrics-api.boidu.dev"
+	defaultBetterLyricsTimeoutMS    = 5000
+	defaultKugouEnabled             = true
+	defaultKugouSearchBaseURL       = "https://mobileservice.kugou.com"
+	defaultKugouLyricsBaseURL       = "https://lyrics.kugou.com"
+	defaultKugouTimeoutMS           = 10000
+	defaultPaxsenixEnabled          = true
+	defaultPaxsenixProxyBaseURL     = "https://lyrics.paxsenix.org"
+	defaultPaxsenixAppleBaseURL     = "https://beta.music.apple.com"
+	defaultPaxsenixTimeoutMS        = 10000
+	defaultLyricsPlusEnabled        = false
+	defaultLyricsPlusAPIBaseURL     = "https://lyrics-api.binimum.org"
+	defaultLyricsPlusTimeoutMS      = 10000
+	defaultZemerEnabled             = true
+	defaultZemerBaseURL             = "https://search.zemer.io"
+	defaultZemerTimeoutMS           = 10000
+	defaultYouTubeLyricsEnabled     = true
+	defaultYouTubeSubtitleEnabled   = true
+	defaultYouTubeBaseURL           = "https://music.youtube.com/youtubei/v1"
+	defaultYouTubeTimeoutMS         = 10000
 	defaultMetadataFallbackEnabled  = true
 
 	defaultITunesBaseURL        = "https://itunes.apple.com"
@@ -117,6 +138,35 @@ type Config struct {
 	MusixmatchAPIKey          string
 	MusixmatchUserAgent       string
 	MusixmatchTimeoutMS       int
+	BetterLyricsEnabled       bool
+	BetterLyricsBaseURL       string
+	BetterLyricsUserAgent     string
+	BetterLyricsTimeoutMS     int
+	KugouEnabled              bool
+	KugouSearchBaseURL        string
+	KugouLyricsBaseURL        string
+	KugouUserAgent            string
+	KugouTimeoutMS            int
+	PaxsenixEnabled           bool
+	PaxsenixProxyBaseURL      string
+	PaxsenixAppleBaseURL      string
+	PaxsenixUserAgent         string
+	PaxsenixTimeoutMS         int
+	LyricsPlusEnabled         bool
+	LyricsPlusAPIBaseURL      string
+	LyricsPlusMirrors         []string
+	LyricsPlusUserAgent       string
+	LyricsPlusTimeoutMS       int
+	ZemerEnabled              bool
+	ZemerBaseURL              string
+	ZemerUserAgent            string
+	ZemerTimeoutMS            int
+	YouTubeLyricsEnabled      bool
+	YouTubeSubtitleEnabled    bool
+	YouTubeBaseURL            string
+	YouTubeAPIKey             string
+	YouTubeUserAgent          string
+	YouTubeTimeoutMS          int
 	MetadataFallbackEnabled   bool
 	ITunesBaseURL             string
 	DeezerBaseURL             string
@@ -189,6 +239,35 @@ func Load() Config {
 		MusixmatchAPIKey:          strings.TrimSpace(os.Getenv("MUSIXMATCH_API_KEY")),
 		MusixmatchUserAgent:       valueOrDefault("MUSIXMATCH_USER_AGENT", defaultMetadataUserAgent()),
 		MusixmatchTimeoutMS:       intOrDefault("MUSIXMATCH_TIMEOUT_MS", defaultMusixmatchTimeoutMS),
+		BetterLyricsEnabled:       boolOrDefault("BETTERLYRICS_ENABLED", defaultBetterLyricsEnabled),
+		BetterLyricsBaseURL:       valueOrDefault("BETTERLYRICS_BASE_URL", defaultBetterLyricsBaseURL),
+		BetterLyricsUserAgent:     valueOrDefault("BETTERLYRICS_USER_AGENT", defaultMetadataUserAgent()),
+		BetterLyricsTimeoutMS:     intOrDefault("BETTERLYRICS_TIMEOUT_MS", defaultBetterLyricsTimeoutMS),
+		KugouEnabled:              boolOrDefault("KUGOU_ENABLED", defaultKugouEnabled),
+		KugouSearchBaseURL:        valueOrDefault("KUGOU_SEARCH_BASE_URL", defaultKugouSearchBaseURL),
+		KugouLyricsBaseURL:        valueOrDefault("KUGOU_LYRICS_BASE_URL", defaultKugouLyricsBaseURL),
+		KugouUserAgent:            valueOrDefault("KUGOU_USER_AGENT", defaultMetadataUserAgent()),
+		KugouTimeoutMS:            intOrDefault("KUGOU_TIMEOUT_MS", defaultKugouTimeoutMS),
+		PaxsenixEnabled:           boolOrDefault("PAXSENIX_ENABLED", defaultPaxsenixEnabled),
+		PaxsenixProxyBaseURL:      valueOrDefault("PAXSENIX_PROXY_BASE_URL", defaultPaxsenixProxyBaseURL),
+		PaxsenixAppleBaseURL:      valueOrDefault("PAXSENIX_APPLE_BASE_URL", defaultPaxsenixAppleBaseURL),
+		PaxsenixUserAgent:         valueOrDefault("PAXSENIX_USER_AGENT", defaultMetadataUserAgent()),
+		PaxsenixTimeoutMS:         intOrDefault("PAXSENIX_TIMEOUT_MS", defaultPaxsenixTimeoutMS),
+		LyricsPlusEnabled:         boolOrDefault("LYRICSPLUS_ENABLED", defaultLyricsPlusEnabled),
+		LyricsPlusAPIBaseURL:      valueOrDefault("LYRICSPLUS_API_BASE_URL", defaultLyricsPlusAPIBaseURL),
+		LyricsPlusMirrors:         splitEnv("LYRICSPLUS_MIRRORS"),
+		LyricsPlusUserAgent:       valueOrDefault("LYRICSPLUS_USER_AGENT", defaultMetadataUserAgent()),
+		LyricsPlusTimeoutMS:       intOrDefault("LYRICSPLUS_TIMEOUT_MS", defaultLyricsPlusTimeoutMS),
+		ZemerEnabled:              boolOrDefault("ZEMER_ENABLED", defaultZemerEnabled),
+		ZemerBaseURL:              valueOrDefault("ZEMER_BASE_URL", defaultZemerBaseURL),
+		ZemerUserAgent:            valueOrDefault("ZEMER_USER_AGENT", defaultMetadataUserAgent()),
+		ZemerTimeoutMS:            intOrDefault("ZEMER_TIMEOUT_MS", defaultZemerTimeoutMS),
+		YouTubeLyricsEnabled:      boolOrDefault("YOUTUBE_LYRICS_ENABLED", defaultYouTubeLyricsEnabled),
+		YouTubeSubtitleEnabled:    boolOrDefault("YOUTUBE_SUBTITLE_ENABLED", defaultYouTubeSubtitleEnabled),
+		YouTubeBaseURL:            valueOrDefault("YOUTUBE_BASE_URL", defaultYouTubeBaseURL),
+		YouTubeAPIKey:             strings.TrimSpace(os.Getenv("YOUTUBE_API_KEY")),
+		YouTubeUserAgent:          valueOrDefault("YOUTUBE_USER_AGENT", defaultMetadataUserAgent()),
+		YouTubeTimeoutMS:          intOrDefault("YOUTUBE_TIMEOUT_MS", defaultYouTubeTimeoutMS),
 		MetadataFallbackEnabled:   boolOrDefault("METADATA_FALLBACK_ENABLED", defaultMetadataFallbackEnabled),
 		ITunesBaseURL:             valueOrDefault("ITUNES_BASE_URL", defaultITunesBaseURL),
 		DeezerBaseURL:             valueOrDefault("DEEZER_BASE_URL", defaultDeezerBaseURL),
@@ -284,6 +363,9 @@ func (c Config) Validate() error {
 	if c.LRCLIBTimeoutMS < 1 || c.RichLyricsTimeoutMS < 1 || c.AppleMusicTimeoutMS < 1 || c.MusixmatchTimeoutMS < 1 || c.MetadataTimeoutMS < 1 || c.CoverTimeoutMS < 1 {
 		return fmt.Errorf("upstream timeouts must be positive")
 	}
+	if c.BetterLyricsTimeoutMS < 1 || c.KugouTimeoutMS < 1 || c.PaxsenixTimeoutMS < 1 || c.LyricsPlusTimeoutMS < 1 || c.ZemerTimeoutMS < 1 || c.YouTubeTimeoutMS < 1 {
+		return fmt.Errorf("lyrics provider timeouts must be positive")
+	}
 	if c.PrefetchPerMin < 1 {
 		return fmt.Errorf("PREFETCH_PER_MIN must be positive")
 	}
@@ -296,10 +378,22 @@ func (c Config) Validate() error {
 	if strings.TrimSpace(c.LRCLIBUserAgent) == "" {
 		return fmt.Errorf("LRCLIB_USER_AGENT must not be empty")
 	}
+	for name, value := range map[string]string{
+		"BETTERLYRICS_USER_AGENT": c.BetterLyricsUserAgent,
+		"KUGOU_USER_AGENT":        c.KugouUserAgent,
+		"PAXSENIX_USER_AGENT":     c.PaxsenixUserAgent,
+		"LYRICSPLUS_USER_AGENT":   c.LyricsPlusUserAgent,
+		"ZEMER_USER_AGENT":        c.ZemerUserAgent,
+		"YOUTUBE_USER_AGENT":      c.YouTubeUserAgent,
+	} {
+		if strings.TrimSpace(value) == "" {
+			return fmt.Errorf("%s must not be empty", name)
+		}
+	}
 	if strings.TrimSpace(c.RichLyricsUserAgent) == "" {
 		return fmt.Errorf("RICH_LYRICS_USER_AGENT must not be empty")
 	}
-	for name, value := range map[string]string{"LRCLIB_BASE_URL": c.LRCLIBBaseURL, "RICH_LYRICS_BASE_URL": c.RichLyricsBaseURL, "APPLE_MUSIC_CATALOG_BASE_URL": c.AppleMusicCatalogBaseURL, "APPLE_MUSIC_LYRICS_BASE_URL": c.AppleMusicLyricsBaseURL, "MUSIXMATCH_BASE_URL": c.MusixmatchBaseURL, "ITUNES_BASE_URL": c.ITunesBaseURL, "DEEZER_BASE_URL": c.DeezerBaseURL, "LASTFM_BASE_URL": c.LastfmBaseURL} {
+	for name, value := range map[string]string{"LRCLIB_BASE_URL": c.LRCLIBBaseURL, "RICH_LYRICS_BASE_URL": c.RichLyricsBaseURL, "APPLE_MUSIC_CATALOG_BASE_URL": c.AppleMusicCatalogBaseURL, "APPLE_MUSIC_LYRICS_BASE_URL": c.AppleMusicLyricsBaseURL, "MUSIXMATCH_BASE_URL": c.MusixmatchBaseURL, "ITUNES_BASE_URL": c.ITunesBaseURL, "DEEZER_BASE_URL": c.DeezerBaseURL, "LASTFM_BASE_URL": c.LastfmBaseURL, "BETTERLYRICS_BASE_URL": c.BetterLyricsBaseURL, "KUGOU_SEARCH_BASE_URL": c.KugouSearchBaseURL, "KUGOU_LYRICS_BASE_URL": c.KugouLyricsBaseURL, "PAXSENIX_PROXY_BASE_URL": c.PaxsenixProxyBaseURL, "PAXSENIX_APPLE_BASE_URL": c.PaxsenixAppleBaseURL, "LYRICSPLUS_API_BASE_URL": c.LyricsPlusAPIBaseURL, "ZEMER_BASE_URL": c.ZemerBaseURL, "YOUTUBE_BASE_URL": c.YouTubeBaseURL} {
 		baseURL, err := url.Parse(strings.TrimSpace(value))
 		if err != nil || (baseURL.Scheme != "http" && baseURL.Scheme != "https") || baseURL.Host == "" {
 			return fmt.Errorf("%s must be an http or https URL", name)
@@ -357,7 +451,7 @@ func validateEnvironment() error {
 	if err := validateIntEnv("DB_CACHE_SIZE_KB"); err != nil {
 		return err
 	}
-	for _, name := range []string{"DB_MAX_OPEN_CONNS", "RATE_LIMIT_PER_SEC", "RATE_LIMIT_PER_MIN", "FALLBACK_PER_MIN", "FALLBACK_MAX_QUEUE", "FALLBACK_QUEUE_WAIT_MS", "COVER_REFRESH_AFTER_DAYS", "COVER_REFRESH_MAX_ROWS", "COVER_REFRESH_MAX_RECHECK", "LRCLIB_TIMEOUT_MS", "RICH_LYRICS_TIMEOUT_MS", "APPLE_MUSIC_TIMEOUT_MS", "MUSIXMATCH_TIMEOUT_MS", "METADATA_TIMEOUT_MS", "COVER_TIMEOUT_MS", "PREFETCH_PER_MIN", "PREFETCH_CONCURRENCY", "PREFETCH_QUEUE_SIZE"} {
+	for _, name := range []string{"DB_MAX_OPEN_CONNS", "RATE_LIMIT_PER_SEC", "RATE_LIMIT_PER_MIN", "FALLBACK_PER_MIN", "FALLBACK_MAX_QUEUE", "FALLBACK_QUEUE_WAIT_MS", "COVER_REFRESH_AFTER_DAYS", "COVER_REFRESH_MAX_ROWS", "COVER_REFRESH_MAX_RECHECK", "LRCLIB_TIMEOUT_MS", "RICH_LYRICS_TIMEOUT_MS", "APPLE_MUSIC_TIMEOUT_MS", "MUSIXMATCH_TIMEOUT_MS", "METADATA_TIMEOUT_MS", "COVER_TIMEOUT_MS", "PREFETCH_PER_MIN", "PREFETCH_CONCURRENCY", "PREFETCH_QUEUE_SIZE", "BETTERLYRICS_TIMEOUT_MS", "KUGOU_TIMEOUT_MS", "PAXSENIX_TIMEOUT_MS", "LYRICSPLUS_TIMEOUT_MS", "ZEMER_TIMEOUT_MS", "YOUTUBE_TIMEOUT_MS"} {
 		if err := validatePositiveIntEnv(name); err != nil {
 			return err
 		}
@@ -371,7 +465,7 @@ func validateEnvironment() error {
 			return fmt.Errorf("REQUEST_LOG_RETENTION_DAYS must be an integer >= -1 (-1 means keep forever)")
 		}
 	}
-	for _, name := range []string{"TRUST_PROXY", "LRCLIB_FALLBACK_ENABLED", "RICH_LYRICS_ENABLED", "APPLE_MUSIC_ENABLED", "MUSIXMATCH_ENABLED", "METADATA_FALLBACK_ENABLED", "COVER_FALLBACK_ENABLED", "COVER_REFRESH_ENABLED", "REQUEST_LOG_ENABLED", "REQUEST_LOG_UA_OPTIMIZE", "REQUEST_LOG_UA_SAVE_UNKNOWN", "REQUESTS_TODAY_ENABLED", "PREFETCH_ENABLED", "PREFETCH_LYRICS", "PREFETCH_ALBUM_COVER", "PREFETCH_ARTIST_COVER"} {
+	for _, name := range []string{"TRUST_PROXY", "LRCLIB_FALLBACK_ENABLED", "RICH_LYRICS_ENABLED", "APPLE_MUSIC_ENABLED", "MUSIXMATCH_ENABLED", "METADATA_FALLBACK_ENABLED", "COVER_FALLBACK_ENABLED", "COVER_REFRESH_ENABLED", "REQUEST_LOG_ENABLED", "REQUEST_LOG_UA_OPTIMIZE", "REQUEST_LOG_UA_SAVE_UNKNOWN", "REQUESTS_TODAY_ENABLED", "PREFETCH_ENABLED", "PREFETCH_LYRICS", "PREFETCH_ALBUM_COVER", "PREFETCH_ARTIST_COVER", "BETTERLYRICS_ENABLED", "KUGOU_ENABLED", "PAXSENIX_ENABLED", "LYRICSPLUS_ENABLED", "ZEMER_ENABLED", "YOUTUBE_LYRICS_ENABLED", "YOUTUBE_SUBTITLE_ENABLED"} {
 		if value := strings.TrimSpace(os.Getenv(name)); value != "" {
 			if _, err := strconv.ParseBool(value); err != nil {
 				return fmt.Errorf("%s must be a boolean", name)

@@ -49,8 +49,8 @@ URL dumps (see [Seed dumps](#seed-dumps)) contain only factual data and links.
 | `GET /api/cover/search` | Free-text cover search across artists, albums, and songs, plus typed per-type search. |
 | `GET /api/cover/artist` | Artist cover URL; resolves Last.fm → iTunes → Deezer on a miss and caches. |
 | `GET /api/cover/album` | Album cover URL; resolves Last.fm → iTunes → Deezer on a miss and caches. |
-| `GET /api/lyrics/get` | Exact lyrics lookup; local-first with optional LRCLIB fallback. |
-| `GET /api/lyrics/search` | Multi-result lyrics search across the local catalog and LRCLIB. |
+| `GET /api/lyrics/get` | Exact lyrics lookup; local-first with parallel multi-provider fallback (LRCLIB, BetterLyrics, KuGou, Paxsenix, LyricsPlus, Zemer/YouTube via optional `video_id`). |
+| `GET /api/lyrics/search` | Multi-result lyrics search across the local catalog and the same providers (videoId hint for Zemer/YouTube). |
 
 The previous `/api/get` and `/api/search` paths are intentionally removed.
 There are no aliases or compatibility redirects.
@@ -73,7 +73,7 @@ Full request and response reference is in [`API.md`](API.md).
 
 ## Local-first caching
 
-Metadata and lyrics are stored in independent SQLite files. Metadata and lyrics lookups check their respective local database before making an upstream request. Lyrics misses can query LRCLIB, direct Apple Music TTML, and official Musixmatch in parallel when enabled; the former aggregation service is no longer used.
+Metadata and lyrics are stored in independent SQLite files. Metadata and lyrics lookups check their respective local database before making an upstream request. Lyrics misses fan out in parallel to every enabled provider — LRCLIB, BetterLyrics (TTML), KuGou, Paxsenix (Apple Music catalog + proxy), LyricsPlus (Binimum + mirrors), plus Zemer and YouTube (official shelf + transcript) when a `video_id` hint is supplied — and share the 3s response window. Direct Apple Music TTML and official Musixmatch also run in parallel when enabled; the former aggregation service is no longer used.
 
 Before local or upstream lookup, music names are cleaned consistently across metadata, lyrics, and cover endpoints: known media extensions and downloader/source labels (for example `Official Music Video`, `AMV`, `Visualizer`, `Lyrics`, `Nightcore`, `Hardstyle`, `Sped Up`, and `Slowed`) are removed, and `Artist - Song`/`Artist ｜ Song` filenames can supply a missing artist. Explicit `artist_name` values remain authoritative, and provider-returned canonical names are preserved in responses.
 Successful provider responses are upserted transactionally and subsequent
@@ -116,10 +116,10 @@ cold-lookup latency and has been removed.
 
 - **FTS5 search** — title, artist, album, and genre search over SQLite.
 - **Metadata fallback** — iTunes + Deezer provider chain with local caching.
-- **Lyrics providers** — LRCLIB plus optional direct Apple Music TTML and official Musixmatch providers, all cached locally.
+- **Lyrics providers** — LRCLIB, BetterLyrics, KuGou, Paxsenix, LyricsPlus, Zemer (videoId), and YouTube (official + subtitle) plus optional direct Apple Music TTML and official Musixmatch, all fanned out in parallel and cached locally (videoId providers only when `video_id` is supplied; 3s response cap, background persistence).
 - **Opt-in rich lyrics** — Unison-compatible word/syllable payloads are cached separately and returned alone with `include_rich_sync=true`; unavailable rich lyrics fall back to plain/LRC lyrics.
 - **Rate limiting** — per-client-IP limits with `Retry-After` headers.
-- **Upstream pacing** — every provider (LRCLIB, Apple Music, Musixmatch, iTunes, Deezer, Last.fm) is
+- **Upstream pacing** — every provider (LRCLIB, BetterLyrics, KuGou, Paxsenix, LyricsPlus, Zemer, YouTube, Apple Music, Musixmatch, iTunes, Deezer, Last.fm) is
   paced process-wide to a fixed interval, so no client traffic can exceed a
   provider's rate limit or get the server's IP blocked.
 - **Lyrics negative caching** — LRCLIB misses are memoized in memory for 24
@@ -219,6 +219,35 @@ cold-lookup latency and has been removed.
 | `MUSIXMATCH_BASE_URL` | `https://api.musixmatch.com` | Musixmatch API base URL. |
 | `MUSIXMATCH_API_KEY` | *(empty)* | Required when Musixmatch is enabled; obtain and use it under the applicable Musixmatch plan and terms. |
 | `MUSIXMATCH_TIMEOUT_MS` | `10000` | Musixmatch provider timeout. |
+| `BETTERLYRICS_ENABLED` | `true` | BetterLyrics TTML provider (`lyrics-api.boidu.dev`). |
+| `BETTERLYRICS_BASE_URL` | `https://lyrics-api.boidu.dev` | BetterLyrics base URL. |
+| `BETTERLYRICS_USER_AGENT` | `music-utils/v0.14.0 (+https://gru0.dev)` | BetterLyrics User-Agent. |
+| `BETTERLYRICS_TIMEOUT_MS` | `5000` | BetterLyrics timeout. |
+| `KUGOU_ENABLED` | `true` | KuGou 3-step lyrics provider. |
+| `KUGOU_SEARCH_BASE_URL` | `https://mobileservice.kugou.com` | KuGou search host. |
+| `KUGOU_LYRICS_BASE_URL` | `https://lyrics.kugou.com` | KuGou lyrics host. |
+| `KUGOU_USER_AGENT` | `music-utils/v0.14.0 (+https://gru0.dev)` | KuGou User-Agent. |
+| `KUGOU_TIMEOUT_MS` | `10000` | KuGou timeout. |
+| `PAXSENIX_ENABLED` | `true` | Paxsenix Apple Music catalog + proxy. |
+| `PAXSENIX_PROXY_BASE_URL` | `https://lyrics.paxsenix.org` | Paxsenix proxy base URL. |
+| `PAXSENIX_APPLE_BASE_URL` | `https://beta.music.apple.com` | Apple site used for bearer-token scraping. |
+| `PAXSENIX_USER_AGENT` | `music-utils/v0.14.0 (+https://gru0.dev)` | Paxsenix User-Agent. |
+| `PAXSENIX_TIMEOUT_MS` | `10000` | Paxsenix timeout. |
+| `LYRICSPLUS_ENABLED` | `false` | LyricsPlus Binimum + mirrors (default off; community mirrors). |
+| `LYRICSPLUS_API_BASE_URL` | `https://lyrics-api.binimum.org` | LyricsPlus Binimum index URL. |
+| `LYRICSPLUS_MIRRORS` | *(empty)* | Comma-separated LyricsPlus mirror hosts for `/v2/lyrics/get`; empty uses defaults. |
+| `LYRICSPLUS_USER_AGENT` | `music-utils/v0.14.0 (+https://gru0.dev)` | LyricsPlus User-Agent. |
+| `LYRICSPLUS_TIMEOUT_MS` | `10000` | LyricsPlus timeout. |
+| `ZEMER_ENABLED` | `true` | Zemer (`search.zemer.io`) videoId resolver. |
+| `ZEMER_BASE_URL` | `https://search.zemer.io` | Zemer base URL. |
+| `ZEMER_USER_AGENT` | `music-utils/v0.14.0 (+https://gru0.dev)` | Zemer User-Agent. |
+| `ZEMER_TIMEOUT_MS` | `10000` | Zemer timeout. |
+| `YOUTUBE_LYRICS_ENABLED` | `true` | YouTube official lyrics shelf (InnerTube, needs `video_id`). |
+| `YOUTUBE_SUBTITLE_ENABLED` | `true` | YouTube subtitle transcript (InnerTube, needs `video_id`). |
+| `YOUTUBE_BASE_URL` | `https://music.youtube.com/youtubei/v1` | InnerTube base URL. |
+| `YOUTUBE_API_KEY` | *(empty)* | InnerTube API key; empty uses the public web client key. |
+| `YOUTUBE_USER_AGENT` | `music-utils/v0.14.0 (+https://gru0.dev)` | InnerTube User-Agent. |
+| `YOUTUBE_TIMEOUT_MS` | `10000` | InnerTube timeout. |
 
 ## Database migration
 
@@ -312,7 +341,14 @@ internal/config/         environment configuration and validation
 internal/cover/          Last.fm + iTunes + Deezer album/artist cover providers and resolver
 internal/db/             SQLite connections, independent schemas, migration, and queries
 internal/httpserver/     HTTP routes, handlers, middleware, rate limiting, cover refresh job
-internal/lrclib/         LRCLIB upstream client
+internal/lrclib/         LRCLIB upstream client (5-strategy search + duration ranking)
+internal/ttml/             Shared TTML → LRC parser (BetterLyrics/Paxsenix/LyricsPlus/Apple)
+internal/betterlyrics/     BetterLyrics TTML client
+internal/kugou/            KuGou 3-step lyrics client
+internal/paxsenix/         Paxsenix Apple-catalog + proxy client
+internal/lyricsplus/       LyricsPlus Binimum + mirrors client
+internal/zemer/            Zemer videoId resolver
+internal/innertube/        InnerTube YouTube official + transcript client
 internal/applemusic/      Apple Music catalog and TTML lyrics client
 internal/musixmatch/      Official Musixmatch lyrics client
 internal/metadata/       iTunes + Deezer metadata providers and resolver

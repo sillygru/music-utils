@@ -225,7 +225,7 @@ func MigrateRichLyrics(ctx context.Context, database *sql.DB, converter RichLyri
 	if converter == nil {
 		return 0, errors.New("rich lyrics converter is nil")
 	}
-	rows, err := database.QueryContext(ctx, `SELECT id,content,format,sync_type FROM lyrics_sync_variants WHERE LOWER(format)='ttml'`)
+	rows, err := database.QueryContext(ctx, `SELECT id,content,format,sync_type FROM lyrics_sync_variants WHERE format='ttml' COLLATE NOCASE`)
 	if err != nil {
 		return 0, fmt.Errorf("find rich lyrics to migrate: %w", err)
 	}
@@ -260,7 +260,7 @@ func MigrateRichLyrics(ctx context.Context, database *sql.DB, converter RichLyri
 		}
 		result, err := database.ExecContext(ctx, `UPDATE lyrics_sync_variants
 SET content=?, format=?, content_hash=?, updated_at=CURRENT_TIMESTAMP
-WHERE id=? AND LOWER(format)='ttml'`, content, format, richContentHash(content, format, row.syncType), row.id)
+WHERE id=? AND format='ttml' COLLATE NOCASE`, content, format, richContentHash(content, format, row.syncType), row.id)
 		if err != nil {
 			return migrated, fmt.Errorf("migrate rich lyrics %d: %w", row.id, err)
 		}
@@ -325,7 +325,7 @@ func FindCoverArt(ctx context.Context, database *sql.DB, entityType CoverEntity,
 		album = ""
 	}
 	cover := &CoverArt{}
-	err := database.QueryRowContext(ctx, "SELECT id,entity_type,COALESCE(artist_name_lower,''),COALESCE(album_name_lower,''),COALESCE(cover_url,''),COALESCE(cover_source,''),COALESCE(checked_at,'') FROM cover_urls WHERE entity_type=? AND artist_name_lower=? AND COALESCE(album_name_lower,'')=? LIMIT 1",
+	err := database.QueryRowContext(ctx, "SELECT id,entity_type,COALESCE(artist_name_lower,''),COALESCE(album_name_lower,''),COALESCE(cover_url,''),COALESCE(cover_source,''),COALESCE(checked_at,'') FROM cover_urls WHERE entity_type=? AND artist_name_lower=? AND album_name_lower=? LIMIT 1",
 		string(entityType), normalize(artistName), album).
 		Scan(&cover.ID, &cover.EntityType, &cover.ArtistNameLower, &cover.AlbumNameLower, &cover.CoverURL, &cover.CoverSource, &cover.CheckedAt)
 	if errors.Is(err, sql.ErrNoRows) {

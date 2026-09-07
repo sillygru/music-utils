@@ -38,8 +38,8 @@ func TestFallbackBudgetLimitsUniqueMissesPerIP(t *testing.T) {
 	if third.Code != http.StatusTooManyRequests {
 		t.Fatalf("expected third miss to be budget-limited to 429, got %d: %s", third.Code, third.Body.String())
 	}
-	if calls.Load() != 2 {
-		t.Fatalf("expected two upstream calls before budget exhaustion, got %d", calls.Load())
+	if calls.Load() != 12 {
+		t.Fatalf("expected twelve upstream calls before budget exhaustion (two misses of one exact plus five strategy searches each), got %d", calls.Load())
 	}
 
 	// Cache hits must not consume the fallback budget.
