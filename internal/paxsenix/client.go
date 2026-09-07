@@ -297,21 +297,36 @@ func (c *Client) lyricsForID(ctx context.Context, song *appleSong) (*Result, err
 	result := &Result{TrackName: song.Name, ArtistName: song.ArtistName, AlbumName: song.AlbumName, Duration: song.Duration}
 	// Priority: ttmlContent > elrcMultiPerson > elrc > plain > content[].
 	if strings.TrimSpace(payload.TTMLContent) != "" {
-		if synced, err := ttml.ParseToLRC(payload.TTMLContent); err == nil && strings.TrimSpace(synced) != "" {
-			result.SyncedLyrics = synced
-			result.PlainLyrics = ttml.PlainText(payload.TTMLContent)
-			result.WordSynced = true
-			result.TTML = payload.TTMLContent
-			return result, nil
+		if lines, err := ttml.Parse(payload.TTMLContent); err == nil {
+			synced := ttml.ToLRC(lines)
+			if strings.TrimSpace(synced) != "" {
+				result.SyncedLyrics = ttml.CleanSyncedLyrics(synced)
+				result.PlainLyrics = ttml.PlainText(payload.TTMLContent)
+				if result.PlainLyrics == "" {
+					result.PlainLyrics = ttml.ExtractPlainFromLRC(result.SyncedLyrics)
+				}
+				hasWords := false
+				for _, l := range lines {
+					if len(l.Words) > 0 {
+						hasWords = true
+						break
+					}
+				}
+				result.WordSynced = hasWords
+				result.TTML = payload.TTMLContent
+				return result, nil
+			}
 		}
 	}
 	if strings.TrimSpace(payload.ELRCMulti) != "" {
-		result.SyncedLyrics = strings.TrimSpace(payload.ELRCMulti)
+		result.SyncedLyrics = ttml.CleanSyncedLyrics(strings.TrimSpace(payload.ELRCMulti))
+		result.PlainLyrics = ttml.ExtractPlainFromLRC(result.SyncedLyrics)
 		result.WordSynced = true
 		return result, nil
 	}
 	if strings.TrimSpace(payload.ELRC) != "" {
-		result.SyncedLyrics = strings.TrimSpace(payload.ELRC)
+		result.SyncedLyrics = ttml.CleanSyncedLyrics(strings.TrimSpace(payload.ELRC))
+		result.PlainLyrics = ttml.ExtractPlainFromLRC(result.SyncedLyrics)
 		return result, nil
 	}
 	if strings.TrimSpace(payload.Plain) != "" {
@@ -321,8 +336,11 @@ func (c *Client) lyricsForID(ctx context.Context, song *appleSong) (*Result, err
 	if len(payload.Content) > 0 {
 		synced, plain, wordSynced := buildFromContent(payload)
 		if strings.TrimSpace(synced) != "" || strings.TrimSpace(plain) != "" {
-			result.SyncedLyrics = synced
+			result.SyncedLyrics = ttml.CleanSyncedLyrics(synced)
 			result.PlainLyrics = plain
+			if result.PlainLyrics == "" {
+				result.PlainLyrics = ttml.ExtractPlainFromLRC(result.SyncedLyrics)
+			}
 			result.WordSynced = wordSynced
 			return result, nil
 		}
@@ -344,15 +362,9 @@ func buildFromContent(payload lyricsPayload) (synced, plain string, wordSynced b
 		if text == "" {
 			continue
 		}
-		tag := "{agent:v1}"
-		if item.Background {
-			tag = "{bg}"
-		} else if item.OppositeTurn {
-			tag = "{agent:v2}"
-		}
 		plainLines = append(plainLines, text)
 		if wordSynced {
-			syncedLines = append(syncedLines, formatMS(item.Timestamp)+tag+text)
+			syncedLines = append(syncedLines, formatMS(item.Timestamp)+text)
 		} else {
 			syncedLines = append(syncedLines, text)
 		}

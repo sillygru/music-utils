@@ -17,6 +17,7 @@ import (
 	"github.com/sillygru/music-utils/internal/lrclib"
 	"github.com/sillygru/music-utils/internal/names"
 	"github.com/sillygru/music-utils/internal/richlyrics"
+	"github.com/sillygru/music-utils/internal/ttml"
 )
 
 const (
@@ -526,6 +527,9 @@ func enrichLyricsSearchResponse(r *http.Request, lyricsDB *sql.DB, client *richl
 		content, format = remote.Content, remote.Format
 	}
 	rich := db.RichLyrics{TrackID: trackID, Content: content, Format: format, SyncType: remote.SyncType, Source: remote.Source}
+	if isWordRichEmpty(&rich) {
+		return
+	}
 	if cache && trackID > 0 {
 		if err := db.UpsertRichLyrics(r.Context(), lyricsDB, rich); err != nil {
 			setRequestIssue(r, slog.LevelWarn, err.Error())
@@ -798,6 +802,9 @@ func tryRichOnlyResponse(r *http.Request, metadataDB, lyricsDB *sql.DB, client *
 		content, format = remote.Content, remote.Format
 	}
 	rich := db.RichLyrics{TrackID: trackID, Content: content, Format: format, SyncType: remote.SyncType, Source: remote.Source}
+	if isWordRichEmpty(&rich) {
+		return lyricsResponse{}, false
+	}
 	if err := db.UpsertRichLyrics(r.Context(), lyricsDB, rich); err != nil {
 		setRequestIssue(r, slog.LevelWarn, err.Error())
 		return lyricsResponse{}, false
@@ -815,14 +822,18 @@ func enrichLyricsResponse(r *http.Request, track *db.Track, lyrics *db.Lyrics, m
 
 func enrichLyricsResponseWithClient(r *http.Request, track *db.Track, lyrics *db.Lyrics, metadataDB, lyricsDB *sql.DB, client *richlyrics.Client, fallbacks *fallbackGuard, enabled bool, providers *lyricsProviders) lyricsResponse {
 	response := toLyricsResponse(track, lyrics)
-	if !includeRichSync(r) && track != nil && track.ID > 0 && response.SyncedLyrics == "" {
-		if cached, err := db.FindRichLyrics(r.Context(), lyricsDB, track.ID, ""); err == nil {
+	if track != nil && track.ID > 0 && response.SyncedLyrics == "" {
+		if cached, err := db.FindRichLyrics(r.Context(), lyricsDB, track.ID, ""); err == nil && !isWordRichEmpty(cached) {
 			response.SyncedLyrics = compactRichSyncToLRC(cached)
 		} else if metadataDB != nil && track.ArtistName != "" {
-			if byName, err2 := db.FindRichLyricsByName(r.Context(), metadataDB, lyricsDB, track.Name, track.ArtistName, ""); err2 == nil {
+			if byName, err2 := db.FindRichLyricsByName(r.Context(), metadataDB, lyricsDB, track.Name, track.ArtistName, ""); err2 == nil && !isWordRichEmpty(byName) {
 				response.SyncedLyrics = compactRichSyncToLRC(byName)
 			}
 		}
+	}
+	response.SyncedLyrics = ttml.CleanSyncedLyrics(response.SyncedLyrics)
+	if response.PlainLyrics == "" && response.SyncedLyrics != "" {
+		response.PlainLyrics = ttml.ExtractPlainFromLRC(response.SyncedLyrics)
 	}
 	if !enabled || client == nil || !includeRichSync(r) || track == nil || track.ID <= 0 {
 		return response
@@ -915,7 +926,7 @@ func enrichLyricsResponseWithClient(r *http.Request, track *db.Track, lyrics *db
 				} else if strings.TrimSpace(lpRemote.RichJSON) != "" {
 					lpRich = db.RichLyrics{TrackID: track.ID, Content: lpRemote.RichJSON, Format: "json", SyncType: "word", Source: "lyricsplus"}
 				}
-				if lpRich.Content != "" {
+				if lpRich.Content != "" && !isWordRichEmpty(&lpRich) {
 					if err2 := db.UpsertRichLyrics(r.Context(), lyricsDB, lpRich); err2 == nil {
 						if stored, err3 := db.FindRichLyrics(r.Context(), lyricsDB, track.ID, "word"); err3 == nil && !isWordRichEmpty(stored) {
 							setRichOnlyResponse(&response, stored)
@@ -939,6 +950,9 @@ func enrichLyricsResponseWithClient(r *http.Request, track *db.Track, lyrics *db
 		content, format = remote.Content, remote.Format
 	}
 	cached := db.RichLyrics{TrackID: track.ID, Content: content, Format: format, SyncType: remote.SyncType, Source: remote.Source}
+	if isWordRichEmpty(&cached) {
+		return response
+	}
 	if err := db.UpsertRichLyrics(r.Context(), lyricsDB, cached); err != nil {
 		setRequestIssue(r, slog.LevelWarn, err.Error())
 		return response
@@ -970,14 +984,40 @@ func validRichSyncType(value string) bool {
 }
 
 func setRichOnlyResponse(response *lyricsResponse, rich *db.RichLyrics) {
-	response.PlainLyrics = ""
-	response.SyncedLyrics = ""
+	if response == nil || rich == nil || isWordRichEmpty(rich) {
+		return
+	}
 	content := compactRichSyncContent(rich.Content, rich.Format)
+	if content == nil {
+		return
+	}
 	format := rich.Format
 	if _, ok := content.(compactRichSync); ok {
 		format = "json"
 	}
 	response.RichSync = &richSyncResult{Content: content, Format: format, SyncType: rich.SyncType, Source: rich.Source}
+	if strings.TrimSpace(response.SyncedLyrics) == "" {
+		response.SyncedLyrics = compactRichSyncToLRC(rich)
+	}
+	response.SyncedLyrics = ttml.CleanSyncedLyrics(response.SyncedLyrics)
+	if strings.TrimSpace(response.PlainLyrics) == "" {
+		if crs, ok := content.(compactRichSync); ok && len(crs.Lines) > 0 {
+			var b strings.Builder
+			for _, l := range crs.Lines {
+				txt := strings.TrimSpace(l.Text)
+				if txt != "" {
+					if b.Len() > 0 {
+						b.WriteByte('\n')
+					}
+					b.WriteString(txt)
+				}
+			}
+			response.PlainLyrics = b.String()
+		}
+	}
+	if strings.TrimSpace(response.PlainLyrics) == "" && strings.TrimSpace(response.SyncedLyrics) != "" {
+		response.PlainLyrics = ttml.ExtractPlainFromLRC(response.SyncedLyrics)
+	}
 }
 
 func lyricsAvailable(lyrics *db.Lyrics) bool {
@@ -999,7 +1039,10 @@ func toLyricsResponse(track *db.Track, lyrics *db.Lyrics) lyricsResponse {
 	if lyrics != nil {
 		response.Instrumental = lyrics.Instrumental
 		response.PlainLyrics = lyrics.PlainLyrics
-		response.SyncedLyrics = lyrics.SyncedLyrics
+		response.SyncedLyrics = ttml.CleanSyncedLyrics(lyrics.SyncedLyrics)
+		if response.PlainLyrics == "" && response.SyncedLyrics != "" {
+			response.PlainLyrics = ttml.ExtractPlainFromLRC(response.SyncedLyrics)
+		}
 	}
 	return response
 }

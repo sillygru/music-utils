@@ -8,6 +8,8 @@ import (
 	"io"
 	"strconv"
 	"strings"
+
+	"github.com/sillygru/music-utils/internal/db"
 )
 
 // compactRichSync is the response representation of a parsed TTML rich
@@ -134,11 +136,105 @@ func compactRichSyncForStorage(content, format string) (string, string, bool) {
 	if err != nil || len(parsed.Lines) == 0 {
 		return "", "", false
 	}
+	hasWords := false
+	for _, line := range parsed.Lines {
+		if len(line.Words) > 0 {
+			hasWords = true
+			break
+		}
+	}
+	if !hasWords {
+		return "", "", false
+	}
 	encoded, err := json.Marshal(parsed)
 	if err != nil {
 		return "", "", false
 	}
 	return string(encoded), "json", true
+}
+
+func isWordRichEmpty(rich *db.RichLyrics) bool {
+	if rich == nil {
+		return true
+	}
+	content := strings.TrimSpace(rich.Content)
+	if content == "" {
+		return true
+	}
+	if parsed, ok := parseStoredCompactRichSync(content); ok {
+		if len(parsed.Lines) == 0 {
+			return true
+		}
+		for _, line := range parsed.Lines {
+			if len(line.Words) > 0 {
+				return false
+			}
+		}
+		return true
+	}
+	if parsed, err := parseCompactRichSync(content); err == nil && len(parsed.Lines) > 0 {
+		for _, line := range parsed.Lines {
+			if len(line.Words) > 0 {
+				return false
+			}
+		}
+		return true
+	}
+	var generic map[string]any
+	if err := json.Unmarshal([]byte(content), &generic); err == nil {
+		if rawLines, ok := generic["lines"].([]any); ok {
+			if len(rawLines) == 0 {
+				return true
+			}
+			hasWords := false
+			for _, rl := range rawLines {
+				if tuple, ok := rl.([]any); ok && len(tuple) >= 4 {
+					if words, ok := tuple[3].([]any); ok && len(words) > 0 {
+						hasWords = true
+						break
+					}
+				}
+			}
+			return !hasWords
+		}
+	}
+	return false
+}
+
+func isWordRichEmptyRichSyncResult(rs *richSyncResult) bool {
+	if rs == nil || rs.Content == nil {
+		return true
+	}
+	switch c := rs.Content.(type) {
+	case compactRichSync:
+		if len(c.Lines) == 0 {
+			return true
+		}
+		for _, line := range c.Lines {
+			if len(line.Words) > 0 {
+				return false
+			}
+		}
+		return true
+	case *compactRichSync:
+		if c == nil || len(c.Lines) == 0 {
+			return true
+		}
+		for _, line := range c.Lines {
+			if len(line.Words) > 0 {
+				return false
+			}
+		}
+		return true
+	case string:
+		return isWordRichEmpty(&db.RichLyrics{Content: c, Format: rs.Format})
+	default:
+		data, err := json.Marshal(c)
+		if err != nil {
+			return false
+		}
+		return isWordRichEmpty(&db.RichLyrics{Content: string(data), Format: "json"})
+	}
 }
 
 func parseCompactRichSync(content string) (compactRichSync, error) {

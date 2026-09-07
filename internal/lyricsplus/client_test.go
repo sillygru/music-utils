@@ -9,7 +9,7 @@ import (
 )
 
 const testTTML = `<tt xmlns="http://www.w3.org/ns/ttml"><body><div>` +
-	`<p begin="00:01.00" end="00:03.00">word line</p></div></body></tt>`
+	`<p begin="00:01.00" end="00:03.00"><span begin="00:01.00" end="00:02.00">word</span> <span begin="00:02.00" end="00:03.00">line</span></p></div></body></tt>`
 
 func TestGetBinimumWordSyncWins(t *testing.T) {
 	var mux *http.ServeMux
@@ -65,8 +65,8 @@ func TestGetMirror(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	if !strings.Contains(result.SyncedLyrics, "{agent:v2}") || !strings.Contains(result.SyncedLyrics, "{bg}backing") {
-		t.Fatalf("missing agent/bg tags: %q", result.SyncedLyrics)
+	if !strings.Contains(result.SyncedLyrics, "[00:07.18]hello") || !strings.Contains(result.SyncedLyrics, "[00:09.00]backing") || strings.Contains(result.SyncedLyrics, "{agent:") || strings.Contains(result.SyncedLyrics, "{bg}") {
+		t.Fatalf("unexpected agent/bg tags or missing lines: %q", result.SyncedLyrics)
 	}
 }
 

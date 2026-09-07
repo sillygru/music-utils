@@ -45,7 +45,7 @@ func TestGetTTMLPriority(t *testing.T) {
 			`"resources":{"songs":{"7":{"attributes":{"name":"Song","artistName":"Artist"}}}}}`))
 	})
 	mux.HandleFunc("/apple-music/lyrics", func(w http.ResponseWriter, r *http.Request) {
-		ttml := `<tt xmlns="http://www.w3.org/ns/ttml"><body><div><p begin="00:02.00" end="00:04.00">hi</p></div></body></tt>`
+		ttml := `<tt xmlns="http://www.w3.org/ns/ttml"><body><div><p begin="00:02.00" end="00:04.00"><span begin="00:02.00" end="00:03.00">hi</span></p></div></body></tt>`
 		quoted := strings.ReplaceAll(ttml, `"`, `\"`)
 		_, _ = w.Write([]byte(`{"type":"Syllable","ttmlContent":"` + quoted + `","elrc":"[00:01.00]stale"}`))
 	})
@@ -79,7 +79,7 @@ func TestBuildFromContent(t *testing.T) {
 	if !wordSynced {
 		t.Fatalf("syllable type should be word synced")
 	}
-	if !strings.Contains(synced, "{agent:v1}hello") || !strings.Contains(synced, "{bg}bg vocal") || !strings.Contains(synced, "{agent:v2}other") {
-		t.Fatalf("missing agent tags: %q", synced)
+	if !strings.Contains(synced, "[00:01.00]hello") || !strings.Contains(synced, "[00:02.00]bg vocal") || strings.Contains(synced, "{agent:") || strings.Contains(synced, "{bg}") {
+		t.Fatalf("unexpected agent tags or missing lines: %q", synced)
 	}
 }

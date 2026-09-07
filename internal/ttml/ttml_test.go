@@ -47,11 +47,27 @@ func TestToLRC(t *testing.T) {
 	if !strings.Contains(lrc, "[00:01.50]Hello world") {
 		t.Fatalf("missing first line in %q", lrc)
 	}
-	if !strings.Contains(lrc, "{bg}Backing vocal") {
-		t.Fatalf("missing bg tag in %q", lrc)
+	if !strings.Contains(lrc, "[00:10.00]Backing vocal") || strings.Contains(lrc, "{bg}") {
+		t.Fatalf("unexpected bg tag or missing backing line in %q", lrc)
 	}
 	if strings.Contains(lrc, "Untimed") {
 		t.Fatalf("untimed line should be skipped in %q", lrc)
+	}
+}
+
+func TestCleanSyncedLyrics(t *testing.T) {
+	input := "[00:10.00]{agent:v1}Take me\n[00:12.00]{bg}Backing vocal\n[00:14.00]{agent:v2}Second"
+	want := "[00:10.00]Take me\n[00:12.00]Backing vocal\n[00:14.00]Second"
+	if got := CleanSyncedLyrics(input); got != want {
+		t.Fatalf("CleanSyncedLyrics(%q) = %q, want %q", input, got, want)
+	}
+}
+
+func TestExtractPlainFromLRC(t *testing.T) {
+	input := "[00:10.00]{agent:v1}Take me\n[00:12.00]Backing vocal"
+	want := "Take me\nBacking vocal"
+	if got := ExtractPlainFromLRC(input); got != want {
+		t.Fatalf("ExtractPlainFromLRC(%q) = %q, want %q", input, got, want)
 	}
 }
 

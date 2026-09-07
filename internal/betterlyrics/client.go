@@ -127,5 +127,10 @@ func (c *Client) Get(ctx context.Context, trackName, artistName, albumName strin
 			}
 		}
 	}
-	return &Result{PlainLyrics: ttml.PlainText(payload.TTML), SyncedLyrics: synced, TTML: payload.TTML, WordSynced: wordSynced}, nil
+	plain := ttml.PlainText(payload.TTML)
+	if plain == "" {
+		plain = ttml.ExtractPlainFromLRC(synced)
+	}
+	synced = ttml.CleanSyncedLyrics(synced)
+	return &Result{PlainLyrics: plain, SyncedLyrics: synced, TTML: payload.TTML, WordSynced: wordSynced}, nil
 }

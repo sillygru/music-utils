@@ -14,6 +14,7 @@ import (
 	"github.com/sillygru/music-utils/internal/db"
 	"github.com/sillygru/music-utils/internal/lrclib"
 	"github.com/sillygru/music-utils/internal/names"
+	"github.com/sillygru/music-utils/internal/ttml"
 )
 
 func searchLyricsHandlerParallel(metadataDB, lyricsDB *sql.DB, providers *lyricsProviders, fallbacks *fallbackGuard, enricher *enricher) http.HandlerFunc {
@@ -67,7 +68,8 @@ func searchLyricsHandlerParallel(metadataDB, lyricsDB *sql.DB, providers *lyrics
 					// If still without valid word rich, try live lyricsplus/paxsenix now (not just background queue)
 					needsLive := false
 					for i := range cachedResults {
-						if cachedResults[i].ID > 0 && cachedResults[i].RichSync == nil {
+						if cachedResults[i].ID > 0 && (cachedResults[i].RichSync == nil || isWordRichEmptyRichSyncResult(cachedResults[i].RichSync)) {
+							cachedResults[i].RichSync = nil
 							needsLive = true
 							break
 						}
@@ -79,6 +81,28 @@ func searchLyricsHandlerParallel(metadataDB, lyricsDB *sql.DB, providers *lyrics
 						// Update cache with enriched results for next hit
 						if encoded, err := json.Marshal(cachedResults); err == nil {
 							_ = db.UpsertLyricsSearchCache(context.Background(), lyricsDB, cacheKey, encoded)
+						}
+					}
+				}
+				for i := range cachedResults {
+					if isWordRichEmptyRichSyncResult(cachedResults[i].RichSync) {
+						cachedResults[i].RichSync = nil
+					}
+					cachedResults[i].SyncedLyrics = ttml.CleanSyncedLyrics(cachedResults[i].SyncedLyrics)
+					if cachedResults[i].PlainLyrics == "" && cachedResults[i].SyncedLyrics != "" {
+						cachedResults[i].PlainLyrics = ttml.ExtractPlainFromLRC(cachedResults[i].SyncedLyrics)
+					}
+					if cachedResults[i].PlainLyrics == "" || cachedResults[i].SyncedLyrics == "" {
+						for _, v := range cachedResults[i].Variants {
+							if cachedResults[i].PlainLyrics == "" && v.PlainLyrics != "" {
+								cachedResults[i].PlainLyrics = v.PlainLyrics
+							}
+							if cachedResults[i].SyncedLyrics == "" && v.SyncedLyrics != "" {
+								cachedResults[i].SyncedLyrics = ttml.CleanSyncedLyrics(v.SyncedLyrics)
+							}
+						}
+						if cachedResults[i].PlainLyrics == "" && cachedResults[i].SyncedLyrics != "" {
+							cachedResults[i].PlainLyrics = ttml.ExtractPlainFromLRC(cachedResults[i].SyncedLyrics)
 						}
 					}
 				}
@@ -113,6 +137,28 @@ func searchLyricsHandlerParallel(metadataDB, lyricsDB *sql.DB, providers *lyrics
 		})
 		if results == nil {
 			results = []lyricsResponse{}
+		}
+		for i := range results {
+			if isWordRichEmptyRichSyncResult(results[i].RichSync) {
+				results[i].RichSync = nil
+			}
+			results[i].SyncedLyrics = ttml.CleanSyncedLyrics(results[i].SyncedLyrics)
+			if results[i].PlainLyrics == "" && results[i].SyncedLyrics != "" {
+				results[i].PlainLyrics = ttml.ExtractPlainFromLRC(results[i].SyncedLyrics)
+			}
+			if results[i].PlainLyrics == "" || results[i].SyncedLyrics == "" {
+				for _, v := range results[i].Variants {
+					if results[i].PlainLyrics == "" && v.PlainLyrics != "" {
+						results[i].PlainLyrics = v.PlainLyrics
+					}
+					if results[i].SyncedLyrics == "" && v.SyncedLyrics != "" {
+						results[i].SyncedLyrics = ttml.CleanSyncedLyrics(v.SyncedLyrics)
+					}
+				}
+				if results[i].PlainLyrics == "" && results[i].SyncedLyrics != "" {
+					results[i].PlainLyrics = ttml.ExtractPlainFromLRC(results[i].SyncedLyrics)
+				}
+			}
 		}
 		sort.SliceStable(results, func(i, j int) bool {
 			return searchResponseScore(results[i]) > searchResponseScore(results[j])
@@ -158,7 +204,12 @@ func searchProviderTitle(hintTrack, query string) string {
 // the variant with the provider source for future provenance use.
 func searchPersistResponse(ctx context.Context, metadataDB, lyricsDB *sql.DB, result lrclib.RemoteResult, source string) lyricsResponse {
 	track := db.Track{Name: result.TrackName, ArtistName: result.ArtistName, AlbumName: result.AlbumName, Duration: result.Duration, Source: source}
-	lyrics := db.Lyrics{PlainLyrics: result.PlainLyrics, SyncedLyrics: result.SyncedLyrics, Instrumental: result.Instrumental, Source: source}
+	cleanSynced := ttml.CleanSyncedLyrics(result.SyncedLyrics)
+	plain := result.PlainLyrics
+	if plain == "" && cleanSynced != "" {
+		plain = ttml.ExtractPlainFromLRC(cleanSynced)
+	}
+	lyrics := db.Lyrics{PlainLyrics: plain, SyncedLyrics: cleanSynced, Instrumental: result.Instrumental, Source: source}
 	trackID, _, persistErr := db.InsertTrackWithLyrics(ctx, metadataDB, lyricsDB, track, lyrics)
 	if persistErr == nil {
 		track.ID = trackID
@@ -168,31 +219,12 @@ func searchPersistResponse(ctx context.Context, metadataDB, lyricsDB *sql.DB, re
 	return response
 }
 
-func isWordRichEmpty(rich *db.RichLyrics) bool {
-	if rich == nil || rich.SyncType != "word" {
-		return false
-	}
-	parsed, ok := parseStoredCompactRichSync(rich.Content)
-	if !ok {
-		return false
-	}
-	if len(parsed.Lines) == 0 {
-		return true
-	}
-	for _, line := range parsed.Lines {
-		if len(line.Words) > 0 {
-			return false
-		}
-	}
-	return true
-}
-
 func tryEnrichSearchResultFromDB(r *http.Request, metadataDB, lyricsDB *sql.DB, response *lyricsResponse, syncType string) bool {
 	if response == nil || response.ID <= 0 || lyricsDB == nil {
 		return false
 	}
 	if rich, err := db.FindRichLyrics(r.Context(), lyricsDB, response.ID, syncType); err == nil {
-		if isWordRichEmpty(rich) && syncType == "word" {
+		if isWordRichEmpty(rich) {
 			return false
 		}
 		setRichOnlyResponse(response, rich)
@@ -200,7 +232,7 @@ func tryEnrichSearchResultFromDB(r *http.Request, metadataDB, lyricsDB *sql.DB, 
 	}
 	if syncType != "" {
 		if rich, err := db.FindRichLyrics(r.Context(), lyricsDB, response.ID, ""); err == nil {
-			if isWordRichEmpty(rich) && syncType == "word" {
+			if isWordRichEmpty(rich) {
 				return false
 			}
 			setRichOnlyResponse(response, rich)
@@ -240,7 +272,7 @@ func fetchLiveRichForSearchResults(ctx context.Context, lyricsDB *sql.DB, provid
 				defer release()
 			}
 			rich, err := get(ctx)
-			if err != nil || rich == nil {
+			if err != nil || rich == nil || isWordRichEmpty(rich) {
 				return false
 			}
 			setRichOnlyResponse(&results[i], rich)
@@ -260,20 +292,26 @@ func fetchLiveRichForSearchResults(ctx context.Context, lyricsDB *sql.DB, provid
 						content, format = remote.TTML, "ttml"
 					}
 					rich = db.RichLyrics{TrackID: results[i].ID, Content: content, Format: format, SyncType: "word", Source: "lyricsplus"}
+					if isWordRichEmpty(&rich) {
+						return nil, err
+					}
 					if err := db.UpsertRichLyrics(c, lyricsDB, rich); err != nil {
 						return nil, err
 					}
-					if stored, err := db.FindRichLyrics(c, lyricsDB, results[i].ID, "word"); err == nil {
+					if stored, err := db.FindRichLyrics(c, lyricsDB, results[i].ID, "word"); err == nil && !isWordRichEmpty(stored) {
 						return stored, nil
 					}
 					return &rich, nil
 				}
 				if strings.TrimSpace(remote.RichJSON) != "" {
 					rich = db.RichLyrics{TrackID: results[i].ID, Content: remote.RichJSON, Format: "json", SyncType: "word", Source: "lyricsplus"}
+					if isWordRichEmpty(&rich) {
+						return nil, err
+					}
 					if err := db.UpsertRichLyrics(c, lyricsDB, rich); err != nil {
 						return nil, err
 					}
-					if stored, err := db.FindRichLyrics(c, lyricsDB, results[i].ID, "word"); err == nil {
+					if stored, err := db.FindRichLyrics(c, lyricsDB, results[i].ID, "word"); err == nil && !isWordRichEmpty(stored) {
 						return stored, nil
 					}
 					return &rich, nil
@@ -296,14 +334,14 @@ func fetchLiveRichForSearchResults(ctx context.Context, lyricsDB *sql.DB, provid
 					content, format = remote.TTML, "ttml"
 				}
 				rich := db.RichLyrics{TrackID: results[i].ID, Content: content, Format: format, SyncType: "word", Source: "paxsenix"}
+				if isWordRichEmpty(&rich) {
+					return nil, err
+				}
 				if err := db.UpsertRichLyrics(c, lyricsDB, rich); err != nil {
 					return nil, err
 				}
 				if stored, err := db.FindRichLyrics(c, lyricsDB, results[i].ID, "word"); err == nil && !isWordRichEmpty(stored) {
 					return stored, nil
-				}
-				if isWordRichEmpty(&rich) {
-					return nil, err
 				}
 				return &rich, nil
 			})
@@ -323,6 +361,9 @@ func fetchLiveRichForSearchResults(ctx context.Context, lyricsDB *sql.DB, provid
 					content, format = remote.Content, remote.Format
 				}
 				rich := db.RichLyrics{TrackID: results[i].ID, Content: content, Format: format, SyncType: remote.SyncType, Source: remote.Source}
+				if isWordRichEmpty(&rich) {
+					return nil, err
+				}
 				if err := db.UpsertRichLyrics(c, lyricsDB, rich); err != nil {
 					return nil, err
 				}

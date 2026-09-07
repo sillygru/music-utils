@@ -192,20 +192,24 @@ func (c *Client) getBinimum(ctx context.Context, input names.Input, duration flo
 			if err != nil || strings.TrimSpace(synced) == "" {
 				continue
 			}
-			wordSynced := strings.EqualFold(strings.TrimSpace(item.TimingType), "word")
-			if !wordSynced {
-				if lines, parseErr := ttml.Parse(ttmlDoc); parseErr == nil {
-					for _, line := range lines {
-						if len(line.Words) > 0 {
-							wordSynced = true
-							break
-						}
+			hasWords := false
+			if lines, parseErr := ttml.Parse(ttmlDoc); parseErr == nil {
+				for _, line := range lines {
+					if len(line.Words) > 0 {
+						hasWords = true
+						break
 					}
 				}
 			}
+			wordSynced := hasWords
+			plain := ttml.PlainText(ttmlDoc)
+			if plain == "" {
+				plain = ttml.ExtractPlainFromLRC(synced)
+			}
+			synced = ttml.CleanSyncedLyrics(synced)
 			return &Result{
 				TrackName: input.TrackName, ArtistName: input.ArtistName, AlbumName: input.AlbumName,
-				PlainLyrics: ttml.PlainText(ttmlDoc), SyncedLyrics: synced,
+				PlainLyrics: plain, SyncedLyrics: synced,
 				WordSynced: wordSynced, TTML: ttmlDoc,
 			}, nil
 		}
@@ -308,77 +312,25 @@ func (c *Client) getOneMirror(ctx context.Context, mirror string, input names.In
 
 // convertMirrorLines builds extended LRC: {agent:vN} multi-voice tags, {bg}
 // for the first line of each background run. Word-level blocks are dropped in
-// favor of line timing to keep the LRC playable everywhere.
+// convertMirrorLines builds standard clean LRC lines.
 func convertMirrorLines(lines []mirrorLine, wordMode bool) (synced, plain string) {
-	agents := map[string]bool{}
-	for _, line := range lines {
-		if line.Element != nil && strings.TrimSpace(line.Element.Singer) != "" {
-			agents[strings.TrimSpace(line.Element.Singer)] = true
-		}
-	}
-	multiAgent := len(agents) > 1
-	if len(agents) == 1 {
-		for alias := range agents {
-			if alias != "v1" {
-				multiAgent = true
-			}
-		}
-	}
 	var syncedLines, plainLines []string
-	inBackgroundRun := false
 	for _, line := range lines {
 		text := strings.TrimSpace(line.Text)
 		if text == "" {
 			continue
 		}
-		background := false
-		for _, syllable := range line.Syllabi {
-			if syllable.IsBackground {
-				background = true
-				break
-			}
-		}
 		plainLines = append(plainLines, text)
-		tag := ""
-		if multiAgent && line.Element != nil && strings.TrimSpace(line.Element.Singer) != "" {
-			tag += "{agent:" + strings.TrimSpace(line.Element.Singer) + "}"
-		}
-		if background {
-			if !inBackgroundRun {
-				tag += "{bg}"
-			}
-			inBackgroundRun = true
-		} else {
-			inBackgroundRun = false
-		}
 		minutes := int(line.Time) / 60
 		seconds := line.Time - float64(minutes*60)
-		syncedLines = append(syncedLines, formatLRCLine(minutes, seconds, tag+text))
+		syncedLines = append(syncedLines, formatLRCLine(minutes, seconds, text))
 	}
 	_ = wordMode
 	return strings.Join(syncedLines, "\n"), strings.Join(plainLines, "\n")
 }
 
 func formatLRCLine(minutes int, seconds float64, text string) string {
-	return "[" + formatTwo(minutes) + ":" + formatSec(seconds) + "]" + text
-}
-
-func formatTwo(value int) string {
-	if value < 10 {
-		return "0" + strconv.Itoa(value)
-	}
-	return strconv.Itoa(value)
-}
-
-func formatSec(value float64) string {
-	whole := int(value)
-	centis := int((value - float64(whole)) * 100)
-	if centis < 0 {
-		centis = 0
-	}
-	sec := formatTwo(whole)
-	cent := formatTwo(centis)
-	return sec + "." + cent
+	return fmt.Sprintf("[%02d:%05.2f]%s", minutes, seconds, text)
 }
 
 // mirrorLinesToRichJSON converts word-mode mirror lines into compact rich JSON.
@@ -388,6 +340,7 @@ func mirrorLinesToRichJSON(lines []mirrorLine) string {
 	type lineTuple [4]any
 	compactLines := make([]lineTuple, 0, len(lines))
 	var maxEnd float64
+	totalWords := 0
 	for _, line := range lines {
 		text := strings.TrimSpace(line.Text)
 		if text == "" {
@@ -409,6 +362,7 @@ func mirrorLinesToRichJSON(lines []mirrorLine) string {
 				maxEnd = wEnd
 			}
 		}
+		totalWords += len(words)
 		begin := line.Time
 		end := line.Time + line.Duration
 		if line.Duration <= 0 {
@@ -427,7 +381,7 @@ func mirrorLinesToRichJSON(lines []mirrorLine) string {
 		}
 		compactLines = append(compactLines, lineTuple{begin, end, text, words})
 	}
-	if len(compactLines) == 0 {
+	if len(compactLines) == 0 || totalWords == 0 {
 		return ""
 	}
 	payload := map[string]any{

@@ -10,6 +10,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -57,9 +58,7 @@ func Parse(content string) ([]Line, error) {
 	return lines, nil
 }
 
-// ToLRC converts parsed lines to LRC text. Lines without timing are skipped.
-// Background and agent annotations are preserved as {bg} / {agent:vN} tags so
-// multi-voice information survives in the app's extended LRC dialect.
+// ToLRC converts parsed lines to clean standard LRC text. Lines without timing are skipped.
 func ToLRC(lines []Line) string {
 	var b strings.Builder
 	for _, line := range lines {
@@ -81,14 +80,7 @@ func ToLRC(lines []Line) string {
 		}
 		minutes := int(line.Start) / 60
 		seconds := line.Start - float64(minutes*60)
-		tag := ""
-		if line.Agent != "" {
-			tag += "{agent:" + line.Agent + "}"
-		}
-		if line.Background {
-			tag += "{bg}"
-		}
-		fmt.Fprintf(&b, "[%02d:%05.2f]%s%s\n", minutes, seconds, tag, text)
+		fmt.Fprintf(&b, "[%02d:%05.2f]%s\n", minutes, seconds, text)
 	}
 	return b.String()
 }
@@ -119,6 +111,46 @@ func PlainText(content string) string {
 		b.WriteByte('\n')
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+var reLRCVoiceTags = regexp.MustCompile(`\{agent:[^}]*\}|\{bg\}`)
+
+// CleanSyncedLyrics strips non-standard {agent:...} and {bg} tags from LRC lyrics.
+func CleanSyncedLyrics(s string) string {
+	if s == "" {
+		return ""
+	}
+	return reLRCVoiceTags.ReplaceAllString(s, "")
+}
+
+// ExtractPlainFromLRC extracts untimed plain lyric text from LRC content.
+func ExtractPlainFromLRC(lrc string) string {
+	if lrc == "" {
+		return ""
+	}
+	lines := strings.Split(lrc, "\n")
+	var b strings.Builder
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		for strings.HasPrefix(line, "[") {
+			idx := strings.Index(line, "]")
+			if idx == -1 {
+				break
+			}
+			line = strings.TrimSpace(line[idx+1:])
+		}
+		line = strings.TrimSpace(CleanSyncedLyrics(line))
+		if line != "" {
+			if b.Len() > 0 {
+				b.WriteByte('\n')
+			}
+			b.WriteString(line)
+		}
+	}
+	return b.String()
 }
 
 type spanContext struct {

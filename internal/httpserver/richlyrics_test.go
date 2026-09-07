@@ -76,8 +76,11 @@ func TestGetLyricsRichSyncIsOptInAndCached(t *testing.T) {
 	if fields.RichSync == nil || fields.RichSync.Format != "json" || fields.RichSync.SyncType != "word" || fields.RichSync.Source != "unison" {
 		t.Fatalf("unexpected rich response: %+v", fields.RichSync)
 	}
-	if fields.PlainLyrics != nil || fields.SyncedLyrics != nil || fields.LyricsFile != nil {
-		t.Fatal("rich response unexpectedly included redundant LRCLIB lyrics fields")
+	if fields.LyricsFile != nil {
+		t.Fatal("rich response unexpectedly included redundant lyricsfile field")
+	}
+	if fields.PlainLyrics == nil || *fields.PlainLyrics == "" || fields.SyncedLyrics == nil || *fields.SyncedLyrics == "" {
+		t.Fatal("rich response should preserve plain and synced lyrics")
 	}
 	if calls.Load() != 1 {
 		t.Fatalf("expected one rich provider call, got %d", calls.Load())
@@ -204,8 +207,8 @@ func TestSearchLyricsRichSyncIsOptInAndCached(t *testing.T) {
 	if len(richResults) != 1 || richResults[0].RichSync == nil || richResults[0].RichSync.Format != "json" || richResults[0].RichSync.SyncType != "word" {
 		t.Fatalf("unexpected rich search result: %+v", richResults)
 	}
-	if richResults[0].PlainLyrics != "" || richResults[0].SyncedLyrics != "" {
-		t.Fatal("rich search result unexpectedly included LRCLIB fields")
+	if richResults[0].PlainLyrics == "" || richResults[0].SyncedLyrics == "" {
+		t.Fatal("rich search result should preserve plain and synced lyrics")
 	}
 	if calls.Load() != 1 {
 		t.Fatalf("expected one rich provider call, got %d", calls.Load())
@@ -277,8 +280,8 @@ func TestSearchLyricsRichSyncAvoidsDuplicateProviderLookups(t *testing.T) {
 	if err := json.NewDecoder(response.Body).Decode(&results); err != nil {
 		t.Fatalf("decode search: %v", err)
 	}
-	if len(results) != 1 || results[0].RichSync == nil || results[0].SyncedLyrics != "" {
-		t.Fatalf("expected one rich local result, got %+v", results)
+	if len(results) != 1 || results[0].RichSync == nil || results[0].SyncedLyrics == "" {
+		t.Fatalf("expected one rich local result with synced lyrics, got %+v", results)
 	}
 	if searchCalls.Load() != 0 || richCalls.Load() != 1 {
 		t.Fatalf("expected local rich search to skip upstream and fetch rich once, search=%d rich=%d", searchCalls.Load(), richCalls.Load())

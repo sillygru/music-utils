@@ -12,6 +12,7 @@ import (
 
 	"github.com/sillygru/music-utils/internal/db"
 	"github.com/sillygru/music-utils/internal/lrclib"
+	"github.com/sillygru/music-utils/internal/ttml"
 )
 
 type lyricsSearchJob struct {
@@ -254,11 +255,13 @@ func runParallelLyricsSearch(
 						content, format = remote.TTML, "ttml"
 					}
 					rich := db.RichLyrics{TrackID: resp.ID, Content: content, Format: format, SyncType: "word", Source: "betterlyrics"}
-					if err := db.UpsertRichLyrics(ctx, lyricsDB, rich); err == nil {
-						if stored, err := db.FindRichLyrics(ctx, lyricsDB, resp.ID, "word"); err == nil {
-							setRichOnlyResponse(&resp, stored)
-						} else {
-							setRichOnlyResponse(&resp, &rich)
+					if !isWordRichEmpty(&rich) {
+						if err := db.UpsertRichLyrics(ctx, lyricsDB, rich); err == nil {
+							if stored, err := db.FindRichLyrics(ctx, lyricsDB, resp.ID, "word"); err == nil && !isWordRichEmpty(stored) {
+								setRichOnlyResponse(&resp, stored)
+							} else {
+								setRichOnlyResponse(&resp, &rich)
+							}
 						}
 					}
 				}
@@ -313,11 +316,13 @@ func runParallelLyricsSearch(
 						content, format = remote.TTML, "ttml"
 					}
 					rich := db.RichLyrics{TrackID: resp.ID, Content: content, Format: format, SyncType: "word", Source: "paxsenix"}
-					if err := db.UpsertRichLyrics(ctx, lyricsDB, rich); err == nil {
-						if stored, err := db.FindRichLyrics(ctx, lyricsDB, resp.ID, "word"); err == nil {
-							setRichOnlyResponse(&resp, stored)
-						} else {
-							setRichOnlyResponse(&resp, &rich)
+					if !isWordRichEmpty(&rich) {
+						if err := db.UpsertRichLyrics(ctx, lyricsDB, rich); err == nil {
+							if stored, err := db.FindRichLyrics(ctx, lyricsDB, resp.ID, "word"); err == nil && !isWordRichEmpty(stored) {
+								setRichOnlyResponse(&resp, stored)
+							} else {
+								setRichOnlyResponse(&resp, &rich)
+							}
 						}
 					}
 				}
@@ -351,20 +356,24 @@ func runParallelLyricsSearch(
 							content, format = remote.TTML, "ttml"
 						}
 						rich := db.RichLyrics{TrackID: resp.ID, Content: content, Format: format, SyncType: "word", Source: "lyricsplus"}
-						if err := db.UpsertRichLyrics(ctx, lyricsDB, rich); err == nil {
-							if stored, err := db.FindRichLyrics(ctx, lyricsDB, resp.ID, "word"); err == nil {
-								setRichOnlyResponse(&resp, stored)
-							} else {
-								setRichOnlyResponse(&resp, &rich)
+						if !isWordRichEmpty(&rich) {
+							if err := db.UpsertRichLyrics(ctx, lyricsDB, rich); err == nil {
+								if stored, err := db.FindRichLyrics(ctx, lyricsDB, resp.ID, "word"); err == nil && !isWordRichEmpty(stored) {
+									setRichOnlyResponse(&resp, stored)
+								} else {
+									setRichOnlyResponse(&resp, &rich)
+								}
 							}
 						}
 					} else if strings.TrimSpace(remote.RichJSON) != "" {
 						rich := db.RichLyrics{TrackID: resp.ID, Content: remote.RichJSON, Format: "json", SyncType: "word", Source: "lyricsplus"}
-						if err := db.UpsertRichLyrics(ctx, lyricsDB, rich); err == nil {
-							if stored, err := db.FindRichLyrics(ctx, lyricsDB, resp.ID, "word"); err == nil {
-								setRichOnlyResponse(&resp, stored)
-							} else {
-								setRichOnlyResponse(&resp, &rich)
+						if !isWordRichEmpty(&rich) {
+							if err := db.UpsertRichLyrics(ctx, lyricsDB, rich); err == nil {
+								if stored, err := db.FindRichLyrics(ctx, lyricsDB, resp.ID, "word"); err == nil && !isWordRichEmpty(stored) {
+									setRichOnlyResponse(&resp, stored)
+								} else {
+									setRichOnlyResponse(&resp, &rich)
+								}
 							}
 						}
 					}
@@ -518,18 +527,37 @@ func mergeSearchResponse(existing, incoming *lyricsResponse) {
 		return
 	}
 	mergeLyricsVariants(existing, incoming)
-	if incoming.RichSync != nil {
+	if incoming.RichSync != nil && !isWordRichEmptyRichSyncResult(incoming.RichSync) {
 		existing.RichSync = incoming.RichSync
 		appendLyricsVariant(existing, incoming)
-		existing.PlainLyrics = ""
-		existing.SyncedLyrics = ""
-		return
 	}
 	if existing.PlainLyrics == "" {
 		existing.PlainLyrics = incoming.PlainLyrics
 	}
 	if existing.SyncedLyrics == "" {
 		existing.SyncedLyrics = incoming.SyncedLyrics
+	}
+	if existing.SyncedLyrics != "" {
+		existing.SyncedLyrics = ttml.CleanSyncedLyrics(existing.SyncedLyrics)
+	}
+	if existing.PlainLyrics == "" && existing.SyncedLyrics != "" {
+		existing.PlainLyrics = ttml.ExtractPlainFromLRC(existing.SyncedLyrics)
+	}
+	if existing.PlainLyrics == "" || existing.SyncedLyrics == "" {
+		for _, v := range existing.Variants {
+			if existing.PlainLyrics == "" && v.PlainLyrics != "" {
+				existing.PlainLyrics = v.PlainLyrics
+			}
+			if existing.SyncedLyrics == "" && v.SyncedLyrics != "" {
+				existing.SyncedLyrics = ttml.CleanSyncedLyrics(v.SyncedLyrics)
+			}
+		}
+		if existing.PlainLyrics == "" && existing.SyncedLyrics != "" {
+			existing.PlainLyrics = ttml.ExtractPlainFromLRC(existing.SyncedLyrics)
+		}
+	}
+	if isWordRichEmptyRichSyncResult(existing.RichSync) {
+		existing.RichSync = nil
 	}
 	if existing.Instrumental {
 		return

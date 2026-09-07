@@ -367,11 +367,7 @@ only for local cache matching and is never forwarded, while `video_id` is
 forwarded only to Zemer and YouTube. When `artist_name`/`album_name`
 are omitted, the server first queries providers with exactly what was
 supplied and only retries once with artist/album backfilled from cached
-metadata if that finds nothing. Without `include_rich_sync=true`, the
-response contains the available plain and/or line-synchronized lyrics. With
-`include_rich_sync=true`, the server first tries an additional
-Unison-compatible lookup; a successful rich lookup returns only `richSync`,
-while a rich miss falls back to the plain/LRC lyrics fields.
+metadata if that finds nothing. Without `include_rich_sync=true`, the response contains the available plain and/or line-synchronized lyrics. With `include_rich_sync=true`, the server additionally includes syllable- or word-synchronized `richSync` when available, while preserving clean standard `plainLyrics` and `syncedLyrics` (standard LRC without voice tags).
 
 Example response:
 
@@ -399,8 +395,8 @@ Example response:
 | `duration` | number | Seconds. |
 | `instrumental` | boolean | True for instrumental tracks (lyrics fields empty). |
 | `plainLyrics` | string | Plain-text lyrics. |
-| `syncedLyrics` | string | Timestamped LRC lyrics, when available. |
-| `richSync` | object | Source-native word/syllable synchronized payload; returned alone when `include_rich_sync=true` and a provider has a result. If unavailable, the response falls back to `plainLyrics` and/or `syncedLyrics`. |
+| `syncedLyrics` | string | Timestamped LRC lyrics, when available (clean standard LRC without voice tags). |
+| `richSync` | object | Source-native word/syllable synchronized payload; included when `include_rich_sync=true` and a provider has genuine word-level timing. |
 | `richSync.content` | object | Compact parsed rich-sync JSON with `title`, `artist`, `duration`, and `lines`. Each line is `[begin, end, text, words]`; each word is `[begin, end, text]`. |
 | `richSync.content.title` | string | Song title, when present. |
 | `richSync.content.artist` | string | Artist name, when present. |
@@ -431,9 +427,9 @@ A rich response has this compact content shape:
 The response intentionally does not include LRCLIB's redundant `lyricsfile`
 YAML field. Rich payloads are cached separately in the lyrics database as
 compact JSON, and existing TTML rows are converted asynchronously after
-startup. When a rich payload is returned, it replaces the plain and
-line-synchronized fields; when it is unavailable, the endpoint falls back to
-the cached or LRCLIB plain/LRC fields.
+startup. Standard `plainLyrics` and clean `syncedLyrics` are always returned
+alongside `richSync` for client compatibility and fallbacks. Payloads without
+word-level timing are never treated or stored as word-synced rich lyrics.
 
 Responses: `200` lyrics object · `400` invalid/missing input · `404` not
 found (memoized for 24 hours) · `429` rate limited · `503` upstream busy ·
@@ -456,15 +452,14 @@ LRCLIB's `/api/search` and the structured hints to the other providers; the serv
 The optional `include_rich_sync=true` (also accepts `1` or `yes`) enriches
 results with the same opt-in `richSync` object as `/api/lyrics/get`, and
 `sync_type=word|syllable|richsync` selects a cached synchronization variant.
-When rich sync is requested and available, that result contains `richSync`
-alone instead of `plainLyrics`/`syncedLyrics`; without the flag, search never
-calls the rich provider and returns the ordinary fields only. Matching local
-tracks are preferred over duplicate upstream release variants, and results
-with `syncedLyrics` or `richSync` are placed before lyric-less results. LRCLIB
-search results are persisted into the local metadata and lyrics caches, so a
-repeat search is served locally after the first lookup; rich variants are
-stored separately and reused when requested. For a local catalog hit with rich
-sync enabled, the endpoint skips the upstream search entirely.
+When rich sync is requested and available, `richSync` is populated alongside
+clean `plainLyrics` and `syncedLyrics`. Matching local tracks are preferred
+over duplicate upstream release variants, and results with `syncedLyrics` or
+`richSync` are placed before lyric-less results. LRCLIB search results are
+persisted into the local metadata and lyrics caches, so a repeat search is
+served locally after the first lookup; rich variants are stored separately and
+reused when requested. For a local catalog hit with rich sync enabled, the
+endpoint skips the upstream search entirely.
 
 ```sh
 curl 'https://music.gru0.dev/api/lyrics/search?q=no%20surprises&limit=20'
