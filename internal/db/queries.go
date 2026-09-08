@@ -320,6 +320,43 @@ func HasRecentProviderFetch(ctx context.Context, database *sql.DB, trackID int64
 }
 
 // ListRichLyricsSources returns every (source,sync_type) pair cached for a track.
+// ListRecentProviderFetches returns every provider tried for trackID within
+// ttl, mapped to whether the last attempt succeeded. The request-path fan-out
+// uses it to skip providers recently answered, positive or negative.
+func ListRecentProviderFetches(ctx context.Context, database *sql.DB, trackID int64, ttl time.Duration) (map[string]bool, error) {
+	if database == nil {
+		return nil, errors.New("lyrics database is nil")
+	}
+	if trackID <= 0 {
+		return map[string]bool{}, nil
+	}
+	rows, err := database.QueryContext(ctx, `SELECT provider, last_fetched_at, last_success FROM lyrics_provider_fetches WHERE track_id=?`, trackID)
+	if err != nil {
+		return nil, fmt.Errorf("list provider fetches: %w", err)
+	}
+	defer rows.Close()
+	recent := make(map[string]bool)
+	for rows.Next() {
+		var provider, last string
+		var success bool
+		if err := rows.Scan(&provider, &last, &success); err != nil {
+			return nil, fmt.Errorf("scan provider fetch: %w", err)
+		}
+		t, err := time.Parse("2006-01-02 15:04:05", last)
+		if err != nil {
+			t, _ = time.Parse(time.RFC3339, last)
+		}
+		if time.Since(t) >= ttl {
+			continue
+		}
+		recent[strings.ToLower(strings.TrimSpace(provider))] = success
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate provider fetches: %w", err)
+	}
+	return recent, nil
+}
+
 func ListRichLyricsSources(ctx context.Context, database *sql.DB, trackID int64) (map[string]struct{}, error) {
 	if database == nil {
 		return nil, errors.New("lyrics database is nil")

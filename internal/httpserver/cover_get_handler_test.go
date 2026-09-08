@@ -88,7 +88,7 @@ func TestCoverGetSongTitleOnlyResolves(t *testing.T) {
 	handler := getCoverTopHandler(metadataDB, nil, cover.NewResolver(&coverStubProvider{
 		name:   "itunes",
 		result: &cover.Result{URL: "http://img/song.jpg", Source: "itunes", TrackName: "Example Song", ArtistName: "Example Artist", AlbumName: "Example Album"},
-	}), testFallbackGuard(), true, nil)
+	}), testFallbackGuard(), true)
 
 	response := performRequest(t, handler, "/?track_name=Example+Song")
 	if response.Code != http.StatusOK {
@@ -113,7 +113,7 @@ func TestCoverGetAlbumTitleOnlyResolves(t *testing.T) {
 			{URL: "http://img/wrong.jpg", Source: "itunes", ArtistName: "NIFANA", AlbumName: "Imagine (Reggae Version) - Single"},
 			{URL: "http://img/imagine.jpg", Source: "itunes", ArtistName: "John Lennon", AlbumName: "Imagine"},
 		},
-	}), testFallbackGuard(), true, nil)
+	}), testFallbackGuard(), true)
 
 	response := performRequest(t, handler, "/?type=album&album_name=Imagine")
 	if response.Code != http.StatusOK {
@@ -145,7 +145,7 @@ func TestCoverGetAlbumCacheHitReturnsResults(t *testing.T) {
 	}
 
 	stub := &coverStubProvider{name: "itunes", result: &cover.Result{URL: "http://img/fresh.jpg", Source: "itunes"}}
-	handler := getCoverTopHandler(nil, coverDB, cover.NewResolver(stub), testFallbackGuard(), true, nil)
+	handler := getCoverTopHandler(nil, coverDB, cover.NewResolver(stub), testFallbackGuard(), true)
 
 	response := performRequest(t, handler, "/?type=album&artist_name=Radiohead&album_name=OK+Computer")
 	if response.Code != http.StatusOK {

@@ -113,7 +113,7 @@ type apiError struct {
 	Message string `json:"message"`
 }
 
-func getLyricsHandler(metadataDB, lyricsDB *sql.DB, providers *lyricsProviders, lyricsMisses *lyricsMissCache, fallbacks *fallbackGuard, prefetcher *prefetcher, enricher *enricher) http.HandlerFunc {
+func getLyricsHandler(metadataDB, lyricsDB *sql.DB, providers *lyricsProviders, lyricsMisses *lyricsMissCache, fallbacks *fallbackGuard) http.HandlerFunc {
 	lookupGroup := newLyricsLookupGroup()
 	return func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
@@ -138,38 +138,46 @@ func getLyricsHandler(metadataDB, lyricsDB *sql.DB, providers *lyricsProviders, 
 		}
 
 		cacheStart := time.Now()
-		var track *db.Track
-		var lyrics *db.Lyrics
-		for _, candidate := range candidates {
-			track, lyrics, err = db.FindTrackExact(
-				r.Context(), metadataDB, lyricsDB, candidate.TrackName, candidate.ArtistName, candidate.AlbumName, duration,
-			)
-			if err == nil || !errors.Is(err, sql.ErrNoRows) {
-				break
-			}
-		}
+		state, stateErr := resolveLyricsCacheState(r.Context(), metadataDB, lyricsDB, trackName, artistName, albumName, duration, videoID, lyricsMisses)
 		setCacheDuration(r, time.Since(cacheStart))
-		existingTrack := track
-		if err == nil && lyricsAvailable(lyrics) {
+		if stateErr != nil {
+			setOutcome(r, "error")
+			writeJSON(w, http.StatusInternalServerError, apiError{Code: http.StatusInternalServerError, Message: "Internal server error"})
+			return
+		}
+		existingTrack := state.track
+		if state.hasLyrics() {
 			setOutcome(r, "local_hit")
-			prefetcher.Enqueue(track.Name, track.ArtistName, track.AlbumName, track.Duration)
-			if enricher != nil {
-				enricher.Enqueue(track, videoID)
+			// Rich gaps are filled synchronously only when the rich provider
+			// was not already tried within the ledger TTL; a recently-tried
+			// provider cannot have new data, so the cached response ships
+			// immediately.
+			if includeRichSync(r) && state.providerRecentlyTried("unison") {
+				response := toLyricsResponse(state.track, state.lyrics)
+				if state.track.ID > 0 && response.SyncedLyrics == "" {
+					if cached, err := db.FindRichLyrics(r.Context(), lyricsDB, state.track.ID, ""); err == nil && !isWordRichEmpty(cached) {
+						response.SyncedLyrics = compactRichSyncToLRC(cached)
+					}
+				}
+				response.SyncedLyrics = ttml.CleanSyncedLyrics(response.SyncedLyrics)
+				if response.PlainLyrics == "" && response.SyncedLyrics != "" {
+					response.PlainLyrics = ttml.ExtractPlainFromLRC(response.SyncedLyrics)
+				}
+				syncType := requestedRichSyncType(r)
+				if syncType != "" {
+					if cached, err := db.FindRichLyrics(r.Context(), lyricsDB, state.track.ID, ""); err == nil && !isWordRichEmpty(cached) {
+						setRichOnlyResponse(&response, cached)
+					}
+				}
+				writeJSON(w, http.StatusOK, response)
+				return
 			}
-			writeJSON(w, http.StatusOK, enrichLyricsResponse(r, track, lyrics, metadataDB, lyricsDB, providers, fallbacks))
+			writeJSON(w, http.StatusOK, enrichLyricsResponse(r, state.track, state.lyrics, metadataDB, lyricsDB, providers, fallbacks))
 			return
 		}
 		// A metadata row can exist before lyrics have been fetched. Treat an
 		// empty, non-instrumental lyrics row as a cache miss so it cannot mask
 		// a populated LRCLIB response for the same track.
-		if err == nil {
-			err = sql.ErrNoRows
-		}
-		if !errors.Is(err, sql.ErrNoRows) {
-			setOutcome(r, "error")
-			writeJSON(w, http.StatusInternalServerError, apiError{Code: http.StatusInternalServerError, Message: "Internal server error"})
-			return
-		}
 
 		// resolveUpstream runs the full miss path for one identity: memoized-miss
 		// check, rich-only attempt, then the parallel provider fan-out. The
@@ -178,7 +186,7 @@ func getLyricsHandler(metadataDB, lyricsDB *sql.DB, providers *lyricsProviders, 
 		// when that fails. It reports whether the request was served; miss is
 		// true only for a genuine miss (never for rate limiting or an
 		// upstream-busy response, which are terminal).
-		resolveUpstream := func(lookupTrack, lookupArtist, lookupAlbum string, existing *db.Track) (served, miss bool) {
+		resolveUpstream := func(lookupTrack, lookupArtist, lookupAlbum string, existing *db.Track, cacheState *lyricsCacheState) (served, miss bool) {
 			missKey := lyricsMissKeyWithVideo(lookupTrack, lookupArtist, lookupAlbum, videoID)
 			lookupKey := missKey
 			if lyricsMisses.Has(missKey, time.Now()) {
@@ -203,8 +211,9 @@ func getLyricsHandler(metadataDB, lyricsDB *sql.DB, providers *lyricsProviders, 
 			if existing != nil {
 				isrc = existing.ISRC
 			}
+			skip := cacheState.skipSet(includeRichSync(r))
 			parallelResult := lookupGroup.lookup(r.Context(), lookupKey, func(ctx context.Context, publish func(lyricsLookupResult)) {
-				runParallelLyricsGet(ctx, publish, metadataDB, lyricsDB, providers, lyricsMisses, fallbacks, includeRichSync(r), clientIP(r, false), existing, lookupTrack, lookupArtist, lookupAlbum, duration, videoID, isrc)
+				runParallelLyricsGet(ctx, publish, metadataDB, lyricsDB, providers, lyricsMisses, fallbacks, includeRichSync(r), clientIP(r, false), existing, lookupTrack, lookupArtist, lookupAlbum, duration, videoID, isrc, skip)
 			})
 			if parallelResult.upstream > 0 {
 				setUpstreamDuration(r, parallelResult.upstream)
@@ -226,16 +235,13 @@ func getLyricsHandler(metadataDB, lyricsDB *sql.DB, providers *lyricsProviders, 
 				} else {
 					setOutcome(r, "lrclib_fallback_hit")
 				}
-				if parallelResult.track != nil {
-					prefetcher.Enqueue(parallelResult.track.Name, parallelResult.track.ArtistName, parallelResult.track.AlbumName, parallelResult.track.Duration)
-				}
 				writeJSON(w, http.StatusOK, response)
 				return true, false
 			}
 			return false, true
 		}
 
-		if served, _ := resolveUpstream(trackName, artistName, albumName, existingTrack); served {
+		if served, _ := resolveUpstream(trackName, artistName, albumName, existingTrack, state); served {
 			return
 		}
 		// Strict user-only lookup failed. Retry once with artist/album
@@ -249,22 +255,23 @@ func getLyricsHandler(metadataDB, lyricsDB *sql.DB, providers *lyricsProviders, 
 		}
 		setRequestIssue(r, slog.LevelInfo, "lyrics retry with cached artist/album")
 		cacheStart = time.Now()
-		fbTrack, fbLyrics, fbErr := db.FindTrackExact(r.Context(), metadataDB, lyricsDB, trackName, fbArtist, fbAlbum, duration)
+		fbState, fbStateErr := resolveLyricsCacheState(r.Context(), metadataDB, lyricsDB, trackName, fbArtist, fbAlbum, duration, videoID, lyricsMisses)
 		setCacheDuration(r, time.Since(cacheStart))
-		if fbErr == nil && lyricsAvailable(fbLyrics) {
+		if fbStateErr != nil {
+			setOutcome(r, "error")
+			writeJSON(w, http.StatusInternalServerError, apiError{Code: http.StatusInternalServerError, Message: "Internal server error"})
+			return
+		}
+		if fbState.hasLyrics() {
 			setOutcome(r, "local_hit")
-			prefetcher.Enqueue(fbTrack.Name, fbTrack.ArtistName, fbTrack.AlbumName, fbTrack.Duration)
-			if enricher != nil {
-				enricher.Enqueue(fbTrack, videoID)
-			}
-			writeJSON(w, http.StatusOK, enrichLyricsResponse(r, fbTrack, fbLyrics, metadataDB, lyricsDB, providers, fallbacks))
+			writeJSON(w, http.StatusOK, enrichLyricsResponse(r, fbState.track, fbState.lyrics, metadataDB, lyricsDB, providers, fallbacks))
 			return
 		}
 		fbExisting := existingTrack
-		if fbErr == nil {
-			fbExisting = fbTrack
+		if fbState.track != nil {
+			fbExisting = fbState.track
 		}
-		if served, _ := resolveUpstream(trackName, fbArtist, fbAlbum, fbExisting); served {
+		if served, _ := resolveUpstream(trackName, fbArtist, fbAlbum, fbExisting, fbState); served {
 			return
 		}
 		setOutcome(r, "miss")

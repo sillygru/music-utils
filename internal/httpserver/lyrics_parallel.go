@@ -18,8 +18,10 @@ import (
 // independently. The callback receives validated results as they arrive; all
 // persistence happens inside the provider goroutines so results that arrive
 // after the HTTP response are still cached. Slow providers can never delay the
-// response: the orchestrator returns the first usable result after the
+// response: the orchestrator returns the best result so far after the
 // three-second window while the remaining goroutines keep filling the cache.
+// The skip set excludes providers already answered for this track (per the
+// provider-fetch ledger); every outcome is written back to that ledger.
 func runParallelLyricsGet(
 	ctx context.Context,
 	publish func(lyricsLookupResult),
@@ -33,12 +35,13 @@ func runParallelLyricsGet(
 	trackName, artistName, albumName string,
 	duration float64,
 	videoID, isrc string,
+	skip map[string]bool,
 ) {
 	if providers == nil {
 		return
 	}
 	var wg sync.WaitGroup
-	if providers.lrclibEnabled && providers.lrclib != nil {
+	if providers.lrclibEnabled && providers.lrclib != nil && !skip["lrclib"] {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -57,10 +60,12 @@ func runParallelLyricsGet(
 				if errors.Is(err, lrclib.ErrNotFound) && lyricsMisses != nil && artistName != "" {
 					lyricsMisses.Set(lyricsMissKeyWithVideo(trackName, artistName, albumName, videoID), time.Now())
 				}
+				recordProviderMiss(ctx, lyricsDB, trackIDOf(existingTrack), "lrclib", artistName, albumName)
 				publish(lyricsLookupResult{err: err, upstream: elapsed})
 				return
 			}
 			if !remoteLyricsAvailable(remote) || !remoteLyricsMatchesInput(names.Input{TrackName: trackName, ArtistName: artistName, AlbumName: albumName}, remote) {
+				recordProviderMiss(ctx, lyricsDB, trackIDOf(existingTrack), "lrclib", artistName, albumName)
 				publish(lyricsLookupResult{err: lrclib.ErrNotFound, upstream: elapsed})
 				return
 			}
@@ -68,11 +73,12 @@ func runParallelLyricsGet(
 			if !ok {
 				return
 			}
+			recordProviderFetch(ctx, lyricsDB, track.ID, "lrclib", true)
 			publish(lyricsLookupResult{track: track, lyrics: lyrics, upstream: elapsed})
 		}()
 	}
 
-	if providers.richEnabled && richRequested && providers.rich != nil {
+	if providers.richEnabled && richRequested && providers.rich != nil && !skip["unison"] {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -87,6 +93,7 @@ func runParallelLyricsGet(
 			remote, err := providers.rich.Get(ctx, trackName, artistName, albumName)
 			if err != nil || !validRichSyncType(remote.SyncType) {
 				if err != nil {
+					recordProviderMiss(ctx, lyricsDB, trackIDOf(existingTrack), "unison", artistName, albumName)
 					publish(lyricsLookupResult{err: err})
 				}
 				return
@@ -95,11 +102,12 @@ func runParallelLyricsGet(
 			if !ok {
 				return
 			}
+			recordProviderFetch(ctx, lyricsDB, track.ID, "unison", true)
 			publish(lyricsLookupResult{track: track, rich: rich})
 		}()
 	}
 
-	if providers.appleEnabled && providers.apple != nil {
+	if providers.appleEnabled && providers.apple != nil && !skip["apple_music"] {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -112,20 +120,23 @@ func runParallelLyricsGet(
 			}
 			track, err := providers.apple.SearchTrack(ctx, trackName, artistName, albumName)
 			if err != nil {
+				recordProviderMiss(ctx, lyricsDB, trackIDOf(existingTrack), "apple_music", artistName, albumName)
 				return
 			}
 			remote, err := providers.apple.GetLyrics(ctx, track.ID)
 			if err != nil {
+				recordProviderMiss(ctx, lyricsDB, trackIDOf(existingTrack), "apple_music", artistName, albumName)
 				return
 			}
 			trackRow, rich, ok := persistRemoteRichLyrics(ctx, metadataDB, lyricsDB, existingTrack, &richlyrics.Result{Content: remote.Content, Format: remote.Format, SyncType: remote.SyncType, Source: remote.Source}, track.Name, track.ArtistName, track.AlbumName, track.Duration)
 			if ok {
+				recordProviderFetch(ctx, lyricsDB, trackRow.ID, "apple_music", true)
 				publish(lyricsLookupResult{track: trackRow, rich: rich})
 			}
 		}()
 	}
 
-	if providers.musixEnabled && providers.musix != nil {
+	if providers.musixEnabled && providers.musix != nil && !skip["musixmatch"] {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -138,21 +149,24 @@ func runParallelLyricsGet(
 			}
 			track, err := providers.musix.SearchTrack(ctx, trackName, artistName, albumName)
 			if err != nil {
+				recordProviderMiss(ctx, lyricsDB, trackIDOf(existingTrack), "musixmatch", artistName, albumName)
 				return
 			}
 			remote, err := providers.musix.GetLyrics(ctx, track.CommonTrackID, track.ISRC)
 			if err != nil {
+				recordProviderMiss(ctx, lyricsDB, trackIDOf(existingTrack), "musixmatch", artistName, albumName)
 				return
 			}
 			row := &lrclib.RemoteResult{TrackName: track.Name, ArtistName: track.ArtistName, AlbumName: track.AlbumName, Duration: track.Duration, PlainLyrics: remote.PlainLyrics}
 			trackRow, lyrics, ok := persistRemoteLyrics(ctx, metadataDB, lyricsDB, existingTrack, row, track.Name, track.ArtistName, track.AlbumName, track.Duration)
 			if ok {
+				recordProviderFetch(ctx, lyricsDB, trackRow.ID, "musixmatch", true)
 				publish(lyricsLookupResult{track: trackRow, lyrics: lyrics})
 			}
 		}()
 	}
 
-	if providers.betterEnabled && providers.better != nil {
+	if providers.betterEnabled && providers.better != nil && !skip["betterlyrics"] {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -167,6 +181,7 @@ func runParallelLyricsGet(
 			remote, err := providers.better.Get(ctx, trackName, artistName, albumName, duration)
 			elapsed := time.Since(started)
 			if err != nil {
+				recordProviderMiss(ctx, lyricsDB, trackIDOf(existingTrack), "betterlyrics", artistName, albumName)
 				return
 			}
 			row := &lrclib.RemoteResult{TrackName: trackName, ArtistName: artistName, AlbumName: albumName, Duration: duration, PlainLyrics: remote.PlainLyrics, SyncedLyrics: remote.SyncedLyrics}
@@ -174,6 +189,7 @@ func runParallelLyricsGet(
 			if !ok {
 				return
 			}
+			recordProviderFetch(ctx, lyricsDB, trackRow.ID, "betterlyrics", true)
 			result := lyricsLookupResult{track: trackRow, lyrics: lyrics, upstream: elapsed}
 			if remote.WordSynced && strings.TrimSpace(remote.TTML) != "" {
 				if _, rich, richOK := persistRemoteRichLyrics(ctx, metadataDB, lyricsDB, trackRow, &richlyrics.Result{Content: remote.TTML, Format: "ttml", SyncType: "word", Source: "betterlyrics"}, trackName, artistName, albumName, duration); richOK {
@@ -186,7 +202,7 @@ func runParallelLyricsGet(
 		}()
 	}
 
-	if providers.kugouEnabled && providers.kugou != nil {
+	if providers.kugouEnabled && providers.kugou != nil && !skip["kugou"] {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -201,6 +217,7 @@ func runParallelLyricsGet(
 			remote, err := providers.kugou.Get(ctx, trackName, artistName, albumName, duration)
 			elapsed := time.Since(started)
 			if err != nil {
+				recordProviderMiss(ctx, lyricsDB, trackIDOf(existingTrack), "kugou", artistName, albumName)
 				return
 			}
 			row := &lrclib.RemoteResult{
@@ -213,12 +230,13 @@ func runParallelLyricsGet(
 			}
 			trackRow, lyrics, ok := persistProviderLyrics(ctx, metadataDB, lyricsDB, existingTrack, row, trackName, artistName, albumName, duration, "kugou")
 			if ok {
+				recordProviderFetch(ctx, lyricsDB, trackRow.ID, "kugou", true)
 				publish(lyricsLookupResult{track: trackRow, lyrics: lyrics, upstream: elapsed})
 			}
 		}()
 	}
 
-	if providers.paxsenixEnabled && providers.paxsenix != nil {
+	if providers.paxsenixEnabled && providers.paxsenix != nil && !skip["paxsenix"] {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -233,6 +251,7 @@ func runParallelLyricsGet(
 			remote, err := providers.paxsenix.Get(ctx, trackName, artistName, albumName)
 			elapsed := time.Since(started)
 			if err != nil {
+				recordProviderMiss(ctx, lyricsDB, trackIDOf(existingTrack), "paxsenix", artistName, albumName)
 				return
 			}
 			row := &lrclib.RemoteResult{
@@ -247,6 +266,7 @@ func runParallelLyricsGet(
 			if !ok {
 				return
 			}
+			recordProviderFetch(ctx, lyricsDB, trackRow.ID, "paxsenix", true)
 			result := lyricsLookupResult{track: trackRow, lyrics: lyrics, upstream: elapsed}
 			if remote.WordSynced && strings.TrimSpace(remote.TTML) != "" {
 				if _, rich, richOK := persistRemoteRichLyrics(ctx, metadataDB, lyricsDB, trackRow, &richlyrics.Result{Content: remote.TTML, Format: "ttml", SyncType: "word", Source: "paxsenix"}, trackName, artistName, albumName, duration); richOK {
@@ -257,7 +277,7 @@ func runParallelLyricsGet(
 		}()
 	}
 
-	if providers.lyricsPlusEnabled && providers.lyricsPlus != nil {
+	if providers.lyricsPlusEnabled && providers.lyricsPlus != nil && !skip["lyricsplus"] {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -272,6 +292,7 @@ func runParallelLyricsGet(
 			remote, err := providers.lyricsPlus.Get(ctx, trackName, artistName, albumName, duration, isrc)
 			elapsed := time.Since(started)
 			if err != nil {
+				recordProviderMiss(ctx, lyricsDB, trackIDOf(existingTrack), "lyricsplus", artistName, albumName)
 				return
 			}
 			row := &lrclib.RemoteResult{
@@ -283,6 +304,7 @@ func runParallelLyricsGet(
 			if !ok {
 				return
 			}
+			recordProviderFetch(ctx, lyricsDB, trackRow.ID, "lyricsplus", true)
 			result := lyricsLookupResult{track: trackRow, lyrics: lyrics, upstream: elapsed}
 			if remote.WordSynced {
 				if strings.TrimSpace(remote.TTML) != "" {
@@ -306,7 +328,7 @@ func runParallelLyricsGet(
 	}
 
 	if videoID != "" {
-		if providers.zemerEnabled && providers.zemer != nil {
+		if providers.zemerEnabled && providers.zemer != nil && !skip["zemer"] {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
@@ -321,17 +343,19 @@ func runParallelLyricsGet(
 				remote, err := providers.zemer.Get(ctx, videoID)
 				elapsed := time.Since(started)
 				if err != nil {
+					recordProviderMiss(ctx, lyricsDB, trackIDOf(existingTrack), "zemer", artistName, albumName)
 					return
 				}
 				row := &lrclib.RemoteResult{TrackName: trackName, ArtistName: artistName, AlbumName: albumName, Duration: duration, PlainLyrics: remote.PlainLyrics, SyncedLyrics: remote.SyncedLyrics}
 				trackRow, lyrics, ok := persistProviderLyrics(ctx, metadataDB, lyricsDB, existingTrack, row, trackName, artistName, albumName, duration, "zemer")
 				if ok {
+					recordProviderFetch(ctx, lyricsDB, trackRow.ID, "zemer", true)
 					publish(lyricsLookupResult{track: trackRow, lyrics: lyrics, upstream: elapsed})
 				}
 			}()
 		}
 
-		if providers.tube != nil && providers.tubeLyricsEnabled {
+		if providers.tube != nil && providers.tubeLyricsEnabled && !skip["youtube"] {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
@@ -344,17 +368,19 @@ func runParallelLyricsGet(
 				}
 				remote, err := providers.tube.GetOfficialLyrics(ctx, videoID)
 				if err != nil {
+					recordProviderMiss(ctx, lyricsDB, trackIDOf(existingTrack), "youtube", artistName, albumName)
 					return
 				}
 				row := &lrclib.RemoteResult{TrackName: trackName, ArtistName: artistName, AlbumName: albumName, Duration: duration, PlainLyrics: remote.PlainLyrics, SyncedLyrics: remote.SyncedLyrics}
 				trackRow, lyrics, ok := persistProviderLyrics(ctx, metadataDB, lyricsDB, existingTrack, row, trackName, artistName, albumName, duration, "youtube")
 				if ok {
+					recordProviderFetch(ctx, lyricsDB, trackRow.ID, "youtube", true)
 					publish(lyricsLookupResult{track: trackRow, lyrics: lyrics})
 				}
 			}()
 		}
 
-		if providers.tube != nil && providers.tubeSubtitleEnabled {
+		if providers.tube != nil && providers.tubeSubtitleEnabled && !skip["youtube_subtitle"] {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
@@ -367,11 +393,13 @@ func runParallelLyricsGet(
 				}
 				remote, err := providers.tube.GetTranscript(ctx, videoID)
 				if err != nil {
+					recordProviderMiss(ctx, lyricsDB, trackIDOf(existingTrack), "youtube_subtitle", artistName, albumName)
 					return
 				}
 				row := &lrclib.RemoteResult{TrackName: trackName, ArtistName: artistName, AlbumName: albumName, Duration: duration, PlainLyrics: remote.PlainLyrics, SyncedLyrics: remote.SyncedLyrics}
 				trackRow, lyrics, ok := persistProviderLyrics(ctx, metadataDB, lyricsDB, existingTrack, row, trackName, artistName, albumName, duration, "youtube_subtitle")
 				if ok {
+					recordProviderFetch(ctx, lyricsDB, trackRow.ID, "youtube_subtitle", true)
 					publish(lyricsLookupResult{track: trackRow, lyrics: lyrics})
 				}
 			}()
@@ -379,6 +407,16 @@ func runParallelLyricsGet(
 	}
 
 	wg.Wait()
+}
+
+// trackIDOf returns the persisted row ID of an existing track, or zero when
+// the track is not yet stored. Ledger writes for unpersisted tracks are
+// dropped: the row may not exist to attach to.
+func trackIDOf(track *db.Track) int64 {
+	if track == nil {
+		return 0
+	}
+	return track.ID
 }
 
 func lookupRemoteLyricsBroad(ctx context.Context, client *lrclib.Client, trackName, artistName, albumName string) (*lrclib.RemoteResult, error) {

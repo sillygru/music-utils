@@ -34,7 +34,7 @@ type metadataResponse struct {
 	CoverURLSource            string  `json:"coverUrlSource,omitempty"`
 }
 
-func getMetadataHandler(database *sql.DB, resolver *metadata.Resolver, fallbacks *fallbackGuard, fallbackEnabled bool, prefetcher *prefetcher) http.HandlerFunc {
+func getMetadataHandler(database *sql.DB, resolver *metadata.Resolver, fallbacks *fallbackGuard, fallbackEnabled bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
 		candidates := names.Candidates(query.Get("track_name"), query.Get("artist_name"), query.Get("album_name"))
@@ -68,7 +68,6 @@ func getMetadataHandler(database *sql.DB, resolver *metadata.Resolver, fallbacks
 		}
 		if err == nil && local.MetadataChecked {
 			setOutcome(r, "local_hit")
-			prefetcher.Enqueue(local.Name, local.ArtistName, local.AlbumName, local.Duration)
 			writeJSON(w, http.StatusOK, toMetadataResponse(local))
 			return
 		}
@@ -121,7 +120,6 @@ func getMetadataHandler(database *sql.DB, resolver *metadata.Resolver, fallbacks
 		}
 		remote.ID = trackID
 		setOutcome(r, "provider_fallback_hit")
-		prefetcher.Enqueue(remote.Name, remote.ArtistName, remote.AlbumName, remote.Duration)
 		writeJSON(w, http.StatusOK, toMetadataResponse(remote))
 	}
 }

@@ -184,9 +184,7 @@ func NewWithLogger(cfg config.Config, metadataDB, lyricsDB, coverDB *sql.DB, log
 	lyricsMisses := newLyricsMissCache()
 	fallbacks := newFallbackGuard(cfg)
 	coverRefresher := newCoverRefreshJob(cfg, coverDB, coverResolver, logger)
-	prefetcher := newPrefetcher(cfg, metadataDB, lyricsDB, coverDB, coverResolver, client, lyricsMisses, logger)
 	providers := newLyricsProviders(client, richClient, appleClient, musixClient, betterClient, kugouClient, paxsenixClient, lyricsPlusClient, zemerClient, tubeClient, cfg)
-	enricher := newEnricher(cfg, metadataDB, lyricsDB, providers, lyricsMisses, logger)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/healthz", healthz)
 	mux.HandleFunc("GET /api/version", versionHandler)
@@ -210,11 +208,11 @@ func NewWithLogger(cfg config.Config, metadataDB, lyricsDB, coverDB *sql.DB, log
 			mux.HandleFunc("GET "+statsSongsPath, statsSongsHandler(metadataDB))
 		}
 	}
-	mux.HandleFunc("GET /api/lyrics/get", getLyricsHandler(metadataDB, lyricsDB, providers, lyricsMisses, fallbacks, prefetcher, enricher))
-	mux.HandleFunc("GET /api/lyrics/search", searchLyricsHandlerParallel(metadataDB, lyricsDB, providers, fallbacks, enricher))
-	mux.HandleFunc("GET /api/metadata/get", getMetadataHandler(metadataDB, metadataResolver, fallbacks, cfg.MetadataFallbackEnabled, prefetcher))
+	mux.HandleFunc("GET /api/lyrics/get", getLyricsHandler(metadataDB, lyricsDB, providers, lyricsMisses, fallbacks))
+	mux.HandleFunc("GET /api/lyrics/search", searchLyricsHandlerParallel(metadataDB, lyricsDB, providers, fallbacks))
+	mux.HandleFunc("GET /api/metadata/get", getMetadataHandler(metadataDB, metadataResolver, fallbacks, cfg.MetadataFallbackEnabled))
 	mux.HandleFunc("GET /api/metadata/search", searchMetadataHandlerWithUpstream(metadataDB, metadataResolver, fallbacks, cfg.MetadataFallbackEnabled))
-	mux.HandleFunc("GET /api/cover/get", getCoverTopHandler(metadataDB, coverDB, coverResolver, fallbacks, cfg.CoverFallbackEnabled, prefetcher))
+	mux.HandleFunc("GET /api/cover/get", getCoverTopHandler(metadataDB, coverDB, coverResolver, fallbacks, cfg.CoverFallbackEnabled))
 	mux.HandleFunc("GET /api/cover/artist", getEntityCoverSearchHandler(coverDB, coverResolver, fallbacks, db.CoverArtist, cfg.CoverFallbackEnabled))
 	mux.HandleFunc("GET /api/cover/album", getEntityCoverSearchHandler(coverDB, coverResolver, fallbacks, db.CoverAlbum, cfg.CoverFallbackEnabled))
 	mux.HandleFunc("GET /api/cover/search", searchCoverHandler(metadataResolver, coverResolver, fallbacks, cfg.CoverFallbackEnabled))
@@ -248,12 +246,6 @@ func NewWithLogger(cfg config.Config, metadataDB, lyricsDB, coverDB *sql.DB, log
 	server.RegisterOnShutdown(richLyricsMigrationStop)
 	server.RegisterOnShutdown(fallbacks.Stop)
 	server.RegisterOnShutdown(coverRefresher.Stop)
-	if prefetcher != nil {
-		server.RegisterOnShutdown(prefetcher.Stop)
-	}
-	if enricher != nil {
-		server.RegisterOnShutdown(enricher.Stop)
-	}
 	if requestLogs != nil {
 		server.RegisterOnShutdown(func() { _ = requestLogs.Close() })
 	}
