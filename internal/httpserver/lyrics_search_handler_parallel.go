@@ -104,7 +104,7 @@ func searchLyricsHandlerParallel(metadataDB, lyricsDB *sql.DB, providers *lyrics
 			writeJSON(w, http.StatusInternalServerError, apiError{Code: http.StatusInternalServerError, Message: "Internal server error"})
 			return
 		}
-		skipRemote := includeRich && len(localTracks) > 0
+		skipRemote := includeRich && isExactLocalLyricsHit(localTracks, searchQuery, hintTrack, hintArtist)
 		results := group.lookup(r.Context(), cacheKey, func(ctx context.Context, publish func([]lyricsResponse)) {
 			runParallelLyricsSearch(ctx, publish, metadataDB, lyricsDB, providers, fallbacks, includeRich, syncType, skipRemote, clientIP(r, false), searchQuery, hintTrack, hintArtist, hintAlbum, videoID, limit, cacheKey)
 		})
@@ -261,18 +261,19 @@ func fetchLiveRichForSearchResults(ctx context.Context, lyricsDB *sql.DB, provid
 				}
 			}
 
+			if fallbacks != nil {
+				release, _, _, ok := fallbacks.acquireFor(ctx, clientKey)
+				if !ok {
+					return
+				}
+				defer release()
+			}
+
 			// LyricsPlus (priority 3)
 			if providers.lyricsPlusEnabled && providers.lyricsPlus != nil {
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
-					if fallbacks != nil {
-						release, _, _, ok := fallbacks.acquireFor(ctx, clientKey)
-						if !ok {
-							return
-						}
-						defer release()
-					}
 					remote, err := providers.lyricsPlus.Get(ctx, trackName, artistName, albumName, duration, "")
 					if err != nil || remote == nil || !remote.WordSynced {
 						return
@@ -304,13 +305,6 @@ func fetchLiveRichForSearchResults(ctx context.Context, lyricsDB *sql.DB, provid
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
-					if fallbacks != nil {
-						release, _, _, ok := fallbacks.acquireFor(ctx, clientKey)
-						if !ok {
-							return
-						}
-						defer release()
-					}
 					remote, err := providers.paxsenix.Get(ctx, trackName, artistName, albumName)
 					if err != nil || remote == nil || !remote.WordSynced || strings.TrimSpace(remote.TTML) == "" {
 						return
@@ -337,13 +331,6 @@ func fetchLiveRichForSearchResults(ctx context.Context, lyricsDB *sql.DB, provid
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
-					if fallbacks != nil {
-						release, _, _, ok := fallbacks.acquireFor(ctx, clientKey)
-						if !ok {
-							return
-						}
-						defer release()
-					}
 					remote, err := providers.rich.Get(ctx, trackName, artistName, albumName)
 					if err != nil || remote == nil || !validRichSyncType(remote.SyncType) {
 						return
@@ -369,4 +356,54 @@ func fetchLiveRichForSearchResults(ctx context.Context, lyricsDB *sql.DB, provid
 	}
 	resultsWG.Wait()
 	return nil
+}
+
+func isExactLocalLyricsHit(localTracks []db.TrackSearchResult, searchQuery, hintTrack, hintArtist string) bool {
+	if len(localTracks) == 0 {
+		return false
+	}
+	cleanHintTrack := strings.ToLower(names.CleanSearch(hintTrack))
+	cleanHintArtist := strings.ToLower(names.CleanSearch(hintArtist))
+	cleanQ := strings.ToLower(names.CleanSearch(searchQuery))
+
+	for _, lt := range localTracks {
+		hasLyrics := lt.Lyrics.PlainLyrics != "" || lt.Lyrics.SyncedLyrics != "" || lt.Track.LastLyricsID > 0
+		if !hasLyrics {
+			continue
+		}
+
+		cleanTrackName := strings.ToLower(names.CleanSearch(lt.Track.Name))
+		cleanArtistName := strings.ToLower(names.CleanSearch(lt.Track.ArtistName))
+
+		if cleanHintTrack != "" {
+			if cleanTrackName == cleanHintTrack ||
+				strings.HasPrefix(cleanTrackName, cleanHintTrack+" ") ||
+				strings.HasPrefix(cleanHintTrack, cleanTrackName+" ") {
+				if cleanHintArtist == "" || cleanArtistName == cleanHintArtist {
+					return true
+				}
+			}
+			continue
+		}
+
+		if cleanQ != "" {
+			cleanFull := strings.ToLower(names.CleanSearch(lt.Track.Name + " " + lt.Track.ArtistName))
+			cleanFullRev := strings.ToLower(names.CleanSearch(lt.Track.ArtistName + " " + lt.Track.Name))
+
+			matchTitle := cleanTrackName == cleanQ ||
+				strings.HasPrefix(cleanTrackName, cleanQ+" ") ||
+				strings.HasPrefix(cleanQ, cleanTrackName+" ")
+
+			matchFull := cleanFull == cleanQ ||
+				strings.HasPrefix(cleanQ, cleanFull+" ")
+
+			matchFullRev := cleanFullRev == cleanQ ||
+				strings.HasPrefix(cleanQ, cleanFullRev+" ")
+
+			if matchTitle || matchFull || matchFullRev {
+				return true
+			}
+		}
+	}
+	return false
 }

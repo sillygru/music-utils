@@ -138,7 +138,22 @@ func getLyricsHandler(metadataDB, lyricsDB *sql.DB, providers *lyricsProviders, 
 		}
 
 		cacheStart := time.Now()
-		state, stateErr := resolveLyricsCacheState(r.Context(), metadataDB, lyricsDB, trackName, artistName, albumName, duration, videoID, lyricsMisses)
+		var state *lyricsCacheState
+		var stateErr error
+		for _, cand := range candidates {
+			state, stateErr = resolveLyricsCacheState(r.Context(), metadataDB, lyricsDB, cand.TrackName, cand.ArtistName, cand.AlbumName, duration, videoID, lyricsMisses)
+			if stateErr != nil {
+				break
+			}
+			if state.hasLyrics() {
+				trackName, artistName, albumName = cand.TrackName, cand.ArtistName, cand.AlbumName
+				break
+			}
+		}
+		if state == nil || !state.hasLyrics() {
+			trackName, artistName, albumName = input.TrackName, input.ArtistName, input.AlbumName
+			state, stateErr = resolveLyricsCacheState(r.Context(), metadataDB, lyricsDB, trackName, artistName, albumName, duration, videoID, lyricsMisses)
+		}
 		setCacheDuration(r, time.Since(cacheStart))
 		if stateErr != nil {
 			setOutcome(r, "error")
@@ -244,6 +259,17 @@ func getLyricsHandler(metadataDB, lyricsDB *sql.DB, providers *lyricsProviders, 
 		if served, _ := resolveUpstream(trackName, artistName, albumName, existingTrack, state); served {
 			return
 		}
+		if len(candidates) > 1 {
+			alt := candidates[1]
+			if alt.TrackName != trackName || alt.ArtistName != artistName || alt.AlbumName != albumName {
+				altState, altErr := resolveLyricsCacheState(r.Context(), metadataDB, lyricsDB, alt.TrackName, alt.ArtistName, alt.AlbumName, duration, videoID, lyricsMisses)
+				if altErr == nil {
+					if served, _ := resolveUpstream(alt.TrackName, alt.ArtistName, alt.AlbumName, altState.track, altState); served {
+						return
+					}
+				}
+			}
+		}
 		// Strict user-only lookup failed. Retry once with artist/album
 		// backfilled from cached metadata (blanks only; user values win).
 		// Duration is never backfilled and never sent upstream.
@@ -299,10 +325,18 @@ func fallbackLyricsIdentity(ctx context.Context, metadataDB *sql.DB, trackName, 
 	if existing != nil {
 		fill(existing.ArtistName, existing.AlbumName)
 	}
-	if (fbArtist == "" || fbAlbum == "") && metadataDB != nil && strings.TrimSpace(trackName) != "" {
+	if fbArtist == "" && metadataDB != nil && strings.TrimSpace(trackName) != "" {
 		if tracks, err := db.SearchTracks(ctx, metadataDB, nil, trackName, 1); err == nil {
 			for i := range tracks {
 				fill(tracks[i].Track.ArtistName, tracks[i].Track.AlbumName)
+			}
+		}
+	} else if fbAlbum == "" && fbArtist != "" && metadataDB != nil && strings.TrimSpace(trackName) != "" {
+		if tracks, err := db.SearchTracks(ctx, metadataDB, nil, trackName+" "+fbArtist, 1); err == nil {
+			for i := range tracks {
+				if strings.EqualFold(tracks[i].Track.ArtistName, fbArtist) {
+					fill(tracks[i].Track.ArtistName, tracks[i].Track.AlbumName)
+				}
 			}
 		}
 	}
@@ -397,7 +431,7 @@ func searchLyricsHandlerWithUpstream(metadataDB, lyricsDB *sql.DB, client *lrcli
 		// Rich-enabled searches are intended to serve the local rich cache when
 		// a catalog result exists. Do not pay LRCLIB search latency just to
 		// rediscover release variants that cannot improve the local response.
-		localRichCacheHit := includeRichSync(r) && len(tracks) > 0
+		localRichCacheHit := includeRichSync(r) && isExactLocalLyricsHit(tracks, searchQuery, query.Get("track_name"), query.Get("artist_name"))
 		if fallbackEnabled && client != nil && !localRichCacheHit {
 			release, ok := fallbacks.enter(r, w)
 			if !ok {

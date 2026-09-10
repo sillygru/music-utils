@@ -40,19 +40,19 @@ func runParallelLyricsGet(
 	if providers == nil {
 		return
 	}
+	if fallbacks != nil {
+		release, status, retryAfter, ok := fallbacks.acquireFor(ctx, clientKey)
+		if !ok {
+			publish(lyricsLookupResult{err: &fallbackBlockedError{status: status, retryAfter: retryAfter}, status: status, retry: retryAfter})
+			return
+		}
+		defer release()
+	}
 	var wg sync.WaitGroup
 	if providers.lrclibEnabled && providers.lrclib != nil && !skip["lrclib"] {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if fallbacks != nil {
-				release, status, retryAfter, ok := fallbacks.acquireFor(ctx, clientKey)
-				if !ok {
-					publish(lyricsLookupResult{err: &fallbackBlockedError{status: status, retryAfter: retryAfter}, status: status, retry: retryAfter})
-					return
-				}
-				defer release()
-			}
 			started := time.Now()
 			remote, err := lookupRemoteLyricsBroadWithDuration(ctx, providers.lrclib, trackName, artistName, albumName, duration)
 			elapsed := time.Since(started)
@@ -82,14 +82,6 @@ func runParallelLyricsGet(
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if fallbacks != nil {
-				release, status, retryAfter, ok := fallbacks.acquireFor(ctx, clientKey)
-				if !ok {
-					publish(lyricsLookupResult{err: &fallbackBlockedError{status: status, retryAfter: retryAfter}, status: status, retry: retryAfter})
-					return
-				}
-				defer release()
-			}
 			remote, err := providers.rich.Get(ctx, trackName, artistName, albumName)
 			if err != nil || !validRichSyncType(remote.SyncType) {
 				if err != nil {
@@ -111,13 +103,6 @@ func runParallelLyricsGet(
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if fallbacks != nil {
-				release, _, _, ok := fallbacks.acquireFor(ctx, clientKey)
-				if !ok {
-					return
-				}
-				defer release()
-			}
 			track, err := providers.apple.SearchTrack(ctx, trackName, artistName, albumName)
 			if err != nil {
 				recordProviderMiss(ctx, lyricsDB, trackIDOf(existingTrack), "apple_music", artistName, albumName)
@@ -140,13 +125,6 @@ func runParallelLyricsGet(
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if fallbacks != nil {
-				release, _, _, ok := fallbacks.acquireFor(ctx, clientKey)
-				if !ok {
-					return
-				}
-				defer release()
-			}
 			track, err := providers.musix.SearchTrack(ctx, trackName, artistName, albumName)
 			if err != nil {
 				recordProviderMiss(ctx, lyricsDB, trackIDOf(existingTrack), "musixmatch", artistName, albumName)
@@ -170,13 +148,6 @@ func runParallelLyricsGet(
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if fallbacks != nil {
-				release, _, _, ok := fallbacks.acquireFor(ctx, clientKey)
-				if !ok {
-					return
-				}
-				defer release()
-			}
 			started := time.Now()
 			remote, err := providers.better.Get(ctx, trackName, artistName, albumName, duration)
 			elapsed := time.Since(started)
@@ -206,13 +177,6 @@ func runParallelLyricsGet(
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if fallbacks != nil {
-				release, _, _, ok := fallbacks.acquireFor(ctx, clientKey)
-				if !ok {
-					return
-				}
-				defer release()
-			}
 			started := time.Now()
 			remote, err := providers.kugou.Get(ctx, trackName, artistName, albumName, duration)
 			elapsed := time.Since(started)
@@ -240,13 +204,6 @@ func runParallelLyricsGet(
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if fallbacks != nil {
-				release, _, _, ok := fallbacks.acquireFor(ctx, clientKey)
-				if !ok {
-					return
-				}
-				defer release()
-			}
 			started := time.Now()
 			remote, err := providers.paxsenix.Get(ctx, trackName, artistName, albumName)
 			elapsed := time.Since(started)
@@ -281,13 +238,6 @@ func runParallelLyricsGet(
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if fallbacks != nil {
-				release, _, _, ok := fallbacks.acquireFor(ctx, clientKey)
-				if !ok {
-					return
-				}
-				defer release()
-			}
 			started := time.Now()
 			remote, err := providers.lyricsPlus.Get(ctx, trackName, artistName, albumName, duration, isrc)
 			elapsed := time.Since(started)
@@ -332,13 +282,6 @@ func runParallelLyricsGet(
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				if fallbacks != nil {
-					release, _, _, ok := fallbacks.acquireFor(ctx, clientKey)
-					if !ok {
-						return
-					}
-					defer release()
-				}
 				started := time.Now()
 				remote, err := providers.zemer.Get(ctx, videoID)
 				elapsed := time.Since(started)
@@ -359,13 +302,6 @@ func runParallelLyricsGet(
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				if fallbacks != nil {
-					release, _, _, ok := fallbacks.acquireFor(ctx, clientKey)
-					if !ok {
-						return
-					}
-					defer release()
-				}
 				remote, err := providers.tube.GetOfficialLyrics(ctx, videoID)
 				if err != nil {
 					recordProviderMiss(ctx, lyricsDB, trackIDOf(existingTrack), "youtube", artistName, albumName)
@@ -384,13 +320,6 @@ func runParallelLyricsGet(
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				if fallbacks != nil {
-					release, _, _, ok := fallbacks.acquireFor(ctx, clientKey)
-					if !ok {
-						return
-					}
-					defer release()
-				}
 				remote, err := providers.tube.GetTranscript(ctx, videoID)
 				if err != nil {
 					recordProviderMiss(ctx, lyricsDB, trackIDOf(existingTrack), "youtube_subtitle", artistName, albumName)

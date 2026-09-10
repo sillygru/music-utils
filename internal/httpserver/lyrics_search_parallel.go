@@ -78,34 +78,13 @@ func (g *lyricsSearchGroup) lookup(ctx context.Context, key string, start func(c
 
 	timer := time.NewTimer(lyricsResponseWait)
 	defer timer.Stop()
-	var graceTimer *time.Timer
-	defer func() {
-		if graceTimer != nil {
-			graceTimer.Stop()
-		}
-	}()
-	for {
-		var graceC <-chan time.Time
-		if graceTimer != nil {
-			graceC = graceTimer.C
-		}
-		select {
-		case <-job.wake:
-			if snap := job.snapshot(); len(snap) > 0 {
-				if graceTimer == nil {
-					graceTimer = time.NewTimer(100 * time.Millisecond)
-				}
-			}
-			continue
-		case <-graceC:
-			return job.snapshot()
-		case <-job.done:
-			return job.snapshot()
-		case <-timer.C:
-			return job.snapshot()
-		case <-ctx.Done():
-			return job.snapshot()
-		}
+	select {
+	case <-job.done:
+		return job.snapshot()
+	case <-timer.C:
+		return job.snapshot()
+	case <-ctx.Done():
+		return job.snapshot()
 	}
 }
 
@@ -135,6 +114,18 @@ func runParallelLyricsSearch(
 	limit int,
 	cacheKey string,
 ) {
+	var remoteAllowed = true
+	var fallbackRelease func()
+	if fallbacks != nil && (!skipRemote || (richRequested && providers.richEnabled && providers.rich != nil)) {
+		var ok bool
+		fallbackRelease, _, _, ok = fallbacks.acquireFor(ctx, clientKey)
+		if !ok {
+			remoteAllowed = false
+		} else {
+			defer fallbackRelease()
+		}
+	}
+
 	var ordinaryWG sync.WaitGroup
 	var mu sync.Mutex
 	results := make([]lyricsResponse, 0, limit)
@@ -152,7 +143,7 @@ func runParallelLyricsSearch(
 				mergeSearchResponse(&results[index], &result)
 				continue
 			}
-			if _, ok := seen[identity]; ok || len(results) >= limit {
+			if _, ok := seen[identity]; ok {
 				continue
 			}
 			seen[identity] = struct{}{}
@@ -206,17 +197,10 @@ func runParallelLyricsSearch(
 		merge(local)
 	}()
 
-	if providers.lrclibEnabled && providers.lrclib != nil && !skipRemote {
+	if providers.lrclibEnabled && providers.lrclib != nil && !skipRemote && remoteAllowed {
 		ordinaryWG.Add(1)
 		go func() {
 			defer ordinaryWG.Done()
-			if fallbacks != nil {
-				release, _, _, ok := fallbacks.acquireFor(ctx, clientKey)
-				if !ok {
-					return
-				}
-				defer release()
-			}
 			remote, err := providers.lrclib.Search(ctx, query)
 			if err != nil {
 				return
@@ -246,18 +230,11 @@ func runParallelLyricsSearch(
 	// into the same ranked set.
 	title := searchProviderTitle(hintTrack, query)
 	allowMetadataRich := richRequested
-	if title != "" && (!skipRemote || allowMetadataRich) {
+	if title != "" && (!skipRemote || allowMetadataRich) && remoteAllowed {
 		if providers.betterEnabled && providers.better != nil && hintArtist != "" {
 			ordinaryWG.Add(1)
 			go func() {
 				defer ordinaryWG.Done()
-				if fallbacks != nil {
-					release, _, _, ok := fallbacks.acquireFor(ctx, clientKey)
-					if !ok {
-						return
-					}
-					defer release()
-				}
 				remote, err := providers.better.Get(ctx, title, hintArtist, hintAlbum, 0)
 				if err != nil {
 					return
@@ -289,13 +266,6 @@ func runParallelLyricsSearch(
 			ordinaryWG.Add(1)
 			go func() {
 				defer ordinaryWG.Done()
-				if fallbacks != nil {
-					release, _, _, ok := fallbacks.acquireFor(ctx, clientKey)
-					if !ok {
-						return
-					}
-					defer release()
-				}
 				remote, err := providers.kugou.Get(ctx, title, hintArtist, hintAlbum, 0)
 				if err != nil {
 					return
@@ -311,13 +281,6 @@ func runParallelLyricsSearch(
 			ordinaryWG.Add(1)
 			go func() {
 				defer ordinaryWG.Done()
-				if fallbacks != nil {
-					release, _, _, ok := fallbacks.acquireFor(ctx, clientKey)
-					if !ok {
-						return
-					}
-					defer release()
-				}
 				remote, err := providers.paxsenix.Get(ctx, title, hintArtist, hintAlbum)
 				if err != nil {
 					return
@@ -350,13 +313,6 @@ func runParallelLyricsSearch(
 			ordinaryWG.Add(1)
 			go func() {
 				defer ordinaryWG.Done()
-				if fallbacks != nil {
-					release, _, _, ok := fallbacks.acquireFor(ctx, clientKey)
-					if !ok {
-						return
-					}
-					defer release()
-				}
 				remote, err := providers.lyricsPlus.Get(ctx, title, hintArtist, hintAlbum, 0, "")
 				if err != nil {
 					return
@@ -401,18 +357,11 @@ func runParallelLyricsSearch(
 	}
 
 	// Video-keyed providers resolve exactly one video and merge it when found.
-	if videoID != "" && !skipRemote {
+	if videoID != "" && !skipRemote && remoteAllowed {
 		if providers.zemerEnabled && providers.zemer != nil {
 			ordinaryWG.Add(1)
 			go func() {
 				defer ordinaryWG.Done()
-				if fallbacks != nil {
-					release, _, _, ok := fallbacks.acquireFor(ctx, clientKey)
-					if !ok {
-						return
-					}
-					defer release()
-				}
 				remote, err := providers.zemer.Get(ctx, videoID)
 				if err != nil {
 					return
@@ -427,13 +376,6 @@ func runParallelLyricsSearch(
 			ordinaryWG.Add(1)
 			go func() {
 				defer ordinaryWG.Done()
-				if fallbacks != nil {
-					release, _, _, ok := fallbacks.acquireFor(ctx, clientKey)
-					if !ok {
-						return
-					}
-					defer release()
-				}
 				if providers.tubeLyricsEnabled {
 					if remote, err := providers.tube.GetOfficialLyrics(ctx, videoID); err == nil {
 						merge([]lyricsResponse{searchPersistResponse(ctx, metadataDB, lyricsDB, lrclib.RemoteResult{
@@ -455,7 +397,7 @@ func runParallelLyricsSearch(
 	}
 
 	ordinaryWG.Wait()
-	if providers.richEnabled && richRequested && providers.rich != nil {
+	if providers.richEnabled && richRequested && providers.rich != nil && remoteAllowed {
 		var richWG sync.WaitGroup
 		mu.Lock()
 		current := append([]lyricsResponse(nil), results...)
@@ -488,13 +430,6 @@ func runParallelLyricsSearch(
 			richWG.Add(1)
 			go func(index int) {
 				defer richWG.Done()
-				if fallbacks != nil {
-					release, _, _, ok := fallbacks.acquireFor(ctx, clientKey)
-					if !ok {
-						return
-					}
-					defer release()
-				}
 				remote, err := providers.rich.Get(ctx, current[index].TrackName, current[index].ArtistName, current[index].AlbumName)
 				if err != nil || !validRichSyncType(remote.SyncType) {
 					return
