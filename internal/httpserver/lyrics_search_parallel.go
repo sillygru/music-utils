@@ -406,7 +406,7 @@ func runParallelLyricsSearch(
 			if current[i].ID <= 0 {
 				continue
 			}
-			// Prefer cached rich – satisfies stale-but-quick + enqueues via handler.
+			// Prefer cached rich so a warm entry costs no upstream request.
 			if rich, err := db.FindRichLyrics(ctx, lyricsDB, current[i].ID, syncType); err == nil && !isWordRichEmpty(rich) {
 				setRichOnlyResponse(&current[i], rich)
 				continue
@@ -446,22 +446,8 @@ func runParallelLyricsSearch(
 			}(i)
 		}
 		richWG.Wait()
-		// Merge back – handles both cached-sync and live-fetched.
-		mu.Lock()
-		hasRich := false
-		for _, r := range current {
-			if r.RichSync != nil {
-				hasRich = true
-				break
-			}
-		}
-		mu.Unlock()
-		if hasRich {
-			merge(current)
-		} else {
-			// Even without new rich, re-merge cached enriched locals if they had rich before Wait
-			merge(current)
-		}
+		// Merge back handles both cached-sync and live-fetched results.
+		merge(current)
 	}
 }
 

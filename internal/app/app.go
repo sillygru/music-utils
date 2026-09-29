@@ -16,13 +16,20 @@ import (
 	"github.com/sillygru/music-utils/internal/version"
 )
 
-// Run executes the application CLI commands (export, stats) or starts the server.
+// Run executes the application CLI commands (export, stats, jobs) or starts
+// the server.
 func Run(args []string) int {
 	if len(args) > 0 && args[0] == "export" {
 		return RunExport(args[1:])
 	}
 	if len(args) > 0 && args[0] == "stats" {
 		return RunStats(args[1:])
+	}
+	if len(args) > 0 && args[0] == "--jobs" {
+		return RunJobs(args[1:])
+	}
+	if len(args) > 0 && args[0] == "--run-job" {
+		return RunJob(args[1:])
 	}
 
 	cfg, err := config.LoadAndValidate()
@@ -67,6 +74,17 @@ func Run(args []string) int {
 		MmapSize:     cfg.DBMmapSize,
 		CacheSizeKB:  cfg.DBCacheSizeKB,
 		MaxOpenConns: cfg.DBMaxOpenConns,
+		// TxLockImmediate makes every transaction on this handle take SQLite's
+		// write lock at BEGIN rather than on its first write. The shared upstream
+		// pacer lease needs it: it is a read-modify-write shared with running
+		// jobs, and a deferred transaction lets two processes read the same row
+		// and race, which SQLite resolves by failing one rather than serializing.
+		//
+		// It is a property of the whole handle, so any transaction added to the
+		// metadata database later takes the write lock too, including a read-only
+		// one. A read that needs a consistent multi-statement snapshot and no lock
+		// should therefore use a separate handle.
+		TxLockImmediate: true,
 	})
 	if err != nil {
 		logger.Error("open metadata database", "error", err)

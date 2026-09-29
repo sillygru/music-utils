@@ -102,10 +102,11 @@ func (word *compactRichWord) UnmarshalJSON(data []byte) error {
 
 // compactRichSyncContent converts source-native TTML at the API boundary. A
 // non-TTML or unparseable payload remains available as a string rather than
-// making an otherwise valid rich response fail.
-func compactRichSyncContent(content, format string) any {
+// making an otherwise valid rich response fail. Parsed payloads pass through
+// normalizeRichSyncTimeUnit so stored timings are always in canonical seconds.
+func compactRichSyncContent(content, format, source string) any {
 	if parsed, ok := parseStoredCompactRichSync(content); ok {
-		return parsed
+		return normalizeRichSyncTimeUnit(parsed, source)
 	}
 	if !strings.EqualFold(strings.TrimSpace(format), "ttml") {
 		return content
@@ -117,7 +118,7 @@ func compactRichSyncContent(content, format string) any {
 	if parsed.Lines == nil {
 		parsed.Lines = make([]compactRichLine, 0)
 	}
-	return parsed
+	return normalizeRichSyncTimeUnit(parsed, source)
 }
 
 func parseStoredCompactRichSync(content string) (compactRichSync, bool) {

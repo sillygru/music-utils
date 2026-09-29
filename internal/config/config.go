@@ -88,6 +88,7 @@ const (
 	defaultPrefetchLyrics       = true
 	defaultPrefetchAlbumCover   = true
 	defaultPrefetchArtistCover  = true
+	defaultJobIdleGapMS         = 10000
 	defaultEnrichEnabled        = true
 	defaultEnrichPerMin         = 20
 	defaultEnrichConcurrency    = 2
@@ -183,6 +184,7 @@ type Config struct {
 	CoverTimeoutMS       int
 	CoverUserAgent       string
 
+	JobIdleGapMS        int
 	PrefetchEnabled     bool
 	PrefetchPerMin      int
 	PrefetchConcurrency int
@@ -289,6 +291,7 @@ func Load() Config {
 		CoverTimeoutMS:       intOrDefault("COVER_TIMEOUT_MS", defaultCoverTimeoutMS),
 		CoverUserAgent:       valueOrDefault("COVER_USER_AGENT", defaultCoverUserAgent()),
 
+		JobIdleGapMS:        intOrDefault("JOB_IDLE_GAP_MS", defaultJobIdleGapMS),
 		PrefetchEnabled:     boolOrDefault("PREFETCH_ENABLED", defaultPrefetchEnabled),
 		PrefetchPerMin:      intOrDefault("PREFETCH_PER_MIN", defaultPrefetchPerMin),
 		PrefetchConcurrency: intOrDefault("PREFETCH_CONCURRENCY", defaultPrefetchConcurrency),
@@ -379,6 +382,9 @@ func (c Config) Validate() error {
 	}
 	if c.BetterLyricsTimeoutMS < 1 || c.KugouTimeoutMS < 1 || c.PaxsenixTimeoutMS < 1 || c.LyricsPlusTimeoutMS < 1 || c.ZemerTimeoutMS < 1 || c.YouTubeTimeoutMS < 1 {
 		return fmt.Errorf("lyrics provider timeouts must be positive")
+	}
+	if c.JobIdleGapMS < 0 {
+		c.JobIdleGapMS = defaultJobIdleGapMS
 	}
 	if c.PrefetchPerMin < 1 {
 		return fmt.Errorf("PREFETCH_PER_MIN must be positive")

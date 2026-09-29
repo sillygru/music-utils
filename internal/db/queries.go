@@ -60,6 +60,12 @@ func FindTrackMetadataExact(ctx context.Context, database *sql.DB, name, artist,
 }
 
 // UpsertTrackMetadata stores provider metadata only in metadataDB.
+//
+// metadata_checked_at is restamped whenever the caller reports a definitive
+// answer (MetadataChecked), and only then. It answers "when did a provider last
+// settle this track", so an upsert that carries no upstream result — a new set
+// of lyrics, a corrected duration — must leave it alone or every negative would
+// age back to fresh whenever the request path touched the row.
 func UpsertTrackMetadata(ctx context.Context, database *sql.DB, track Track) (int64, error) {
 	if database == nil {
 		return 0, errors.New("metadata database is nil")
@@ -86,13 +92,14 @@ musicbrainz_artist_id=CASE WHEN ? <> '' THEN ? ELSE musicbrainz_artist_id END,
 cover_url=CASE WHEN ? <> '' THEN ? ELSE cover_url END, metadata_source=CASE WHEN ? <> '' THEN ? ELSE metadata_source END,
 cover_url_source=CASE WHEN ? <> '' THEN ? ELSE cover_url_source END,
 metadata_checked=MAX(metadata_checked, ?), cover_url_checked=MAX(cover_url_checked, ?),
+metadata_checked_at=CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE metadata_checked_at END,
 updated_at=CURRENT_TIMESTAMP, source=? WHERE id=?`,
 				track.Name, track.NameLower, track.ArtistName, track.ArtistNameLower, track.AlbumName, track.AlbumNameLower,
 				track.Duration, track.Duration, track.Genre, track.Genre, track.GenreLower, track.GenreLower, track.Year, track.Year,
 				track.ReleaseDate, track.ReleaseDate, track.ISRC, track.ISRC, track.MusicBrainzReleaseID, track.MusicBrainzReleaseID,
 				track.MusicBrainzReleaseGroupID, track.MusicBrainzReleaseGroupID, track.MusicBrainzArtistID, track.MusicBrainzArtistID,
 				track.CoverURL, track.CoverURL, track.MetadataSource, track.MetadataSource, track.CoverURLSource, track.CoverURLSource,
-				track.MetadataChecked, track.CoverURLChecked, track.Source, existingID)
+				track.MetadataChecked, track.CoverURLChecked, track.MetadataChecked, track.Source, existingID)
 			if err != nil {
 				return 0, fmt.Errorf("update metadata by recording ID: %w", err)
 			}
@@ -106,7 +113,7 @@ updated_at=CURRENT_TIMESTAMP, source=? WHERE id=?`,
 name,name_lower,artist_name,artist_name_lower,album_name,album_name_lower,duration,
 genre,genre_lower,year,release_date,isrc,musicbrainz_recording_id,musicbrainz_release_id,
 musicbrainz_release_group_id,musicbrainz_artist_id,cover_url,metadata_source,cover_url_source,
-metadata_checked,cover_url_checked,source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+metadata_checked,metadata_checked_at,cover_url_checked,source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE NULL END,?,?)
 ON CONFLICT(name_lower,artist_name_lower,album_name_lower,duration) DO UPDATE SET
 name=excluded.name, artist_name=excluded.artist_name, album_name=excluded.album_name,
 genre=CASE WHEN excluded.genre<>'' THEN excluded.genre ELSE tracks.genre END,
@@ -122,11 +129,12 @@ cover_url=CASE WHEN excluded.cover_url<>'' THEN excluded.cover_url ELSE tracks.c
 metadata_source=CASE WHEN excluded.metadata_source<>'' THEN excluded.metadata_source ELSE tracks.metadata_source END,
 cover_url_source=CASE WHEN excluded.cover_url_source<>'' THEN excluded.cover_url_source ELSE tracks.cover_url_source END,
 metadata_checked=MAX(tracks.metadata_checked,excluded.metadata_checked), cover_url_checked=MAX(tracks.cover_url_checked,excluded.cover_url_checked),
+metadata_checked_at=CASE WHEN excluded.metadata_checked THEN CURRENT_TIMESTAMP ELSE tracks.metadata_checked_at END,
 updated_at=CURRENT_TIMESTAMP, source=excluded.source RETURNING id`
 	args := []any{track.Name, track.NameLower, track.ArtistName, track.ArtistNameLower, track.AlbumName, track.AlbumNameLower, track.Duration,
 		nullableText(track.Genre), nullableText(track.GenreLower), track.Year, nullableText(track.ReleaseDate), nullableText(track.ISRC),
 		nullableText(track.MusicBrainzRecordingID), nullableText(track.MusicBrainzReleaseID), nullableText(track.MusicBrainzReleaseGroupID), nullableText(track.MusicBrainzArtistID),
-		nullableText(track.CoverURL), nullableText(track.MetadataSource), nullableText(track.CoverURLSource), track.MetadataChecked, track.CoverURLChecked, track.Source}
+		nullableText(track.CoverURL), nullableText(track.MetadataSource), nullableText(track.CoverURLSource), track.MetadataChecked, track.MetadataChecked, track.CoverURLChecked, track.Source}
 	if err := database.QueryRowContext(ctx, statement, args...).Scan(&track.ID); err != nil {
 		return 0, fmt.Errorf("upsert metadata: %w", err)
 	}

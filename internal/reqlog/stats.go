@@ -89,7 +89,6 @@ type StatsReport struct {
 	LastRequest   time.Time
 	TimeSpan      time.Duration
 
-	// Status code overview
 	Status2xxCount int64
 	Status2xxPct   float64
 	Status3xxCount int64
@@ -101,7 +100,6 @@ type StatsReport struct {
 	Status429Count int64
 	Status429Pct   float64
 
-	// Latency metrics
 	AvgLatencyMs  float64
 	AvgCacheMs    float64
 	AvgUpstreamMs float64
@@ -110,7 +108,6 @@ type StatsReport struct {
 	P95LatencyMs  int64
 	P99LatencyMs  int64
 
-	// Cache outcomes
 	LocalHitCount    int64
 	LocalHitPct      float64
 	FallbackHitCount int64
@@ -118,7 +115,6 @@ type StatsReport struct {
 	MissCount        int64
 	MissPct          float64
 
-	// Breakdown sections
 	Windows     []WindowStat
 	Daily       []DailyStat
 	Endpoints   []EndpointStat
@@ -156,7 +152,6 @@ func QueryStats(ctx context.Context, dbPath string, opts StatsOptions) (*StatsRe
 
 	var totalCount int64
 	if err := database.QueryRowContext(ctx, "SELECT count(*) FROM request_log").Scan(&totalCount); err != nil {
-		// If table doesn't exist, return empty report
 		if strings.Contains(strings.ToLower(err.Error()), "no such table") {
 			return &StatsReport{
 				DBPath:   dbPath,
@@ -176,7 +171,6 @@ func QueryStats(ctx context.Context, dbPath string, opts StatsOptions) (*StatsRe
 		return report, nil
 	}
 
-	// 1. Min/Max timestamps & aggregates
 	var (
 		minTS, maxTS              sql.NullInt64
 		sumCacheMs, sumUpstreamMs sql.NullInt64
@@ -249,13 +243,11 @@ func QueryStats(ctx context.Context, dbPath string, opts StatsOptions) (*StatsRe
 		report.AvgUpstreamMs = float64(sumUpstreamMs.Int64) / float64(totalCount)
 	}
 
-	// 2. Compute Latency Percentiles (p50, p90, p95, p99)
 	report.P50LatencyMs = queryPercentile(ctx, database, totalCount, 0.50)
 	report.P90LatencyMs = queryPercentile(ctx, database, totalCount, 0.90)
 	report.P95LatencyMs = queryPercentile(ctx, database, totalCount, 0.95)
 	report.P99LatencyMs = queryPercentile(ctx, database, totalCount, 0.99)
 
-	// 3. Activity Windows (24h, 7d, 30d, All-Time)
 	now := time.Now()
 	windows := []struct {
 		name     string
@@ -356,7 +348,6 @@ func QueryStats(ctx context.Context, dbPath string, opts StatsOptions) (*StatsRe
 		})
 	}
 
-	// 4. Daily Breakdown for past `dailyDays`
 	dailyCutoffMS := now.AddDate(0, 0, -dailyDays).Truncate(24 * time.Hour).UnixMilli()
 	dailyRows, err := database.QueryContext(ctx, `
 		SELECT
@@ -400,7 +391,6 @@ func QueryStats(ctx context.Context, dbPath string, opts StatsOptions) (*StatsRe
 		return nil, fmt.Errorf("iterate daily stats: %w", err)
 	}
 
-	// 5. Top Endpoints
 	epRows, err := database.QueryContext(ctx, `
 		SELECT
 			e.name,
@@ -441,7 +431,6 @@ func QueryStats(ctx context.Context, dbPath string, opts StatsOptions) (*StatsRe
 		return nil, fmt.Errorf("iterate top endpoints: %w", err)
 	}
 
-	// 6. Outcomes Breakdown
 	outcomeRows, err := database.QueryContext(ctx, `
 		SELECT
 			o.name,
@@ -467,7 +456,6 @@ func QueryStats(ctx context.Context, dbPath string, opts StatsOptions) (*StatsRe
 		return nil, fmt.Errorf("iterate outcomes: %w", err)
 	}
 
-	// 7. Status Codes Breakdown
 	statusRows, err := database.QueryContext(ctx, `
 		SELECT
 			l.status,
@@ -492,7 +480,6 @@ func QueryStats(ctx context.Context, dbPath string, opts StatsOptions) (*StatsRe
 		return nil, fmt.Errorf("iterate status codes: %w", err)
 	}
 
-	// 8. Top User-Agents
 	uaRows, err := database.QueryContext(ctx, `
 		SELECT
 			user_agent,

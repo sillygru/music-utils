@@ -39,7 +39,6 @@ func TestQueryStatsWithRecords(t *testing.T) {
 	}
 
 	now := time.Now()
-	// Insert multiple records spanning different endpoints, outcomes, statuses, and times
 	records := []Record{
 		{
 			TS:        now.Add(-2 * time.Hour),
@@ -176,7 +175,6 @@ func TestQueryStatsReadOnlyPermissions(t *testing.T) {
 		t.Fatalf("close: %v", err)
 	}
 
-	// Change file permissions to read-only (0400)
 	if err := os.Chmod(dbPath, 0o400); err != nil {
 		t.Fatalf("chmod 0400: %v", err)
 	}

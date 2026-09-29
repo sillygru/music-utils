@@ -46,9 +46,10 @@ func TestResponseCacheReplaysIdenticalRequests(t *testing.T) {
 	}
 }
 
-// TestResponseCacheEntryExpiresAfterTTL verifies that once an entry's 5-second
-// window passes, the next identical request re-runs the handler instead of
-// being served from the stale buffer. A hit does not extend the deadline.
+// TestResponseCacheEntryExpiresAfterTTL verifies that once an entry's TTL
+// passes, the next identical request re-runs the handler instead of being served
+// from the stale buffer. A short test TTL keeps this deterministic and quick;
+// production uses responseReplayTTL. A hit does not extend the deadline.
 func TestResponseCacheEntryExpiresAfterTTL(t *testing.T) {
 	var calls atomic.Int32
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -56,7 +57,7 @@ func TestResponseCacheEntryExpiresAfterTTL(t *testing.T) {
 		_, _ = w.Write([]byte(fmt.Sprintf("body-%d", calls.Load())))
 	})
 
-	cache := newResponseCache(5 * time.Second)
+	cache := newResponseCache(100 * time.Millisecond)
 	t.Cleanup(cache.Stop)
 	handler := recoverMiddleware(cache.middleware(inner), nil)
 
@@ -71,7 +72,7 @@ func TestResponseCacheEntryExpiresAfterTTL(t *testing.T) {
 
 	// A burst of hits must not extend the deadline: poll until the sweeper
 	// removes the entry on its own TTL, then confirm the handler runs again.
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(time.Second)
 	for {
 		cache.mu.Lock()
 		_, present := cache.entries[key]
@@ -80,7 +81,7 @@ func TestResponseCacheEntryExpiresAfterTTL(t *testing.T) {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("cache entry never expired within 10s")
+			t.Fatal("cache entry never expired within the test TTL")
 		}
 		time.Sleep(50 * time.Millisecond)
 	}

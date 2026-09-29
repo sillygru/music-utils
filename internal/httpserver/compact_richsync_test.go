@@ -15,7 +15,7 @@ import (
 func TestCompactRichSyncContent(t *testing.T) {
 	content := `<tt xmlns="http://www.w3.org/ns/ttml" xmlns:ttm="http://www.w3.org/ns/ttml#metadata" ttp:timeBase="media" xmlns:ttp="http://www.w3.org/ns/ttml#parameter"><head><metadata><ttm:title>Somebody's Pleasure</ttm:title><ttm:agent xml:id="v1" type="person"><ttm:name>Aziz Hedra</ttm:name></ttm:agent></metadata></head><body dur="3:43.980"><div><p begin="0:07.184" end="0:13.436"><span begin="0:07.184" end="0:07.532">I've</span> <span begin="0:07.532" end="0:07.819">been</span> <span begin="0:07.819" end="0:08.112">so</span> <span begin="0:08.112" end="0:09.420">busy,</span></p></div></body></tt>`
 
-	value := compactRichSyncContent(content, "ttml")
+	value := compactRichSyncContent(content, "ttml", "test")
 	got, ok := value.(compactRichSync)
 	if !ok {
 		t.Fatalf("expected compact richsync object, got %T: %v", value, value)
@@ -59,6 +59,33 @@ func TestCompactRichSyncContent(t *testing.T) {
 	}
 }
 
+func TestNormalizeRichSyncTimeUnit(t *testing.T) {
+	// A payload that cannot be seconds is rescaled and reported.
+	millis := compactRichSync{
+		Duration: 201849,
+		Lines: []compactRichLine{{
+			Begin: 1851, End: 8013, Text: "In my depression I will lie",
+			Words: []compactRichWord{{Begin: 1851, End: 2288, Text: "In"}},
+		}},
+	}
+	got := normalizeRichSyncTimeUnit(millis, "lyricsplus")
+	if got.Duration != 201.849 || got.Lines[0].Begin != 1.851 || got.Lines[0].End != 8.013 ||
+		got.Lines[0].Words[0].Begin != 1.851 || got.Lines[0].Words[0].End != 2.288 {
+		t.Fatalf("expected millisecond payload rescaled to seconds, got %+v", got)
+	}
+
+	// A payload already in seconds is left alone, including a long one (> 1 hour).
+	for _, duration := range []float64{1.851, 632.694, maxPlausibleLyricsSeconds, 5000.0} {
+		seconds := compactRichSync{
+			Duration: duration,
+			Lines:    []compactRichLine{{Begin: 1.851, End: 8.013, Text: "line"}},
+		}
+		if got := normalizeRichSyncTimeUnit(seconds, "lyricsplus"); got.Duration != duration || got.Lines[0].Begin != 1.851 {
+			t.Fatalf("seconds payload at %v was modified: %+v", duration, got)
+		}
+	}
+}
+
 func TestMigrateRichLyricsStoresCompactJSON(t *testing.T) {
 	_, lyricsDB := testHTTPDatabases(t)
 	content := `<tt><head><metadata><title>Song</title><agent><name>Artist</name></agent></metadata></head><body dur="0:10"><div><p begin="0:01" end="0:02"><span begin="0:01" end="0:02">word</span></p></div></body></tt>`
@@ -87,21 +114,21 @@ func TestMigrateRichLyricsStoresCompactJSON(t *testing.T) {
 }
 
 func TestCompactRichSyncContentIgnoresLinesWithoutArray(t *testing.T) {
-	if got := compactRichSyncContent(`{"title":"Song","lines":null}`, "json"); got != `{"title":"Song","lines":null}` {
+	if got := compactRichSyncContent(`{"title":"Song","lines":null}`, "json", "test"); got != `{"title":"Song","lines":null}` {
 		t.Fatalf("expected non-array lines payload to remain unchanged, got %v", got)
 	}
-	if got := compactRichSyncContent(`null`, "json"); got != `null` {
+	if got := compactRichSyncContent(`null`, "json", "test"); got != `null` {
 		t.Fatalf("expected JSON null payload to remain unchanged, got %v", got)
 	}
 }
 
 func TestCompactRichSyncContentLeavesUnsupportedPayloadsAlone(t *testing.T) {
 	content := "[00:01.00]line"
-	if got := compactRichSyncContent(content, "lrc"); got != content {
+	if got := compactRichSyncContent(content, "lrc", "test"); got != content {
 		t.Fatalf("expected non-TTML payload to remain unchanged, got %v", got)
 	}
 	invalid := "<tt><p>broken"
-	if got := compactRichSyncContent(invalid, "ttml"); got != invalid {
+	if got := compactRichSyncContent(invalid, "ttml", "test"); got != invalid {
 		t.Fatalf("expected invalid TTML payload to remain unchanged, got %v", got)
 	}
 }
@@ -272,7 +299,6 @@ func TestCompactRichTupleMarshaling(t *testing.T) {
 	}
 	body := b.String()
 
-	// Verify the lines output matches the documentation layout
 	expectedLinesBlock := "      \"lines\": [\n" +
 		"        [7.184, 13.436, \"I've been so busy, ignoring, and hiding\", [\n" +
 		"          [7.184, 7.532, \"I've\"],\n" +

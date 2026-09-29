@@ -978,7 +978,7 @@ func enrichLyricsResponseWithClient(r *http.Request, track *db.Track, lyrics *db
 		}()
 	}
 
-	// LyricsPlus in parallel (CONCURRENT, NOT SEQUENTIAL)
+	// LyricsPlus in parallel
 	if providers != nil && providers.lyricsPlusEnabled && providers.lyricsPlus != nil && track != nil && track.ID > 0 {
 		wg.Add(1)
 		go func() {
@@ -1042,7 +1042,7 @@ func setRichOnlyResponse(response *lyricsResponse, rich *db.RichLyrics) {
 	if response == nil || rich == nil || isWordRichEmpty(rich) {
 		return
 	}
-	content := compactRichSyncContent(rich.Content, rich.Format)
+	content := compactRichSyncContent(rich.Content, rich.Format, rich.Source)
 	if content == nil {
 		return
 	}

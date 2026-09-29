@@ -63,7 +63,7 @@ func TestDeezerLookup(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := NewDeezer(server.URL, "test-agent", time.Second)
+	client, err := NewDeezer(server.URL, "test-agent", time.Second, nil)
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}

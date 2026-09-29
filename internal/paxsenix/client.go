@@ -375,6 +375,9 @@ func buildFromContent(payload lyricsPayload) (synced, plain string, wordSynced b
 	return "", strings.Join(plainLines, "\n"), false
 }
 
+// formatMS renders a raw upstream timing as an LRC tag. These fields are
+// milliseconds upstream (declared here at the boundary); it already renders
+// straight to [mm:ss.cc] so the centisecond truncation is the only rounding.
 func formatMS(ms int64) string {
 	if ms < 0 {
 		ms = 0

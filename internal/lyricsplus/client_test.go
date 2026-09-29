@@ -45,9 +45,11 @@ func TestGetBinimumWordSyncWins(t *testing.T) {
 func TestGetMirror(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v2/lyrics/get", func(w http.ResponseWriter, r *http.Request) {
+		// The mirror contract is milliseconds, so timings are sent in ms and
+		// must come back out as seconds.
 		_, _ = w.Write([]byte(`{"type":"Line","lyrics":[` +
-			`{"time":7.18,"text":"hello","element":{"singer":"v1"}},` +
-			`{"time":9.0,"text":"backing","element":{"singer":"v2"},"syllabus":[{"time":9.0,"duration":1.0,"text":"backing","isBackground":true}]}` +
+			`{"time":7180,"text":"hello","element":{"singer":"v1"}},` +
+			`{"time":9000,"text":"backing","element":{"singer":"v2"},"syllabus":[{"time":9000,"duration":1000,"text":"backing","isBackground":true}]}` +
 			`]}`))
 	})
 	server := httptest.NewServer(mux)
@@ -82,5 +84,39 @@ func TestISRCQuery(t *testing.T) {
 	joined := strings.Join(gotQueries, "&")
 	if !strings.Contains(joined, "isrc=") {
 		t.Fatalf("expected isrc query, got %q", joined)
+	}
+}
+
+// The mirror reports milliseconds, so the compact rich JSON that gets persisted
+// must be seconds. Storing milliseconds here is what made stored richSync
+// payloads render at 30:51 instead of 00:30.51.
+func TestMirrorWordModeConvertsMillisToSeconds(t *testing.T) {
+	lines := []mirrorLine{{
+		Time:     1851,
+		Duration: 6162,
+		Text:     "In my depression I will lie",
+	}}
+	lines[0].Syllabi = append(lines[0].Syllabi,
+		struct {
+			Time         float64 `json:"time"`
+			Duration     float64 `json:"duration"`
+			Text         string  `json:"text"`
+			IsBackground bool    `json:"isBackground"`
+		}{Time: 1851, Duration: 437, Text: "In"},
+		struct {
+			Time         float64 `json:"time"`
+			Duration     float64 `json:"duration"`
+			Text         string  `json:"text"`
+			IsBackground bool    `json:"isBackground"`
+		}{Time: 2288, Duration: 714, Text: "my"},
+	)
+	rich := mirrorLinesToRichJSON(lines)
+	if strings.Contains(rich, "1851") || strings.Contains(rich, "8013") {
+		t.Fatalf("rich JSON still holds millisecond timings: %s", rich)
+	}
+	for _, want := range []string{"1.851", "8.013", "1.851", "2.288", "3.002"} {
+		if !strings.Contains(rich, want) {
+			t.Fatalf("rich JSON missing %s: %s", want, rich)
+		}
 	}
 }

@@ -45,7 +45,7 @@ func parseAndSetDotEnv(content string) error {
 				val = val[1 : len(val)-1]
 			}
 		}
-		// Do not overwrite existing non-empty environment variables set in the environment.
+		// Do not overwrite a non-empty variable already set in the environment.
 		if envVal, exists := os.LookupEnv(key); !exists || envVal == "" {
 			_ = os.Setenv(key, val)
 		}

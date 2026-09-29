@@ -43,7 +43,7 @@ type ITunes struct {
 	baseURL   string
 	userAgent string
 	client    *http.Client
-	pace      *pacer.Pacer
+	pace      pacer.Waiter
 }
 
 // NewITunes builds an iTunes metadata provider. pace spaces requests to one
@@ -51,7 +51,7 @@ type ITunes struct {
 // fresh 2-second pacer is used. Pass a shared pacer when several providers
 // consume the same upstream host so their combined traffic stays within
 // budget.
-func NewITunes(baseURL, userAgent string, timeout time.Duration, pace *pacer.Pacer) (*ITunes, error) {
+func NewITunes(baseURL, userAgent string, timeout time.Duration, pace pacer.Waiter) (*ITunes, error) {
 	if strings.TrimSpace(baseURL) == "" {
 		baseURL = "https://itunes.apple.com"
 	}
@@ -154,6 +154,9 @@ func (c *ITunes) do(ctx context.Context, endpoint string, value any) error {
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		if isRateLimitStatus(response.StatusCode) {
+			return newRateLimitError(c.Name(), response)
+		}
 		return fmt.Errorf("iTunes returned HTTP %d", response.StatusCode)
 	}
 	if err := json.NewDecoder(io.LimitReader(response.Body, maxResponseBytes)).Decode(value); err != nil {

@@ -5,6 +5,7 @@
 # compiled binaries
 /cmd/server/server
 /server
+/music-utils
 /bin/
 *.exe
 *.test

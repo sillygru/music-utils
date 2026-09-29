@@ -82,7 +82,6 @@ func (c *Client) Get(ctx context.Context, trackName, artistName, albumName strin
 	if keyword == "" {
 		return nil, ErrNotFound
 	}
-	// 1. Song search by keyword, then lyrics candidates by hash.
 	if songs, err := c.searchSongs(ctx, keyword); err == nil {
 		for _, song := range songs {
 			if duration > 0 && song.Duration > 0 && abs(song.Duration-duration) > durationTolerance {
@@ -97,7 +96,6 @@ func (c *Client) Get(ctx context.Context, trackName, artistName, albumName strin
 			}
 		}
 	}
-	// 2. Keyword fallback directly against the lyrics search.
 	candidates, err := c.searchLyricsByKeyword(ctx, keyword, duration)
 	if err != nil {
 		return nil, ErrNotFound

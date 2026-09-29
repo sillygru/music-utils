@@ -19,7 +19,6 @@ import (
 func TestSearchUpstreamWhenArtistHasOtherCachedSongs(t *testing.T) {
 	metadataDB, lyricsDB := testHTTPDatabases(t)
 
-	// Seed 5 existing songs by "Coldplay"
 	existingSongs := []string{"Yellow", "Fix You", "The Scientist", "Clocks", "Paradise"}
 	for _, title := range existingSongs {
 		_, _, err := db.InsertTrackWithLyrics(context.Background(), metadataDB, lyricsDB, db.Track{
@@ -52,7 +51,6 @@ func TestSearchUpstreamWhenArtistHasOtherCachedSongs(t *testing.T) {
 	server := NewWithConfig(cfg, metadataDB, lyricsDB)
 	cleanupHTTPServer(t, server)
 
-	// Search for a song not in local DB, with include_rich_sync=true
 	resp := performRequest(t, server.Handler, "/api/lyrics/search?track_name=Viva+La+Vida&artist_name=Coldplay&include_rich_sync=true")
 	if resp.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
@@ -84,7 +82,6 @@ func TestSearchUpstreamWhenArtistHasOtherCachedSongs(t *testing.T) {
 func TestSearchUpstreamNotCutOffByFastLocalResults(t *testing.T) {
 	metadataDB, lyricsDB := testHTTPDatabases(t)
 
-	// Seed 1 existing local track that partially matches the query
 	_, _, err := db.InsertTrackWithLyrics(context.Background(), metadataDB, lyricsDB, db.Track{
 		Name:       "Something",
 		ArtistName: "The Beatles",
@@ -116,7 +113,6 @@ func TestSearchUpstreamNotCutOffByFastLocalResults(t *testing.T) {
 	server := NewWithConfig(cfg, metadataDB, lyricsDB)
 	cleanupHTTPServer(t, server)
 
-	// Free-text search matching "Beatles"
 	resp := performRequest(t, server.Handler, "/api/lyrics/search?q=Beatles")
 	if resp.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
@@ -168,7 +164,7 @@ func TestParallelLookupBudgetConservesTokens(t *testing.T) {
 
 	cfg := fallbackConfig(upstream.URL + "/api")
 	// Set budget to 5 per minute. If each request consumed 11 tokens, the second request would 429.
-	// With 1 token per request, 5 requests will succeed!
+	// With 1 token per request, 5 requests will succeed.
 	cfg.FallbackPerMin = 5
 	server := NewWithConfig(cfg, metadataDB, lyricsDB)
 	cleanupHTTPServer(t, server)
@@ -181,7 +177,6 @@ func TestParallelLookupBudgetConservesTokens(t *testing.T) {
 		}
 	}
 
-	// 6th request should hit the 429 rate limit
 	resp6 := performRequest(t, server.Handler, "/api/lyrics/get?track_name=SongF&artist_name=Artist")
 	if resp6.Code != http.StatusTooManyRequests {
 		t.Fatalf("expected 6th request to be rate limited (429), got %d: %s", resp6.Code, resp6.Body.String())

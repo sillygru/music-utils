@@ -44,10 +44,13 @@ type Deezer struct {
 	baseURL   string
 	userAgent string
 	client    *http.Client
-	pace      *pacer.Pacer
+	pace      pacer.Waiter
 }
 
-func NewDeezer(baseURL, userAgent string, timeout time.Duration) (*Deezer, error) {
+// NewDeezer builds a Deezer metadata provider. pace spaces requests; when nil a
+// fresh 2-second pacer is used. Pass a shared pacer so live traffic and
+// background jobs take turns on the same upstream budget.
+func NewDeezer(baseURL, userAgent string, timeout time.Duration, pace pacer.Waiter) (*Deezer, error) {
 	if strings.TrimSpace(baseURL) == "" {
 		baseURL = "https://api.deezer.com"
 	}
@@ -57,11 +60,14 @@ func NewDeezer(baseURL, userAgent string, timeout time.Duration) (*Deezer, error
 	if timeout <= 0 {
 		return nil, errors.New("Deezer timeout must be positive")
 	}
+	if pace == nil {
+		pace = pacer.New(2 * time.Second)
+	}
 	return &Deezer{
 		baseURL:   strings.TrimRight(strings.TrimSpace(baseURL), "/"),
 		userAgent: userAgent,
 		client:    &http.Client{Timeout: timeout},
-		pace:      pacer.New(2 * time.Second),
+		pace:      pace,
 	}, nil
 }
 
@@ -147,6 +153,9 @@ func (c *Deezer) do(ctx context.Context, endpoint string, value any) error {
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		if isRateLimitStatus(response.StatusCode) {
+			return newRateLimitError(c.Name(), response)
+		}
 		return fmt.Errorf("Deezer returned HTTP %d", response.StatusCode)
 	}
 	if err := json.NewDecoder(io.LimitReader(response.Body, maxResponseBytes)).Decode(value); err != nil {

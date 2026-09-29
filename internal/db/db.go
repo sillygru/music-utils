@@ -20,6 +20,12 @@ type Config struct {
 	MmapSize     int64
 	CacheSizeKB  int64
 	MaxOpenConns int
+	// TxLockImmediate makes every transaction acquire its write lock at BEGIN
+	// instead of on first write. Read-modify-write sequences that must not race
+	// across processes, such as the shared upstream pacer lease, need this: a
+	// deferred transaction lets two processes read the same row and then race
+	// to update it, which SQLite resolves by failing one of them.
+	TxLockImmediate bool
 }
 
 // Open opens a SQLite database, configures the connection pool, and verifies
@@ -77,6 +83,9 @@ func sqliteDSN(path string, cfg Config) string {
 		strconv.FormatInt(cfg.CacheSizeKB, 10),
 		defaultBusyTimeoutMS,
 	)
+	if cfg.TxLockImmediate {
+		pragmas += "&_txlock=immediate"
+	}
 	separator := "?"
 	if strings.Contains(base, "?") {
 		separator = "&"

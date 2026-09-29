@@ -11,6 +11,15 @@ import (
 // ErrNotFound is returned when no provider can resolve a track.
 var ErrNotFound = errors.New("track not found in any metadata provider")
 
+// ErrInconclusive reports that a lookup failed for a reason unrelated to the
+// song: a provider error, a timeout, or a network failure.
+//
+// It is deliberately distinct from ErrNotFound, which asserts the song
+// genuinely has no upstream match. A lookup that is merely inconclusive must
+// never be persisted as a miss, or a momentary network blip would permanently
+// record a song as having no data and no later run would retry it.
+var ErrInconclusive = errors.New("metadata lookup was inconclusive")
+
 // Input is the normalized identity used to look up a track.
 type Input struct {
 	TrackName  string

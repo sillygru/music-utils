@@ -249,7 +249,6 @@ func TestGetCacheStats(t *testing.T) {
 		t.Fatalf("migrate cover test database: %v", err)
 	}
 
-	// Empty databases
 	stats, err := GetCacheStats(ctx, metadataDB, lyricsDB, coverDB)
 	if err != nil {
 		t.Fatalf("get cache stats on empty: %v", err)
@@ -258,7 +257,6 @@ func TestGetCacheStats(t *testing.T) {
 		t.Fatalf("expected all zeros, got %+v", stats)
 	}
 
-	// Insert test data
 	tracks := []Track{
 		{Name: "Song One", ArtistName: "Artist A", AlbumName: "Album A", Duration: 200, CoverURL: "http://cover/1"},
 		{Name: "song one", ArtistName: "Artist B", AlbumName: "Album B", Duration: 210, CoverURL: "http://cover/2"},

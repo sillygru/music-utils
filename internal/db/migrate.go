@@ -28,7 +28,21 @@ var metadataColumns = []struct {
 	{"metadata_source", "TEXT"},
 	{"cover_url_source", "TEXT"},
 	{"metadata_checked", "BOOLEAN NOT NULL DEFAULT 0"},
+	{"metadata_checked_at", "DATETIME"},
 	{"cover_url_checked", "BOOLEAN NOT NULL DEFAULT 0"},
+}
+
+// metadataIndexes are the tracks indexes an upgraded database may be missing.
+//
+// This list duplicates declarations in metadata_schema.sql on purpose. The schema
+// file only reaches a settled database through a search rebuild, so it cannot be
+// the sole source of truth for index delivery; see ensureMetadataIndexes. A new
+// index belongs in both places, and TestMetadataIndexListMatchesSchema fails if
+// they drift.
+var metadataIndexes = []string{
+	"idx_tracks_lookup ON tracks(name_lower, artist_name_lower, album_name_lower, duration)",
+	"idx_tracks_musicbrainz_recording ON tracks(musicbrainz_recording_id)",
+	"idx_tracks_metadata_pending ON tracks(id) WHERE metadata_checked = 0",
 }
 
 // MigrateMetadata initializes the metadata database and upgrades the former
@@ -93,8 +107,31 @@ func MigrateMetadata(ctx context.Context, database *sql.DB) error {
 			}
 		}
 	}
+	// Indexes are created outside the search-refresh branch on purpose. That
+	// branch re-runs the whole schema file, so it would create them as a side
+	// effect, but it only runs when a column changed or the search index is
+	// stale. A database that is already fully migrated never enters it, which
+	// would leave any index added to the schema file afterwards permanently
+	// missing from existing deployments. IF NOT EXISTS makes this a no-op once
+	// they exist, so it is cheap to run unconditionally.
+	if err = ensureMetadataIndexes(ctx, tx); err != nil {
+		return err
+	}
 	if err = tx.Commit(); err != nil {
 		return fmt.Errorf("commit metadata migration: %w", err)
+	}
+	return nil
+}
+
+// ensureMetadataIndexes creates the tracks indexes declared in metadata_schema.sql.
+//
+// It exists because the schema file is applied wholesale only to a new database,
+// and otherwise reaches an existing one solely through a search rebuild.
+func ensureMetadataIndexes(ctx context.Context, tx *sql.Tx) error {
+	for _, index := range metadataIndexes {
+		if _, err := tx.ExecContext(ctx, "CREATE INDEX IF NOT EXISTS "+index); err != nil {
+			return fmt.Errorf("create index: %w", err)
+		}
 	}
 	return nil
 }
@@ -248,7 +285,7 @@ func rebuildLegacyTracks(ctx context.Context, tx *sql.Tx, schema []byte) error {
 	if err != nil {
 		return fmt.Errorf("inspect legacy track columns: %w", err)
 	}
-	allColumns := []string{"id", "name", "name_lower", "artist_name", "artist_name_lower", "album_name", "album_name_lower", "duration", "genre", "genre_lower", "year", "release_date", "isrc", "musicbrainz_recording_id", "musicbrainz_release_id", "musicbrainz_release_group_id", "musicbrainz_artist_id", "cover_url", "metadata_source", "cover_url_source", "metadata_checked", "cover_url_checked", "last_lyrics_id", "source", "created_at", "updated_at"}
+	allColumns := []string{"id", "name", "name_lower", "artist_name", "artist_name_lower", "album_name", "album_name_lower", "duration", "genre", "genre_lower", "year", "release_date", "isrc", "musicbrainz_recording_id", "musicbrainz_release_id", "musicbrainz_release_group_id", "musicbrainz_artist_id", "cover_url", "metadata_source", "cover_url_source", "metadata_checked", "metadata_checked_at", "cover_url_checked", "last_lyrics_id", "source", "created_at", "updated_at"}
 	requiredColumns := []string{"id", "name", "name_lower", "artist_name", "artist_name_lower"}
 	for _, column := range requiredColumns {
 		if !available[column] {

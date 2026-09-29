@@ -142,6 +142,7 @@ func NewWithLogger(cfg config.Config, metadataDB, lyricsDB, coverDB *sql.DB, log
 	if logger == nil {
 		logger = slog.Default()
 	}
+	setRichSyncLogger(logger)
 	client := newLRCLIBClient(cfg, logger)
 	richClient := newRichLyricsClient(cfg, logger)
 	appleClient := newAppleMusicClient(cfg, logger)
@@ -169,8 +170,25 @@ func NewWithLogger(cfg config.Config, metadataDB, lyricsDB, coverDB *sql.DB, log
 	}
 	// iTunes is consumed by both the metadata and cover resolvers; share one
 	// pacer so their combined traffic never exceeds iTunes' ~20 calls/min cap.
-	itunesPace := pacer.New(2 * time.Second)
-	metadataResolver := newMetadataResolver(cfg, logger, itunesPace)
+	//
+	// The pacers are cross-process and stored in the metadata database, so live
+	// requests and a running background job take turns on one shared upstream
+	// budget instead of each applying private pacing and doubling the real
+	// request rate. Live requests are served as the user class; a job only gets
+	// admitted while this process is idle, which is what keeps users first.
+	var itunesPace pacer.Waiter = pacer.New(2 * time.Second)
+	var deezerPace pacer.Waiter = pacer.New(2 * time.Second)
+	var sharedItunes, sharedDeezer *pacer.Shared
+	if metadataDB != nil {
+		if err := db.EnsureCoordination(context.Background(), metadataDB); err != nil {
+			logger.Warn("enable shared upstream pacing", "error", err)
+		} else {
+			sharedItunes = pacer.NewShared(metadataDB, "itunes", 2*time.Second, jobIdleGap(cfg))
+			sharedDeezer = pacer.NewShared(metadataDB, "deezer", 2*time.Second, jobIdleGap(cfg))
+			itunesPace, deezerPace = sharedItunes, sharedDeezer
+		}
+	}
+	metadataResolver := newMetadataResolver(cfg, logger, itunesPace, deezerPace)
 	coverResolver := newCoverResolver(cfg, logger, itunesPace)
 	if coverDB == nil {
 		var err error
@@ -246,13 +264,24 @@ func NewWithLogger(cfg config.Config, metadataDB, lyricsDB, coverDB *sql.DB, log
 	server.RegisterOnShutdown(richLyricsMigrationStop)
 	server.RegisterOnShutdown(fallbacks.Stop)
 	server.RegisterOnShutdown(coverRefresher.Stop)
+	// A shared pacer that has given up on its lease is pacing privately, which
+	// quietly doubles the real request rate to the upstream. Nothing else
+	// surfaces that, so it is logged on a slow cadence rather than per request.
+	if sharedItunes != nil || sharedDeezer != nil {
+		pacerCtx, cancelPacer := context.WithCancel(context.Background())
+		server.RegisterOnShutdown(cancelPacer)
+		go watchPacerDegradation(pacerCtx, logger, sharedItunes, sharedDeezer)
+	}
+	jobWatch := newJobWatcher(metadataDB, metadataResolver, logger)
+	jobWatch.Start()
+	server.RegisterOnShutdown(jobWatch.Stop)
 	if requestLogs != nil {
 		server.RegisterOnShutdown(func() { _ = requestLogs.Close() })
 	}
 	return server, requestLogs
 }
 
-func newCoverResolver(cfg config.Config, logger *slog.Logger, itunesPace *pacer.Pacer) *cover.Resolver {
+func newCoverResolver(cfg config.Config, logger *slog.Logger, itunesPace pacer.Waiter) *cover.Resolver {
 	timeout := time.Duration(cfg.CoverTimeoutMS) * time.Millisecond
 	userAgent := cfg.CoverUserAgent
 	var providers []cover.Provider
@@ -292,7 +321,7 @@ func coverDatabase() (*sql.DB, error) {
 	return database, nil
 }
 
-func newMetadataResolver(cfg config.Config, logger *slog.Logger, itunesPace *pacer.Pacer) *metadata.Resolver {
+func newMetadataResolver(cfg config.Config, logger *slog.Logger, itunesPace, deezerPace pacer.Waiter) *metadata.Resolver {
 	timeout := time.Duration(cfg.MetadataTimeoutMS) * time.Millisecond
 	userAgent := cfg.MetadataUserAgent
 	var providers []metadata.Provider
@@ -302,7 +331,7 @@ func newMetadataResolver(cfg config.Config, logger *slog.Logger, itunesPace *pac
 	} else {
 		providers = append(providers, itunes)
 	}
-	if deezer, err := metadata.NewDeezer(cfg.DeezerBaseURL, userAgent, timeout); err != nil {
+	if deezer, err := metadata.NewDeezer(cfg.DeezerBaseURL, userAgent, timeout, deezerPace); err != nil {
 		logger.Error("configure Deezer provider", "error", err)
 	} else {
 		providers = append(providers, deezer)
@@ -548,3 +577,11 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 	}
 	_ = json.NewEncoder(w).Encode(value)
 }
+
+// jobIdleGap is how long the shared upstream pacers require live traffic to
+// stay quiet before admitting a background job. A larger value makes the job
+// more deferential; zero falls back to the pacer default.
+func jobIdleGap(cfg config.Config) time.Duration {
+	return time.Duration(cfg.JobIdleGapMS) * time.Millisecond
+}
+

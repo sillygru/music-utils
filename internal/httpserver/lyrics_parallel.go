@@ -165,7 +165,6 @@ func runParallelLyricsGet(
 			if remote.WordSynced && strings.TrimSpace(remote.TTML) != "" {
 				if _, rich, richOK := persistRemoteRichLyrics(ctx, metadataDB, lyricsDB, trackRow, &richlyrics.Result{Content: remote.TTML, Format: "ttml", SyncType: "word", Source: "betterlyrics"}, trackName, artistName, albumName, duration); richOK {
 					result.rich = rich
-					// Ensure track points to the rich-persisted row.
 					result.track = trackRow
 				}
 			}
@@ -264,7 +263,6 @@ func runParallelLyricsGet(
 				} else if strings.TrimSpace(remote.RichJSON) != "" {
 					rich := &db.RichLyrics{TrackID: trackRow.ID, Content: remote.RichJSON, Format: "json", SyncType: "word", Source: "lyricsplus"}
 					if err := db.UpsertRichLyrics(ctx, lyricsDB, *rich); err == nil {
-						// Refresh rich with normalized hash.
 						if stored, err := db.FindRichLyrics(ctx, lyricsDB, trackRow.ID, "word"); err == nil {
 							result.rich = stored
 						} else {

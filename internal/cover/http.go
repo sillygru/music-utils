@@ -22,7 +22,7 @@ const maxResponseBytes = 4 << 20
 type jsonClient struct {
 	client *http.Client
 	agent  string
-	rate   *pacer.Pacer
+	rate   pacer.Waiter
 }
 
 func (c *jsonClient) get(ctx context.Context, endpoint string, value any) error {

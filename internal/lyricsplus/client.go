@@ -217,6 +217,9 @@ func (c *Client) getBinimum(ctx context.Context, input names.Input, duration flo
 	return nil, lastErr
 }
 
+// mirrorLine is one line of a LyricsPlus /v2/lyrics/get response. The upstream
+// contract is milliseconds, so every Time/Duration read here must go through
+// ttml.MillisToSeconds before it reaches the seconds-based lyrics domain.
 type mirrorLine struct {
 	Time     float64 `json:"time"`
 	Duration float64 `json:"duration"`
@@ -321,8 +324,9 @@ func convertMirrorLines(lines []mirrorLine, wordMode bool) (synced, plain string
 			continue
 		}
 		plainLines = append(plainLines, text)
-		minutes := int(line.Time) / 60
-		seconds := line.Time - float64(minutes*60)
+		lineBegin := ttml.MillisToSeconds(line.Time)
+		minutes := int(lineBegin) / 60
+		seconds := lineBegin - float64(minutes*60)
 		syncedLines = append(syncedLines, formatLRCLine(minutes, seconds, text))
 	}
 	_ = wordMode
@@ -335,6 +339,8 @@ func formatLRCLine(minutes int, seconds float64, text string) string {
 
 // mirrorLinesToRichJSON converts word-mode mirror lines into compact rich JSON.
 // Format matches httpserver.compactRichSync {lines:[[begin,end,text,[[begin,end,text]]]]}.
+// Mirror timings are milliseconds upstream and are converted to the canonical
+// seconds unit here, so the stored payload is seconds like every other source.
 func mirrorLinesToRichJSON(lines []mirrorLine) string {
 	type wordTuple [3]any
 	type lineTuple [4]any
@@ -352,9 +358,10 @@ func mirrorLinesToRichJSON(lines []mirrorLine) string {
 			if wText == "" {
 				continue
 			}
-			wBegin := s.Time
-			wEnd := s.Time + s.Duration
-			if s.Duration <= 0 {
+			wBegin := ttml.MillisToSeconds(s.Time)
+			wDuration := ttml.MillisToSeconds(s.Duration)
+			wEnd := wBegin + wDuration
+			if wDuration <= 0 {
 				wEnd = wBegin + 0.5
 			}
 			words = append(words, wordTuple{wBegin, wEnd, wText})
@@ -363,9 +370,10 @@ func mirrorLinesToRichJSON(lines []mirrorLine) string {
 			}
 		}
 		totalWords += len(words)
-		begin := line.Time
-		end := line.Time + line.Duration
-		if line.Duration <= 0 {
+		begin := ttml.MillisToSeconds(line.Time)
+		lineDuration := ttml.MillisToSeconds(line.Duration)
+		end := begin + lineDuration
+		if lineDuration <= 0 {
 			if len(words) > 0 {
 				end = words[len(words)-1][1].(float64)
 			} else {
@@ -387,7 +395,6 @@ func mirrorLinesToRichJSON(lines []mirrorLine) string {
 	payload := map[string]any{
 		"lines": compactLines,
 	}
-	// Include duration for completeness.
 	if maxEnd > 0 {
 		payload["duration"] = maxEnd
 	}

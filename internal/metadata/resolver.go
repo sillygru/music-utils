@@ -90,11 +90,28 @@ func (r *Resolver) Search(ctx context.Context, query string, limit int) ([]*db.T
 	return results, nil
 }
 
+// Lookup resolves a track through the provider chain. A lookup that every
+// provider refused because of upstream rate limiting returns an error that is
+// both ErrNotFound (so existing callers keep treating it as "no result") and a
+// RateLimitError (so callers that can pace themselves, such as the jobs
+// backfill, can tell throttling apart from a genuine miss).
 func (r *Resolver) Lookup(ctx context.Context, input Input) (*db.Track, error) {
+	var inconclusive error
 	for _, candidate := range inputCandidates(input) {
-		if track, err := r.lookupOne(ctx, candidate); err == nil {
+		track, err := r.lookupOne(ctx, candidate)
+		if err == nil {
 			return track, nil
 		}
+		if errors.Is(err, ErrInconclusive) {
+			inconclusive = err
+		}
+	}
+	// An inconclusive result is still reported as a miss, so callers that
+	// answer HTTP requests behave exactly as before, but it is joined with
+	// ErrInconclusive so anything that persists the outcome can tell the
+	// difference between "this song has no match" and "we could not find out".
+	if inconclusive != nil {
+		return nil, inconclusive
 	}
 	return nil, ErrNotFound
 }
@@ -124,6 +141,8 @@ func (r *Resolver) lookupOne(ctx context.Context, input Input) (*db.Track, error
 	r.mu.Unlock()
 
 	var found *db.Track
+	var throttled error
+	var transient error
 	for _, provider := range r.providers {
 		if provider == nil {
 			continue
@@ -136,16 +155,31 @@ func (r *Resolver) lookupOne(ctx context.Context, input Input) (*db.Track, error
 		if err != nil && !errors.Is(err, ErrNotFound) {
 			// Transient/provider error without a result: keep trying the next
 			// tier rather than recording a miss.
+			if IsRateLimited(err) {
+				throttled = err
+			} else if transient == nil {
+				transient = err
+			}
 			continue
 		}
 	}
 
+	// Only an all-providers-agree-not-found result is memoized as a miss. A
+	// throttle or a provider error proves nothing about whether the song exists,
+	// so memoizing one would suppress every later retry for the negative-cache
+	// TTL and let a track be recorded as permanently resolved on the strength of
+	// a bad moment.
 	resultErr := error(nil)
-	if found == nil {
+	switch {
+	case found != nil:
+		r.store(key, found, false)
+	case throttled != nil:
+		resultErr = errors.Join(ErrNotFound, ErrInconclusive, throttled)
+	case transient != nil:
+		resultErr = errors.Join(ErrNotFound, ErrInconclusive, transient)
+	default:
 		resultErr = ErrNotFound
 		r.store(key, nil, true)
-	} else {
-		r.store(key, found, false)
 	}
 
 	r.mu.Lock()
@@ -155,6 +189,19 @@ func (r *Resolver) lookupOne(ctx context.Context, input Input) (*db.Track, error
 	close(call.done)
 	r.mu.Unlock()
 	return found, resultErr
+}
+
+// Invalidate drops every memoized lookup, positive and negative alike.
+//
+// It exists for the background backfill job: the job writes resolved metadata
+// straight to the database, and a miss memoized here for 24 hours would keep
+// being served long after the job proved the track does exist. Clearing is
+// cheap and safe, since in-flight lookups are tracked separately and are left
+// to complete on their own.
+func (r *Resolver) Invalidate() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.cache = make(map[string]cachedEntry)
 }
 
 func (r *Resolver) store(key string, track *db.Track, notFound bool) {

@@ -197,7 +197,6 @@ func TestTruncateParamsBoundsWithoutSplittingRunes(t *testing.T) {
 	if len(got) > maxParamsLen {
 		t.Fatalf("truncation exceeded maxParamsLen: %d", len(got))
 	}
-	// Short values pass through untouched.
 	if got := TruncateParams("q=hello"); got != "q=hello" {
 		t.Fatalf("short value changed: %q", got)
 	}
@@ -217,7 +216,6 @@ func TestTruncateUserAgentBoundsWithoutTruncating(t *testing.T) {
 	if len(got) > maxUserAgentLen {
 		t.Fatalf("truncation exceeded maxUserAgentLen: %d", len(got))
 	}
-	// Short values pass through untouched, including exactly the cap.
 	if got := TruncateUserAgent("my-agent/1.0"); got != "my-agent/1.0" {
 		t.Fatalf("short value changed: %q", got)
 	}
@@ -249,21 +247,17 @@ func TestNormalizeUserAgentCollapsesKnownClients(t *testing.T) {
 }
 
 func TestNormalizeUserAgentUnknownPolicy(t *testing.T) {
-	// When optimize is off, the full string is always kept.
 	off := &Writer{uaOptimize: false, uaSaveUnknown: false}
 	if got := off.normalizeUserAgent("some/unknown client"); got != "some/unknown client" {
 		t.Fatalf("expected full UA with optimize off, got %q", got)
 	}
-	// Optimize on + saveUnknown off drops unknown UAs.
 	drop := &Writer{uaOptimize: true, uaSaveUnknown: false}
 	if got := drop.normalizeUserAgent("some/unknown client"); got != "" {
 		t.Fatalf("expected unknown UA dropped, got %q", got)
 	}
-	// Known UAs are still collapsed even when saving unknown is off.
 	if got := drop.normalizeUserAgent("curl/8.0.0"); got != "curl" {
 		t.Fatalf("expected known curl to still collapse, got %q", got)
 	}
-	// Empty UA is always empty.
 	if got := drop.normalizeUserAgent(""); got != "" {
 		t.Fatalf("expected empty UA to stay empty, got %q", got)
 	}

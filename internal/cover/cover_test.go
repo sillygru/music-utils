@@ -10,6 +10,17 @@ import (
 	"time"
 )
 
+func newTestLastfm(t *testing.T, baseURL string) *Lastfm {
+	t.Helper()
+	client, err := NewLastfm(baseURL, "test-agent", time.Second)
+	if err != nil {
+		t.Fatalf("new Last.fm client: %v", err)
+	}
+	// Local httptest servers do not need production upstream pacing.
+	client.rate = nil
+	return client
+}
+
 func TestITunesArtistImage(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/search" {
@@ -172,7 +183,7 @@ func TestLastfmtScrapesGIF(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, _ := NewLastfm(server.URL, "test-agent", time.Second)
+	client := newTestLastfm(t, server.URL)
 	result, err := client.Lookup(context.Background(), Artist, Input{ArtistName: "Radiohead"})
 	if err != nil {
 		t.Fatalf("lookup: %v", err)
@@ -198,7 +209,7 @@ func TestLastfmtFallsBackToArtistPage(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, _ := NewLastfm(server.URL, "test-agent", time.Second)
+	client := newTestLastfm(t, server.URL)
 	result, err := client.Lookup(context.Background(), Artist, Input{ArtistName: "Radiohead"})
 	if err != nil {
 		t.Fatalf("lookup: %v", err)
@@ -217,7 +228,7 @@ func TestLastfmRejectsDummyHash(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, _ := NewLastfm(server.URL, "test-agent", time.Second)
+	client := newTestLastfm(t, server.URL)
 	if _, err := client.Lookup(context.Background(), Artist, Input{ArtistName: "Radiohead"}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected ErrNotFound, got %v", err)
 	}
@@ -239,7 +250,7 @@ func TestLastfmAlbumAcceptsRealAlbumPage(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, _ := NewLastfm(server.URL, "test-agent", time.Second)
+	client := newTestLastfm(t, server.URL)
 	result, err := client.Lookup(context.Background(), Album, Input{ArtistName: "Oasis", AlbumName: "(What's the Story) Morning Glory?"})
 	if err != nil {
 		t.Fatalf("lookup: %v", err)
@@ -258,7 +269,7 @@ func TestLastfmRejectsAlbumThatDoesNotExist(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, _ := NewLastfm(server.URL, "test-agent", time.Second)
+	client := newTestLastfm(t, server.URL)
 	// Last.fm renders the artist avatar and unrelated covers with HTTP 200 for
 	// albums that do not exist; the album-overview-cover-art container is
 	// absent, so the provider must not report a cover.

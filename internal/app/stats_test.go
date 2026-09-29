@@ -122,7 +122,6 @@ func TestRunStatsWithCachedContent(t *testing.T) {
 	lyricsPath := filepath.Join(dir, "lyrics.db")
 	coverPath := filepath.Join(dir, "cover.db")
 
-	// Create request log
 	w, err := reqlog.Open(reqLogPath, nil, nil)
 	if err != nil {
 		t.Fatalf("open reqlog: %v", err)
@@ -140,7 +139,6 @@ func TestRunStatsWithCachedContent(t *testing.T) {
 		t.Fatalf("close reqlog: %v", err)
 	}
 
-	// Create cache databases
 	dbCfg := db.Config{MmapSize: 512 * 1024 * 1024, CacheSizeKB: -64000, MaxOpenConns: 1}
 	metadataDB, err := db.Open(metadataPath, dbCfg)
 	if err != nil {
@@ -169,7 +167,6 @@ func TestRunStatsWithCachedContent(t *testing.T) {
 		t.Fatalf("migrate cover: %v", err)
 	}
 
-	// Seed tracks
 	tracks := []db.Track{
 		{Name: "Song One", ArtistName: "Artist A", AlbumName: "Album A", Duration: 200, CoverURL: "http://cover/1"},
 		{Name: "song one", ArtistName: "Artist B", AlbumName: "Album B", Duration: 210, CoverURL: "http://cover/2"},

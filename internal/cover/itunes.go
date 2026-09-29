@@ -36,7 +36,7 @@ type ITunes struct {
 // fresh 2-second pacer is used. Pass a shared pacer when several providers
 // consume the same upstream host so their combined traffic stays within
 // budget.
-func NewITunes(baseURL, userAgent string, timeout time.Duration, pace *pacer.Pacer) (*ITunes, error) {
+func NewITunes(baseURL, userAgent string, timeout time.Duration, pace pacer.Waiter) (*ITunes, error) {
 	baseURL = strings.TrimSpace(baseURL)
 	if baseURL == "" {
 		baseURL = "https://itunes.apple.com"

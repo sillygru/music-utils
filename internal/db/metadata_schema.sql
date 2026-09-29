@@ -20,6 +20,19 @@ CREATE TABLE IF NOT EXISTS tracks (
     metadata_source TEXT,
     cover_url_source TEXT,
     metadata_checked BOOLEAN NOT NULL DEFAULT 0,
+    -- metadata_checked_at is restamped every time a provider gives a definitive
+    -- answer, whether that answer is a match or a miss. It answers "when did a
+    -- provider last settle this track", so it is NULL when no answer has ever
+    -- been given.
+    --
+    -- NULL is not missing data to be tidied up later. A track checked before
+    -- this column existed keeps a NULL forever, and that is the useful reading:
+    -- the backfill that could have filled it in would have had to invent a time,
+    -- which would make every miss in the existing library look freshly checked
+    -- and leave an aging reader with nothing to retry. A NULL says "settled
+    -- before we started recording when", which is a category the reader wants
+    -- to revisit, not a gap to paper over.
+    metadata_checked_at DATETIME,
     cover_url_checked BOOLEAN NOT NULL DEFAULT 0,
     last_lyrics_id INTEGER,
     source TEXT NOT NULL DEFAULT 'local',
@@ -30,6 +43,18 @@ CREATE TABLE IF NOT EXISTS tracks (
 
 CREATE INDEX IF NOT EXISTS idx_tracks_lookup ON tracks(name_lower, artist_name_lower, album_name_lower, duration);
 CREATE INDEX IF NOT EXISTS idx_tracks_musicbrainz_recording ON tracks(musicbrainz_recording_id);
+
+-- Serves the backfill's paging query, which asks for unchecked tracks with an id
+-- above a cursor. Without it SQLite range-scans the primary key and discards
+-- every checked row it passes, so page N costs O(rows remaining) and the job gets
+-- slower the more of the library it has already resolved. Over a partial
+-- predicate, so the index only holds the pending tracks and shrinks as the job
+-- succeeds.
+--
+-- An aging reader that also wants misses older than some cutoff should not reach
+-- for metadata_checked_at with an OR: SQLite cannot serve that shape from a
+-- partial index and falls back to a full scan. Union the two lookups instead.
+CREATE INDEX IF NOT EXISTS idx_tracks_metadata_pending ON tracks(id) WHERE metadata_checked = 0;
 
 CREATE VIRTUAL TABLE IF NOT EXISTS tracks_fts USING fts5(
     name_lower, artist_name_lower, album_name_lower, genre_lower,

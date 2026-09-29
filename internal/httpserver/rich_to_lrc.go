@@ -12,7 +12,7 @@ func compactRichSyncToLRC(rich *db.RichLyrics) string {
 	if rich == nil {
 		return ""
 	}
-	content := compactRichSyncContent(rich.Content, rich.Format)
+	content := compactRichSyncContent(rich.Content, rich.Format, rich.Source)
 	parsed, ok := content.(compactRichSync)
 	if !ok || len(parsed.Lines) == 0 {
 		return ""
