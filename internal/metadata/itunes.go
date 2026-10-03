@@ -15,6 +15,7 @@ import (
 	"github.com/sillygru/music-utils/internal/db"
 	"github.com/sillygru/music-utils/internal/names"
 	"github.com/sillygru/music-utils/internal/pacer"
+	"github.com/sillygru/music-utils/internal/upstream"
 )
 
 const maxResponseBytes = 4 << 20
@@ -153,11 +154,8 @@ func (c *ITunes) do(ctx context.Context, endpoint string, value any) error {
 		return fmt.Errorf("request iTunes: %w", err)
 	}
 	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		if isRateLimitStatus(response.StatusCode) {
-			return newRateLimitError(c.Name(), response)
-		}
-		return fmt.Errorf("iTunes returned HTTP %d", response.StatusCode)
+	if err := upstream.CheckStatus(c.Name(), response); err != nil {
+		return err
 	}
 	if err := json.NewDecoder(io.LimitReader(response.Body, maxResponseBytes)).Decode(value); err != nil {
 		return fmt.Errorf("decode iTunes response: %w", err)

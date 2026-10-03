@@ -55,7 +55,12 @@ func TestDeezerLookup(t *testing.T) {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
 		query := r.URL.Query().Get("q")
-		if !strings.Contains(query, `track:"Blinding Lights"`) || !strings.Contains(query, `artist:"The Weeknd"`) {
+		// Deezer's /search does not support the artist:"..." qualifier and
+		// answers an empty result set for it, so the query must be bare terms.
+		if strings.Contains(query, ":") {
+			t.Fatalf("query must not use field qualifiers, Deezer returns nothing for them: %q", query)
+		}
+		if query != "Blinding Lights The Weeknd" {
 			t.Fatalf("unexpected query: %q", query)
 		}
 		w.Header().Set("Content-Type", "application/json")

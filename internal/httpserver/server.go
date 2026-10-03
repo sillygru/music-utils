@@ -12,13 +12,18 @@ import (
 	"time"
 
 	"github.com/sillygru/music-utils/internal/applemusic"
+	"github.com/sillygru/music-utils/internal/betterlyrics"
 	"github.com/sillygru/music-utils/internal/config"
 	"github.com/sillygru/music-utils/internal/cover"
 	"github.com/sillygru/music-utils/internal/db"
+	"github.com/sillygru/music-utils/internal/innertube"
+	"github.com/sillygru/music-utils/internal/kugou"
 	"github.com/sillygru/music-utils/internal/lrclib"
+	"github.com/sillygru/music-utils/internal/lyricsplus"
 	"github.com/sillygru/music-utils/internal/metadata"
 	"github.com/sillygru/music-utils/internal/musixmatch"
 	"github.com/sillygru/music-utils/internal/pacer"
+	"github.com/sillygru/music-utils/internal/paxsenix"
 	"github.com/sillygru/music-utils/internal/reqlog"
 	"github.com/sillygru/music-utils/internal/richlyrics"
 	"github.com/sillygru/music-utils/internal/version"
@@ -142,17 +147,58 @@ func NewWithLogger(cfg config.Config, metadataDB, lyricsDB, coverDB *sql.DB, log
 	if logger == nil {
 		logger = slog.Default()
 	}
-	setRichSyncLogger(logger)
-	client := newLRCLIBClient(cfg, logger)
-	richClient := newRichLyricsClient(cfg, logger)
-	appleClient := newAppleMusicClient(cfg, logger)
-	musixClient := newMusixmatchClient(cfg, logger)
-	betterClient := newBetterLyricsClient(cfg, logger)
-	kugouClient := newKugouClient(cfg, logger)
-	paxsenixClient := newPaxsenixClient(cfg, logger)
-	lyricsPlusClient := newLyricsPlusClient(cfg, logger)
-	zemerClient := newZemerClient(cfg, logger)
-	tubeClient := newInnerTubeClient(cfg, logger)
+	setLyricsTimeUnitLogger(logger)
+
+	// The shared upstream pacers are built before the lyrics clients because those
+	// clients take theirs as a constructor argument, and a lyrics client that
+	// paces privately is exactly the bug the shared lease exists to prevent: the
+	// lyrics backfill claims these leases, and a server that never claimed one
+	// would leave the two processes each keeping to their own budget, so the real
+	// load on an upstream would be the sum of both rather than the ceiling of
+	// either.
+	//
+	// iTunes is consumed by both the metadata and cover resolvers; share one
+	// pacer so their combined traffic never exceeds iTunes' ~20 calls/min cap.
+	//
+	// Live requests are served as the user class at the rate the provider's own
+	// client uses. A job is served as the job class at the slower rate it works
+	// at, and only while this process is idle, which is what keeps users first.
+	// The metadata upstreams have no per-provider client interval of their own, so
+	// they state one rate for both classes: there is no second opinion on how fast
+	// a catalogue lookup may go, and inventing a faster job rate for them would
+	// only spend the same budget harder.
+	metadataUpstreamPace := cfg.UpstreamUserInterval(2 * time.Second)
+	jobUpstreamPace := cfg.UpstreamJobInterval()
+	var itunesPace pacer.Waiter = pacer.New(metadataUpstreamPace)
+	var deezerPace pacer.Waiter = pacer.New(metadataUpstreamPace)
+	var sharedItunes, sharedDeezer *pacer.Shared
+	var lyricsPace *lyricsPacerFactory
+	if metadataDB != nil {
+		if err := db.EnsureCoordination(context.Background(), metadataDB); err != nil {
+			logger.Warn("enable shared upstream pacing", "error", err)
+		} else {
+			sharedItunes = pacer.NewShared(metadataDB, "itunes", metadataUpstreamPace, jobUpstreamPace, jobIdleGap(cfg))
+			sharedDeezer = pacer.NewShared(metadataDB, "deezer", metadataUpstreamPace, jobUpstreamPace, jobIdleGap(cfg))
+			itunesPace, deezerPace = sharedItunes, sharedDeezer
+			lyricsPace = newLyricsPacerFactory(cfg, metadataDB, jobIdleGap(cfg))
+		}
+	}
+
+	client := newLRCLIBClient(cfg, logger, lyricsPace.user(lrclib.LeaseName, cfg.UpstreamUserInterval(lrclib.RequestInterval)))
+	// These three sit on no shared lease, because the lyrics backfill never asks
+	// them for lyrics: Unison and Apple Music answer only with word-level sync that
+	// the job deliberately leaves to the live path, and YouTube is keyed by a video
+	// ID a batch run has no way to obtain. They are still upstreams, so they take
+	// the same override rather than being the three places it silently fails to
+	// apply.
+	richClient := newRichLyricsClient(cfg, logger, pacer.New(cfg.UpstreamUserInterval(richlyrics.RequestInterval)))
+	appleClient := newAppleMusicClient(cfg, logger, pacer.New(cfg.UpstreamUserInterval(applemusic.RequestInterval)))
+	musixClient := newMusixmatchClient(cfg, logger, lyricsPace.user(musixmatch.LeaseName, cfg.UpstreamUserInterval(musixmatch.RequestInterval)))
+	betterClient := newBetterLyricsClient(cfg, logger, lyricsPace.user(betterlyrics.LeaseName, cfg.UpstreamUserInterval(betterlyrics.RequestInterval)))
+	kugouClient := newKugouClient(cfg, logger, lyricsPace.user(kugou.LeaseName, cfg.UpstreamUserInterval(kugou.RequestInterval)))
+	paxsenixClient := newPaxsenixClient(cfg, logger, lyricsPace.user(paxsenix.LeaseName, cfg.UpstreamUserInterval(paxsenix.RequestInterval)))
+	lyricsPlusClient := newLyricsPlusClient(cfg, logger, lyricsPace.user(lyricsplus.LeaseName, cfg.UpstreamUserInterval(lyricsplus.RequestInterval)))
+	tubeClient := newInnerTubeClient(cfg, logger, pacer.New(cfg.UpstreamUserInterval(innertube.RequestInterval)))
 	richLyricsMigrationStop := startRichLyricsMigration(lyricsDB, logger)
 	var requestLogs *reqlog.Writer
 	if cfg.RequestLogEnabled {
@@ -166,26 +212,6 @@ func NewWithLogger(cfg config.Config, metadataDB, lyricsDB, coverDB *sql.DB, log
 		if err != nil {
 			logger.Error("open request log database", "error", err)
 			requestLogs = nil
-		}
-	}
-	// iTunes is consumed by both the metadata and cover resolvers; share one
-	// pacer so their combined traffic never exceeds iTunes' ~20 calls/min cap.
-	//
-	// The pacers are cross-process and stored in the metadata database, so live
-	// requests and a running background job take turns on one shared upstream
-	// budget instead of each applying private pacing and doubling the real
-	// request rate. Live requests are served as the user class; a job only gets
-	// admitted while this process is idle, which is what keeps users first.
-	var itunesPace pacer.Waiter = pacer.New(2 * time.Second)
-	var deezerPace pacer.Waiter = pacer.New(2 * time.Second)
-	var sharedItunes, sharedDeezer *pacer.Shared
-	if metadataDB != nil {
-		if err := db.EnsureCoordination(context.Background(), metadataDB); err != nil {
-			logger.Warn("enable shared upstream pacing", "error", err)
-		} else {
-			sharedItunes = pacer.NewShared(metadataDB, "itunes", 2*time.Second, jobIdleGap(cfg))
-			sharedDeezer = pacer.NewShared(metadataDB, "deezer", 2*time.Second, jobIdleGap(cfg))
-			itunesPace, deezerPace = sharedItunes, sharedDeezer
 		}
 	}
 	metadataResolver := newMetadataResolver(cfg, logger, itunesPace, deezerPace)
@@ -202,7 +228,7 @@ func NewWithLogger(cfg config.Config, metadataDB, lyricsDB, coverDB *sql.DB, log
 	lyricsMisses := newLyricsMissCache()
 	fallbacks := newFallbackGuard(cfg)
 	coverRefresher := newCoverRefreshJob(cfg, coverDB, coverResolver, logger)
-	providers := newLyricsProviders(client, richClient, appleClient, musixClient, betterClient, kugouClient, paxsenixClient, lyricsPlusClient, zemerClient, tubeClient, cfg)
+	providers := newLyricsProviders(client, richClient, appleClient, musixClient, betterClient, kugouClient, paxsenixClient, lyricsPlusClient, tubeClient, cfg)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/healthz", healthz)
 	mux.HandleFunc("GET /api/version", versionHandler)
@@ -267,10 +293,11 @@ func NewWithLogger(cfg config.Config, metadataDB, lyricsDB, coverDB *sql.DB, log
 	// A shared pacer that has given up on its lease is pacing privately, which
 	// quietly doubles the real request rate to the upstream. Nothing else
 	// surfaces that, so it is logged on a slow cadence rather than per request.
-	if sharedItunes != nil || sharedDeezer != nil {
+	if sharedItunes != nil || sharedDeezer != nil || lyricsPace != nil {
 		pacerCtx, cancelPacer := context.WithCancel(context.Background())
 		server.RegisterOnShutdown(cancelPacer)
-		go watchPacerDegradation(pacerCtx, logger, sharedItunes, sharedDeezer)
+		watched := append([]*pacer.Shared{sharedItunes, sharedDeezer}, lyricsPace.leases()...)
+		go watchPacerDegradation(pacerCtx, logger, watched...)
 	}
 	jobWatch := newJobWatcher(metadataDB, metadataResolver, logger)
 	jobWatch.Start()
@@ -361,11 +388,11 @@ func startRichLyricsMigration(lyricsDB *sql.DB, logger *slog.Logger) func() {
 	return cancel
 }
 
-func newAppleMusicClient(cfg config.Config, logger *slog.Logger) *applemusic.Client {
+func newAppleMusicClient(cfg config.Config, logger *slog.Logger, pace pacer.Waiter) *applemusic.Client {
 	if !cfg.AppleMusicEnabled {
 		return nil
 	}
-	client, err := applemusic.New(cfg.AppleMusicCatalogBaseURL, cfg.AppleMusicLyricsBaseURL, cfg.AppleMusicStorefront, cfg.AppleMusicUserAgent, cfg.AppleMusicMediaUserTokens, time.Duration(cfg.AppleMusicTimeoutMS)*time.Millisecond)
+	client, err := applemusic.NewWithPacer(cfg.AppleMusicCatalogBaseURL, cfg.AppleMusicLyricsBaseURL, cfg.AppleMusicStorefront, cfg.AppleMusicUserAgent, cfg.AppleMusicMediaUserTokens, time.Duration(cfg.AppleMusicTimeoutMS)*time.Millisecond, pace)
 	if err != nil {
 		logger.Error("configure Apple Music client", "error", err)
 		return nil
@@ -373,11 +400,11 @@ func newAppleMusicClient(cfg config.Config, logger *slog.Logger) *applemusic.Cli
 	return client
 }
 
-func newMusixmatchClient(cfg config.Config, logger *slog.Logger) *musixmatch.Client {
+func newMusixmatchClient(cfg config.Config, logger *slog.Logger, pace pacer.Waiter) *musixmatch.Client {
 	if !cfg.MusixmatchEnabled || strings.TrimSpace(cfg.MusixmatchAPIKey) == "" {
 		return nil
 	}
-	client, err := musixmatch.New(cfg.MusixmatchBaseURL, cfg.MusixmatchAPIKey, cfg.MusixmatchUserAgent, time.Duration(cfg.MusixmatchTimeoutMS)*time.Millisecond)
+	client, err := musixmatch.NewWithPacer(cfg.MusixmatchBaseURL, cfg.MusixmatchAPIKey, cfg.MusixmatchUserAgent, time.Duration(cfg.MusixmatchTimeoutMS)*time.Millisecond, pace)
 	if err != nil {
 		logger.Error("configure Musixmatch client", "error", err)
 		return nil
@@ -385,7 +412,7 @@ func newMusixmatchClient(cfg config.Config, logger *slog.Logger) *musixmatch.Cli
 	return client
 }
 
-func newRichLyricsClient(cfg config.Config, logger *slog.Logger) *richlyrics.Client {
+func newRichLyricsClient(cfg config.Config, logger *slog.Logger, pace pacer.Waiter) *richlyrics.Client {
 	baseURL := cfg.RichLyricsBaseURL
 	if strings.TrimSpace(baseURL) == "" {
 		baseURL = "https://unison.boidu.dev"
@@ -398,7 +425,7 @@ func newRichLyricsClient(cfg config.Config, logger *slog.Logger) *richlyrics.Cli
 	if timeout <= 0 {
 		timeout = 5 * time.Second
 	}
-	client, err := richlyrics.New(baseURL, userAgent, timeout)
+	client, err := richlyrics.NewWithPacer(baseURL, userAgent, timeout, pace)
 	if err != nil {
 		logger.Error("configure rich lyrics client", "error", err)
 		return nil
@@ -406,7 +433,7 @@ func newRichLyricsClient(cfg config.Config, logger *slog.Logger) *richlyrics.Cli
 	return client
 }
 
-func newLRCLIBClient(cfg config.Config, logger *slog.Logger) *lrclib.Client {
+func newLRCLIBClient(cfg config.Config, logger *slog.Logger, pace pacer.Waiter) *lrclib.Client {
 	baseURL := cfg.LRCLIBBaseURL
 	if strings.TrimSpace(baseURL) == "" {
 		baseURL = "https://lrclib.net/api"
@@ -419,7 +446,7 @@ func newLRCLIBClient(cfg config.Config, logger *slog.Logger) *lrclib.Client {
 	if timeout <= 0 {
 		timeout = 5 * time.Second
 	}
-	client, err := lrclib.New(baseURL, userAgent, timeout)
+	client, err := lrclib.NewWithPacer(baseURL, userAgent, timeout, pace)
 	if err != nil {
 		logger.Error("configure LRCLIB client", "error", err)
 		return nil
@@ -584,4 +611,3 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 func jobIdleGap(cfg config.Config) time.Duration {
 	return time.Duration(cfg.JobIdleGapMS) * time.Millisecond
 }
-

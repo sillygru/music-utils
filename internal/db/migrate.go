@@ -29,6 +29,8 @@ var metadataColumns = []struct {
 	{"cover_url_source", "TEXT"},
 	{"metadata_checked", "BOOLEAN NOT NULL DEFAULT 0"},
 	{"metadata_checked_at", "DATETIME"},
+	{"lyrics_checked", "BOOLEAN NOT NULL DEFAULT 0"},
+	{"lyrics_checked_at", "DATETIME"},
 	{"cover_url_checked", "BOOLEAN NOT NULL DEFAULT 0"},
 }
 
@@ -43,6 +45,9 @@ var metadataIndexes = []string{
 	"idx_tracks_lookup ON tracks(name_lower, artist_name_lower, album_name_lower, duration)",
 	"idx_tracks_musicbrainz_recording ON tracks(musicbrainz_recording_id)",
 	"idx_tracks_metadata_pending ON tracks(id) WHERE metadata_checked = 0",
+	"idx_tracks_metadata_age ON tracks(COALESCE(metadata_checked_at,''), id)",
+	"idx_tracks_lyrics_pending ON tracks(id) WHERE lyrics_checked = 0",
+	"idx_tracks_lyrics_age ON tracks(COALESCE(lyrics_checked_at,''), id)",
 }
 
 // MigrateMetadata initializes the metadata database and upgrades the former

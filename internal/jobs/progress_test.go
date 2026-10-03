@@ -387,3 +387,44 @@ func TestWriteSuccessResetsTheFailureStreak(t *testing.T) {
 		t.Error("expected a recovered streak not to trip the abort")
 	}
 }
+
+// The run header is the only place an operator can see the rate the job is
+// actually held to, so it has to be right in the direction that matters: never
+// claiming more throughput than the pace allows.
+func TestPaceTextStatesTheRealRate(t *testing.T) {
+	tests := []struct {
+		name     string
+		interval time.Duration
+		want     string
+	}{
+		{"one second reads as a rate", time.Second, "1 req/s"},
+		{"two seconds is half a request, not one", 2 * time.Second, "1 req/2s"},
+		{"ten seconds", 10 * time.Second, "1 req/10s"},
+		{"a minute", time.Minute, "1 req/60s"},
+		{"fast providers keep the whole req/s form", 200 * time.Millisecond, "5 req/s"},
+		{"lyricsplus", 300 * time.Millisecond, "4 req/s"},
+		{"not a whole number of seconds", 1500 * time.Millisecond, "1 req/1.5s"},
+		{"no pacing configured", 0, "unpaced"},
+		{"a negative interval is not a rate", -time.Second, "unpaced"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := paceText(test.interval); got != test.want {
+				t.Fatalf("paceText(%s) = %q, want %q", test.interval, got, test.want)
+			}
+		})
+	}
+}
+
+// Rounding a slow pace up to a whole req/s would overstate it, which is the one
+// error a rate line cannot make: an operator reading "1 req/s" from a run paced at
+// one request every two seconds is being told the run may move twice as fast as it
+// may.
+func TestPaceTextNeverOverstatesASlowPace(t *testing.T) {
+	for _, interval := range []time.Duration{2 * time.Second, 3 * time.Second, 4 * time.Second, 30 * time.Second} {
+		got := paceText(interval)
+		if strings.Contains(got, "req/s") {
+			t.Fatalf("paceText(%s) = %q, which claims a whole request per second the run cannot make", interval, got)
+		}
+	}
+}

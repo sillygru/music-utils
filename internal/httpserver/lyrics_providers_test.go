@@ -70,19 +70,28 @@ func TestGetLyricsVideoIDGating(t *testing.T) {
 		http.NotFound(w, r)
 	}))
 	defer lrclib404.Close()
-	var zemerCalls atomic.Int32
-	zemerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		zemerCalls.Add(1)
-		_, _ = w.Write([]byte(`{"videoId":"vid1234567","sources":[` +
-			`{"type":"canonical","plain":"zemer one\nzemer two\nzemer three\nzemer four"}]}`))
+	var tubeCalls atomic.Int32
+	tubeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tubeCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/next":
+			_, _ = w.Write([]byte(`{"contents":{"browseEndpoint":{"browseId":"MPLYt_test","params":"cA=="}}}`))
+		case "/browse":
+			_, _ = w.Write([]byte(`{"contents":{"musicDescriptionShelfRenderer":{"description":{"runs":[` +
+				`{"text":"yt one\nyt two\nyt three\nyt four"}]}}}}`))
+		default:
+			http.NotFound(w, r)
+		}
 	}))
-	defer zemerServer.Close()
+	defer tubeServer.Close()
 
 	cfg := fallbackConfig(lrclib404.URL + "/api")
-	cfg.ZemerEnabled = true
-	cfg.ZemerBaseURL = zemerServer.URL
-	cfg.ZemerUserAgent = "music-utils-test"
-	cfg.ZemerTimeoutMS = 2000
+	cfg.YouTubeLyricsEnabled = true
+	cfg.YouTubeSubtitleEnabled = true
+	cfg.YouTubeBaseURL = tubeServer.URL
+	cfg.YouTubeUserAgent = "music-utils-test"
+	cfg.YouTubeTimeoutMS = 2000
 	metadataDB, lyricsDB := testHTTPDatabases(t)
 	server := NewWithConfig(cfg, metadataDB, lyricsDB)
 	cleanupHTTPServer(t, server)
@@ -92,31 +101,31 @@ func TestGetLyricsVideoIDGating(t *testing.T) {
 	if miss.Code != http.StatusNotFound {
 		t.Fatalf("expected miss 404 without video_id, got %d: %s", miss.Code, miss.Body.String())
 	}
-	if zemerCalls.Load() != 0 {
-		t.Fatalf("zemer must not be called without video_id, got %d calls", zemerCalls.Load())
+	if tubeCalls.Load() != 0 {
+		t.Fatalf("youtube must not be called without video_id, got %d calls", tubeCalls.Load())
 	}
 
-	// With video_id the Zemer result resolves and caches.
+	// With video_id the YouTube lyrics shelf resolves and caches.
 	hit := performRequest(t, server.Handler, "/api/lyrics/get?track_name=Video+Song&artist_name=Video+Artist&video_id=vid1234567")
 	if hit.Code != http.StatusOK {
-		t.Fatalf("expected zemer 200 with video_id, got %d: %s", hit.Code, hit.Body.String())
+		t.Fatalf("expected youtube 200 with video_id, got %d: %s", hit.Code, hit.Body.String())
 	}
 	var got lyricsResponse
 	if err := json.NewDecoder(hit.Body).Decode(&got); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if !strings.Contains(got.PlainLyrics, "zemer four") {
+	if !strings.Contains(got.PlainLyrics, "yt four") {
 		t.Fatalf("unexpected plain lyrics: %q", got.PlainLyrics)
 	}
 
 	// An invalid video_id is ignored, never forwarded.
-	before := zemerCalls.Load()
+	before := tubeCalls.Load()
 	bad := performRequest(t, server.Handler, "/api/lyrics/get?track_name=Other+Song&artist_name=Other+Artist&video_id=!!!invalid!!!")
 	if bad.Code != http.StatusNotFound {
 		t.Fatalf("expected miss 404 with invalid video_id, got %d", bad.Code)
 	}
-	if zemerCalls.Load() != before {
-		t.Fatalf("invalid video_id must not reach zemer")
+	if tubeCalls.Load() != before {
+		t.Fatalf("invalid video_id must not reach youtube")
 	}
 }
 

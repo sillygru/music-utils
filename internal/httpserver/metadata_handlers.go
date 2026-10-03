@@ -164,8 +164,13 @@ func searchMetadataHandlerWithUpstream(database *sql.DB, resolver *metadata.Reso
 			seen[key] = struct{}{}
 			results = append(results, toMetadataResponse(track))
 		}
-		// Put provider results first so a warm local catalog cannot hide the
-		// requested upstream APIs merely because it fills the final limit.
+		// Local FTS rows match only when every query token is present, so they
+		// outrank a provider's fuzzy hits. Appending them first also keeps a
+		// full page of loosely related provider results from crowding them out
+		// of the limit entirely.
+		for i := range tracks {
+			appendTrack(&tracks[i].Track)
+		}
 		if fallbackEnabled && resolver != nil {
 			release, ok := fallbacks.enter(r, w)
 			if !ok {
@@ -180,9 +185,6 @@ func searchMetadataHandlerWithUpstream(database *sql.DB, resolver *metadata.Reso
 					appendTrack(track)
 				}
 			}
-		}
-		for i := range tracks {
-			appendTrack(&tracks[i].Track)
 		}
 		if len(results) == 0 {
 			setOutcome(r, "miss")

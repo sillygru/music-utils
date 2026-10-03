@@ -160,3 +160,93 @@ func (g *Gate) penalty() time.Duration {
 	defer g.mu.Unlock()
 	return g.backoff
 }
+
+// pause reports how far ahead the gate is currently paused.
+func (g *Gate) pause() time.Duration {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return time.Until(g.pausedUntil)
+}
+
+// WaitThrottle exists because a run that fans one song out across several
+// providers can be partway through it when a provider refuses, and the rest of that
+// song must not go out during the cooldown. It has to block without touching the
+// steady ceiling, or every lookup would start spending the song budget too.
+func TestGateWaitThrottleBlocksUntilTheCooldownExpires(t *testing.T) {
+	gate := NewGate(0)
+	// An unthrottled gate must not make anyone wait at all.
+	if err := gate.WaitThrottle(context.Background()); err != nil {
+		t.Fatalf("unthrottled wait: %v", err)
+	}
+
+	gate.Throttle(200 * time.Millisecond)
+
+	ctx := context.Background()
+	start := time.Now()
+	if err := gate.WaitThrottle(ctx); err != nil {
+		t.Fatalf("throttled wait: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed < 150*time.Millisecond {
+		t.Errorf("WaitThrottle returned after %s, want it held for the advertised cooldown", elapsed)
+	}
+	// And the pause is over, so it stops waiting.
+	if err := gate.WaitThrottle(ctx); err != nil {
+		t.Fatalf("post-throttle wait: %v", err)
+	}
+}
+
+// A rate limit has to slow in-flight work, not just the next song to start. With
+// the ceiling spent, the throttle still holds the caller: that is the whole reason
+// the run checks it before each lookup rather than once per song.
+func TestGateWaitThrottleIsIndependentOfTheCeiling(t *testing.T) {
+	// 600/min is one unit every 100ms, so a naive gate would make the caller wait
+	// about that long whether or not a cooldown was active.
+	gate := NewGate(600)
+	ctx := context.Background()
+	if err := gate.Wait(ctx); err != nil {
+		t.Fatalf("first wait: %v", err)
+	}
+
+	// With no throttle the caller gets straight through, proving WaitThrottle does
+	// not consume the steady ceiling.
+	start := time.Now()
+	if err := gate.WaitThrottle(ctx); err != nil {
+		t.Fatalf("unthrottled wait: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 50*time.Millisecond {
+		t.Errorf("WaitThrottle took %s with no cooldown active, want it not to spend the ceiling", elapsed)
+	}
+
+	gate.Throttle(150 * time.Millisecond)
+	start = time.Now()
+	if err := gate.WaitThrottle(ctx); err != nil {
+		t.Fatalf("throttled wait: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed < 120*time.Millisecond {
+		t.Errorf("WaitThrottle took %s after a rate limit, want it held for the cooldown", elapsed)
+	}
+}
+
+func TestGateWaitThrottleHonorsContextCancellation(t *testing.T) {
+	gate := NewGate(0)
+	gate.Throttle(time.Hour)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := gate.WaitThrottle(ctx); err == nil {
+		t.Fatal("expected WaitThrottle to return the context error")
+	}
+}
+
+// A longer advertised cooldown wins over the growing backoff, because the provider
+// said how long it needs and guessing shorter would just walk back into the wall.
+func TestGateThrottlePrefersTheAdvertisedCooldown(t *testing.T) {
+	gate := NewGate(0)
+	gate.Throttle(5 * time.Second)
+	if pause := gate.pause(); pause < 4*time.Second {
+		t.Errorf("pause = %s, want at least the advertised 5s", pause)
+	}
+	if _, pauses := gate.Stats(); pauses != 0 {
+		t.Errorf("pauses = %d, want 0: a pause is only counted when it holds a caller back", pauses)
+	}
+}

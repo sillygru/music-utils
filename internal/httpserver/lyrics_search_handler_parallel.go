@@ -71,7 +71,9 @@ func searchLyricsHandlerParallel(metadataDB, lyricsDB *sql.DB, providers *lyrics
 					if isWordRichEmptyRichSyncResult(cachedResults[i].RichSync) {
 						cachedResults[i].RichSync = nil
 					}
-					cachedResults[i].SyncedLyrics = ttml.CleanSyncedLyrics(cachedResults[i].SyncedLyrics)
+					// lyricsResponse carries no per-result source, so the guard logs an empty one
+					// here; the repair itself is what matters.
+					cachedResults[i].SyncedLyrics = normalizeStoredSyncedLyrics(cachedResults[i].SyncedLyrics, "")
 					if cachedResults[i].PlainLyrics == "" && cachedResults[i].SyncedLyrics != "" {
 						cachedResults[i].PlainLyrics = ttml.ExtractPlainFromLRC(cachedResults[i].SyncedLyrics)
 					}
@@ -115,7 +117,7 @@ func searchLyricsHandlerParallel(metadataDB, lyricsDB *sql.DB, providers *lyrics
 			if isWordRichEmptyRichSyncResult(results[i].RichSync) {
 				results[i].RichSync = nil
 			}
-			results[i].SyncedLyrics = ttml.CleanSyncedLyrics(results[i].SyncedLyrics)
+			results[i].SyncedLyrics = normalizeStoredSyncedLyrics(results[i].SyncedLyrics, "")
 			if results[i].PlainLyrics == "" && results[i].SyncedLyrics != "" {
 				results[i].PlainLyrics = ttml.ExtractPlainFromLRC(results[i].SyncedLyrics)
 			}

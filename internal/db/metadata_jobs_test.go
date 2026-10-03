@@ -600,6 +600,12 @@ func TestMigrateAddsCheckedAtToExistingDatabase(t *testing.T) {
 	if _, err := legacy.ExecContext(context.Background(), string(schema)); err != nil {
 		t.Fatalf("apply schema: %v", err)
 	}
+	// The age index covers the column, and SQLite refuses to drop a column an
+	// index depends on. A genuinely pre-upgrade database predates both, so the
+	// index goes first.
+	if _, err := legacy.ExecContext(context.Background(), "DROP INDEX IF EXISTS idx_tracks_metadata_age"); err != nil {
+		t.Fatalf("drop age index: %v", err)
+	}
 	if _, err := legacy.ExecContext(context.Background(), "ALTER TABLE tracks DROP COLUMN metadata_checked_at"); err != nil {
 		t.Fatalf("drop column: %v", err)
 	}
@@ -656,6 +662,9 @@ VALUES
 ('Already Checked', 'already checked', 'Artist', 'artist', 'Album', 'album', 200, 1),
 ('Never Checked', 'never checked', 'Artist', 'artist', 'Album', 'album', 201, 0)`); err != nil {
 		t.Fatalf("seed tracks: %v", err)
+	}
+	if _, err := legacy.ExecContext(context.Background(), "DROP INDEX IF EXISTS idx_tracks_metadata_age"); err != nil {
+		t.Fatalf("drop age index: %v", err)
 	}
 	if _, err := legacy.ExecContext(context.Background(),
 		"ALTER TABLE tracks DROP COLUMN metadata_checked_at"); err != nil {

@@ -232,7 +232,12 @@ func TestRunJobMigratesMetadataSchema(t *testing.T) {
 	if err := db.MigrateMetadata(context.Background(), legacy); err != nil {
 		t.Fatalf("migrate fresh: %v", err)
 	}
-	// Stand in for a database written before the newest column existed.
+	// Stand in for a database written before the newest column existed. The age
+	// index covers that column and SQLite refuses to drop a column an index
+	// depends on; a genuinely pre-upgrade database predates both.
+	if _, err := legacy.ExecContext(context.Background(), "DROP INDEX IF EXISTS idx_tracks_metadata_age"); err != nil {
+		t.Fatalf("drop age index: %v", err)
+	}
 	if _, err := legacy.ExecContext(context.Background(), "ALTER TABLE tracks DROP COLUMN metadata_checked_at"); err != nil {
 		t.Fatalf("drop column: %v", err)
 	}

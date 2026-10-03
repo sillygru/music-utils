@@ -10,14 +10,22 @@ import (
 
 // lrcLinePattern matches a run of one or more timestamp tags anchored at the
 // line start, capturing the trailing text. Repeated tags like
-// "[00:00.00][00:10.00]" all belong to the run, while hour-style or mid-line
-// tags make the whole line fall through as untagged. Fractions with one to
-// three digits are accepted so centisecond timestamps from LRCLIB and
-// milliseconds timestamps from other sources both parse.
-var lrcLinePattern = regexp.MustCompile(`^((?:\[\d{1,3}:\d{1,2}(?:\.\d{1,3})?\])+)(.*)$`)
+// "[00:00.00][00:10.00]" all belong to the run, while mid-line tags make the
+// whole line fall through as untagged. Fractions with one to three digits are
+// accepted so centisecond timestamps from LRCLIB and milliseconds timestamps
+// from other sources both parse.
+//
+// The minute field allows up to five digits. A provider that writes
+// milliseconds through a seconds-based formatter emits minute fields past 999,
+// and with the narrower bound such a tag matched nothing and fell through to
+// the untagged branch, shipping its literal "[1115:09.00]text" as lyric text.
+// The wider bound makes those parse as the wildly out-of-range stamps they are,
+// which normalizeStoredSyncedLyrics upstream has already rescaled.
+var lrcLinePattern = regexp.MustCompile(`^((?:\[\d{1,5}:\d{1,2}(?:\.\d{1,3})?\])+)(.*)$`)
 
-// lrcSingleTagPattern parses the first timestamp tag of a run.
-var lrcSingleTagPattern = regexp.MustCompile(`^\[(\d{1,3}):(\d{1,2})(?:\.(\d{1,3}))?\]`)
+// lrcSingleTagPattern parses the first timestamp tag of a run. It carries the
+// same widened minute bound as lrcLinePattern.
+var lrcSingleTagPattern = regexp.MustCompile(`^\[(\d{1,5}):(\d{1,2})(?:\.(\d{1,3}))?\]`)
 
 // lyricsFileLine is one entry of the lines: section of an LRCLIB lyricsfile.
 type lyricsFileLine struct {
@@ -44,7 +52,7 @@ func buildLyricsFile(track *db.Track, lyrics *db.Lyrics) string {
 	b.WriteString("  duration_ms: " + formatDurationMS(track.Duration) + "\n")
 	b.WriteString("  instrumental: " + boolString(lyrics.Instrumental) + "\n")
 	b.WriteString("lines:")
-	lines := parseLRC(lyrics.SyncedLyrics)
+	lines := parseLRC(normalizeStoredSyncedLyrics(lyrics.SyncedLyrics, lyrics.Source))
 	if len(lines) == 0 {
 		b.WriteString(" []\n")
 	} else {

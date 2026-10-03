@@ -10,16 +10,16 @@ import (
 // maxPlausibleLyricsSeconds bounds the runtime of an ordinary recording.
 const maxPlausibleLyricsSeconds = 3600
 
-var richSyncLogger atomic.Pointer[slog.Logger]
+var lyricsTimeUnitLogger atomic.Pointer[slog.Logger]
 
-func setRichSyncLogger(logger *slog.Logger) {
+func setLyricsTimeUnitLogger(logger *slog.Logger) {
 	if logger != nil {
-		richSyncLogger.Store(logger)
+		lyricsTimeUnitLogger.Store(logger)
 	}
 }
 
-func getRichSyncLogger() *slog.Logger {
-	if l := richSyncLogger.Load(); l != nil {
+func getLyricsTimeUnitLogger() *slog.Logger {
+	if l := lyricsTimeUnitLogger.Load(); l != nil {
 		return l
 	}
 	return slog.Default()
@@ -66,7 +66,7 @@ func normalizeRichSyncTimeUnit(parsed compactRichSync, source string) compactRic
 	} else {
 		parsed.Duration = ttml.MillisToSeconds(maxEnd)
 	}
-	getRichSyncLogger().Warn("rich lyrics timings were not in seconds, rescaled from milliseconds",
+	getLyricsTimeUnitLogger().Warn("rich lyrics timings were not in seconds, rescaled from milliseconds",
 		"source", source, "rescaled_end", parsed.Duration)
 	return parsed
 }

@@ -6,6 +6,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/sillygru/music-utils/internal/version"
 )
@@ -44,7 +45,7 @@ const (
 	defaultRichLyricsEnabled        = true
 	defaultRichLyricsBaseURL        = "https://unison.boidu.dev"
 	defaultRichLyricsTimeoutMS      = 5000
-	defaultAppleMusicEnabled         = false
+	defaultAppleMusicEnabled        = false
 	defaultAppleMusicCatalogBaseURL = "https://api.music.apple.com"
 	defaultAppleMusicLyricsBaseURL  = "https://api.music.apple.com"
 	defaultAppleMusicStorefront     = "us"
@@ -66,9 +67,6 @@ const (
 	defaultLyricsPlusEnabled        = true
 	defaultLyricsPlusAPIBaseURL     = "https://lyrics-api.binimum.org"
 	defaultLyricsPlusTimeoutMS      = 10000
-	defaultZemerEnabled             = true
-	defaultZemerBaseURL             = "https://search.zemer.io"
-	defaultZemerTimeoutMS           = 10000
 	defaultYouTubeLyricsEnabled     = true
 	defaultYouTubeSubtitleEnabled   = true
 	defaultYouTubeBaseURL           = "https://music.youtube.com/youtubei/v1"
@@ -89,11 +87,84 @@ const (
 	defaultPrefetchAlbumCover   = true
 	defaultPrefetchArtistCover  = true
 	defaultJobIdleGapMS         = 10000
+	defaultUpstreamPaceMS       = 0
+	defaultUpstreamJobPaceMS    = 2000
+	defaultLyricsJobPaceMS      = 5000
 	defaultEnrichEnabled        = true
 	defaultEnrichPerMin         = 20
 	defaultEnrichConcurrency    = 2
 	defaultEnrichQueueSize      = 64
 )
+
+// UpstreamUserInterval is how far apart two live requests to one upstream are
+// spaced, given the interval that upstream's own client would use on its own.
+//
+// UPSTREAM_PACE_MS overrides every upstream at once, which is for an operator
+// dealing with an upstream that has started throttling and needs the request path
+// slowed globally. Left unset, each upstream keeps its own rate, because those
+// rates are not interchangeable: LRCLIB, BetterLyrics and Musixmatch are asked five
+// times a second while KuGou and Paxsenix are asked twice. One number for both is
+// either too aggressive for the slower pair or too timid for the faster one, so
+// the default is that no number is set and the per-provider constants stand.
+func (c Config) UpstreamUserInterval(providerDefault time.Duration) time.Duration {
+	if c.UpstreamPaceMS > 0 {
+		return time.Duration(c.UpstreamPaceMS) * time.Millisecond
+	}
+	return providerDefault
+}
+
+// UpstreamJobInterval is how far apart a background job asks any one upstream.
+//
+// It is deliberately much slower than the request path's own rate for every one of
+// these upstreams. A batch run is working through a library and nobody is waiting
+// on it; a request is one person waiting on one answer. The two are paced
+// separately because those are different jobs, and the job only gets its own
+// number while the server is idle.
+//
+// It lives here rather than in either job so the server can put the same number on
+// the shared upstream lease it and the job both use. A lease configured with a
+// rate only one side agrees on is not shared pacing: the two processes would each
+// keep to their own number and the real load on an upstream would be the sum
+// rather than the ceiling.
+//
+// A job claims this interval whatever UpstreamUserInterval resolves to, which is
+// what it means for the job to override the normal rate: raising UPSTREAM_PACE_MS
+// slows live traffic and does not hand the faster rate to background work, and
+// lowering it does not slow the job down.
+//
+// A zero or negative value would mean no pacing at all, since the pacers treat a
+// non-positive interval as "do not wait", so it falls back to the default rather
+// than silently removing the ceiling.
+func (c Config) UpstreamJobInterval() time.Duration {
+	if c.UpstreamJobPaceMS <= 0 {
+		return time.Duration(defaultUpstreamJobPaceMS) * time.Millisecond
+	}
+	return time.Duration(c.UpstreamJobPaceMS) * time.Millisecond
+}
+
+// UpstreamLyricsJobInterval is how far apart the lyrics backfill asks one
+// provider.
+//
+// The lyrics job is slower than the metadata job because it spends its budget
+// differently, not because a lyrics answer matters less. It asks every configured
+// provider about every song, so one song costs five or six requests rather than the
+// metadata job's two, and a full library pass multiplies that by every track in
+// it. One number for both jobs would have to be either too slow for a metadata
+// lookup that touches two upstreams or too fast for a lyrics pass that touches
+// them all, so each job gets its own rate and each rate is put on the shared lease
+// for the upstreams that job actually asks.
+//
+// Everything else about the two jobs is identical, and none of it is restated
+// here: the job only reaches an upstream while the server is idle, and a live
+// request is never delayed by a job. A zero or negative value falls back to the
+// default for the same reason it does in UpstreamJobInterval: the pacers read a
+// non-positive interval as "do not wait".
+func (c Config) UpstreamLyricsJobInterval() time.Duration {
+	if c.UpstreamLyricsJobPaceMS <= 0 {
+		return time.Duration(defaultLyricsJobPaceMS) * time.Millisecond
+	}
+	return time.Duration(c.UpstreamLyricsJobPaceMS) * time.Millisecond
+}
 
 // Config contains the settings needed to start the server.
 type Config struct {
@@ -162,10 +233,6 @@ type Config struct {
 	LyricsPlusMirrors         []string
 	LyricsPlusUserAgent       string
 	LyricsPlusTimeoutMS       int
-	ZemerEnabled              bool
-	ZemerBaseURL              string
-	ZemerUserAgent            string
-	ZemerTimeoutMS            int
 	YouTubeLyricsEnabled      bool
 	YouTubeSubtitleEnabled    bool
 	YouTubeBaseURL            string
@@ -184,14 +251,17 @@ type Config struct {
 	CoverTimeoutMS       int
 	CoverUserAgent       string
 
-	JobIdleGapMS        int
-	PrefetchEnabled     bool
-	PrefetchPerMin      int
-	PrefetchConcurrency int
-	PrefetchQueueSize   int
-	PrefetchLyrics      bool
-	PrefetchAlbumCover  bool
-	PrefetchArtistCover bool
+	JobIdleGapMS            int
+	UpstreamPaceMS          int
+	UpstreamJobPaceMS       int
+	UpstreamLyricsJobPaceMS int
+	PrefetchEnabled         bool
+	PrefetchPerMin          int
+	PrefetchConcurrency     int
+	PrefetchQueueSize       int
+	PrefetchLyrics          bool
+	PrefetchAlbumCover      bool
+	PrefetchArtistCover     bool
 
 	EnrichEnabled     bool
 	EnrichPerMin      int
@@ -269,10 +339,6 @@ func Load() Config {
 		LyricsPlusMirrors:         splitEnv("LYRICSPLUS_MIRRORS"),
 		LyricsPlusUserAgent:       valueOrDefault("LYRICSPLUS_USER_AGENT", defaultMetadataUserAgent()),
 		LyricsPlusTimeoutMS:       intOrDefault("LYRICSPLUS_TIMEOUT_MS", defaultLyricsPlusTimeoutMS),
-		ZemerEnabled:              boolOrDefault("ZEMER_ENABLED", defaultZemerEnabled),
-		ZemerBaseURL:              valueOrDefault("ZEMER_BASE_URL", defaultZemerBaseURL),
-		ZemerUserAgent:            valueOrDefault("ZEMER_USER_AGENT", defaultMetadataUserAgent()),
-		ZemerTimeoutMS:            intOrDefault("ZEMER_TIMEOUT_MS", defaultZemerTimeoutMS),
 		YouTubeLyricsEnabled:      boolOrDefault("YOUTUBE_LYRICS_ENABLED", defaultYouTubeLyricsEnabled),
 		YouTubeSubtitleEnabled:    boolOrDefault("YOUTUBE_SUBTITLE_ENABLED", defaultYouTubeSubtitleEnabled),
 		YouTubeBaseURL:            valueOrDefault("YOUTUBE_BASE_URL", defaultYouTubeBaseURL),
@@ -291,14 +357,17 @@ func Load() Config {
 		CoverTimeoutMS:       intOrDefault("COVER_TIMEOUT_MS", defaultCoverTimeoutMS),
 		CoverUserAgent:       valueOrDefault("COVER_USER_AGENT", defaultCoverUserAgent()),
 
-		JobIdleGapMS:        intOrDefault("JOB_IDLE_GAP_MS", defaultJobIdleGapMS),
-		PrefetchEnabled:     boolOrDefault("PREFETCH_ENABLED", defaultPrefetchEnabled),
-		PrefetchPerMin:      intOrDefault("PREFETCH_PER_MIN", defaultPrefetchPerMin),
-		PrefetchConcurrency: intOrDefault("PREFETCH_CONCURRENCY", defaultPrefetchConcurrency),
-		PrefetchQueueSize:   intOrDefault("PREFETCH_QUEUE_SIZE", defaultPrefetchQueueSize),
-		PrefetchLyrics:      boolOrDefault("PREFETCH_LYRICS", defaultPrefetchLyrics),
-		PrefetchAlbumCover:  boolOrDefault("PREFETCH_ALBUM_COVER", defaultPrefetchAlbumCover),
-		PrefetchArtistCover: boolOrDefault("PREFETCH_ARTIST_COVER", defaultPrefetchArtistCover),
+		JobIdleGapMS:            intOrDefault("JOB_IDLE_GAP_MS", defaultJobIdleGapMS),
+		UpstreamPaceMS:          optionalIntOrDefault("UPSTREAM_PACE_MS", defaultUpstreamPaceMS),
+		UpstreamJobPaceMS:       intOrDefault("UPSTREAM_JOB_PACE_MS", defaultUpstreamJobPaceMS),
+		UpstreamLyricsJobPaceMS: intOrDefault("UPSTREAM_LYRICS_JOB_PACE_MS", defaultLyricsJobPaceMS),
+		PrefetchEnabled:         boolOrDefault("PREFETCH_ENABLED", defaultPrefetchEnabled),
+		PrefetchPerMin:          intOrDefault("PREFETCH_PER_MIN", defaultPrefetchPerMin),
+		PrefetchConcurrency:     intOrDefault("PREFETCH_CONCURRENCY", defaultPrefetchConcurrency),
+		PrefetchQueueSize:       intOrDefault("PREFETCH_QUEUE_SIZE", defaultPrefetchQueueSize),
+		PrefetchLyrics:          boolOrDefault("PREFETCH_LYRICS", defaultPrefetchLyrics),
+		PrefetchAlbumCover:      boolOrDefault("PREFETCH_ALBUM_COVER", defaultPrefetchAlbumCover),
+		PrefetchArtistCover:     boolOrDefault("PREFETCH_ARTIST_COVER", defaultPrefetchArtistCover),
 
 		EnrichEnabled:     boolOrDefault("ENRICH_ENABLED", defaultEnrichEnabled),
 		EnrichPerMin:      intOrDefault("ENRICH_PER_MIN", defaultEnrichPerMin),
@@ -380,7 +449,7 @@ func (c Config) Validate() error {
 	if c.LRCLIBTimeoutMS < 1 || c.RichLyricsTimeoutMS < 1 || c.AppleMusicTimeoutMS < 1 || c.MusixmatchTimeoutMS < 1 || c.MetadataTimeoutMS < 1 || c.CoverTimeoutMS < 1 {
 		return fmt.Errorf("upstream timeouts must be positive")
 	}
-	if c.BetterLyricsTimeoutMS < 1 || c.KugouTimeoutMS < 1 || c.PaxsenixTimeoutMS < 1 || c.LyricsPlusTimeoutMS < 1 || c.ZemerTimeoutMS < 1 || c.YouTubeTimeoutMS < 1 {
+	if c.BetterLyricsTimeoutMS < 1 || c.KugouTimeoutMS < 1 || c.PaxsenixTimeoutMS < 1 || c.LyricsPlusTimeoutMS < 1 || c.YouTubeTimeoutMS < 1 {
 		return fmt.Errorf("lyrics provider timeouts must be positive")
 	}
 	if c.JobIdleGapMS < 0 {
@@ -412,7 +481,6 @@ func (c Config) Validate() error {
 		"KUGOU_USER_AGENT":        c.KugouUserAgent,
 		"PAXSENIX_USER_AGENT":     c.PaxsenixUserAgent,
 		"LYRICSPLUS_USER_AGENT":   c.LyricsPlusUserAgent,
-		"ZEMER_USER_AGENT":        c.ZemerUserAgent,
 		"YOUTUBE_USER_AGENT":      c.YouTubeUserAgent,
 	} {
 		if strings.TrimSpace(value) == "" {
@@ -422,7 +490,7 @@ func (c Config) Validate() error {
 	if strings.TrimSpace(c.RichLyricsUserAgent) == "" {
 		return fmt.Errorf("RICH_LYRICS_USER_AGENT must not be empty")
 	}
-	for name, value := range map[string]string{"LRCLIB_BASE_URL": c.LRCLIBBaseURL, "RICH_LYRICS_BASE_URL": c.RichLyricsBaseURL, "APPLE_MUSIC_CATALOG_BASE_URL": c.AppleMusicCatalogBaseURL, "APPLE_MUSIC_LYRICS_BASE_URL": c.AppleMusicLyricsBaseURL, "MUSIXMATCH_BASE_URL": c.MusixmatchBaseURL, "ITUNES_BASE_URL": c.ITunesBaseURL, "DEEZER_BASE_URL": c.DeezerBaseURL, "LASTFM_BASE_URL": c.LastfmBaseURL, "BETTERLYRICS_BASE_URL": c.BetterLyricsBaseURL, "KUGOU_SEARCH_BASE_URL": c.KugouSearchBaseURL, "KUGOU_LYRICS_BASE_URL": c.KugouLyricsBaseURL, "PAXSENIX_PROXY_BASE_URL": c.PaxsenixProxyBaseURL, "PAXSENIX_APPLE_BASE_URL": c.PaxsenixAppleBaseURL, "LYRICSPLUS_API_BASE_URL": c.LyricsPlusAPIBaseURL, "ZEMER_BASE_URL": c.ZemerBaseURL, "YOUTUBE_BASE_URL": c.YouTubeBaseURL} {
+	for name, value := range map[string]string{"LRCLIB_BASE_URL": c.LRCLIBBaseURL, "RICH_LYRICS_BASE_URL": c.RichLyricsBaseURL, "APPLE_MUSIC_CATALOG_BASE_URL": c.AppleMusicCatalogBaseURL, "APPLE_MUSIC_LYRICS_BASE_URL": c.AppleMusicLyricsBaseURL, "MUSIXMATCH_BASE_URL": c.MusixmatchBaseURL, "ITUNES_BASE_URL": c.ITunesBaseURL, "DEEZER_BASE_URL": c.DeezerBaseURL, "LASTFM_BASE_URL": c.LastfmBaseURL, "BETTERLYRICS_BASE_URL": c.BetterLyricsBaseURL, "KUGOU_SEARCH_BASE_URL": c.KugouSearchBaseURL, "KUGOU_LYRICS_BASE_URL": c.KugouLyricsBaseURL, "PAXSENIX_PROXY_BASE_URL": c.PaxsenixProxyBaseURL, "PAXSENIX_APPLE_BASE_URL": c.PaxsenixAppleBaseURL, "LYRICSPLUS_API_BASE_URL": c.LyricsPlusAPIBaseURL, "YOUTUBE_BASE_URL": c.YouTubeBaseURL} {
 		baseURL, err := url.Parse(strings.TrimSpace(value))
 		if err != nil || (baseURL.Scheme != "http" && baseURL.Scheme != "https") || baseURL.Host == "" {
 			return fmt.Errorf("%s must be an http or https URL", name)
@@ -480,7 +548,7 @@ func validateEnvironment() error {
 	if err := validateIntEnv("DB_CACHE_SIZE_KB"); err != nil {
 		return err
 	}
-	for _, name := range []string{"DB_MAX_OPEN_CONNS", "RATE_LIMIT_PER_SEC", "RATE_LIMIT_PER_MIN", "FALLBACK_PER_MIN", "FALLBACK_MAX_QUEUE", "FALLBACK_QUEUE_WAIT_MS", "COVER_REFRESH_AFTER_DAYS", "COVER_REFRESH_MAX_ROWS", "COVER_REFRESH_MAX_RECHECK", "LRCLIB_TIMEOUT_MS", "RICH_LYRICS_TIMEOUT_MS", "APPLE_MUSIC_TIMEOUT_MS", "MUSIXMATCH_TIMEOUT_MS", "METADATA_TIMEOUT_MS", "COVER_TIMEOUT_MS", "PREFETCH_PER_MIN", "PREFETCH_CONCURRENCY", "PREFETCH_QUEUE_SIZE", "ENRICH_PER_MIN", "ENRICH_CONCURRENCY", "ENRICH_QUEUE_SIZE", "BETTERLYRICS_TIMEOUT_MS", "KUGOU_TIMEOUT_MS", "PAXSENIX_TIMEOUT_MS", "LYRICSPLUS_TIMEOUT_MS", "ZEMER_TIMEOUT_MS", "YOUTUBE_TIMEOUT_MS"} {
+	for _, name := range []string{"DB_MAX_OPEN_CONNS", "RATE_LIMIT_PER_SEC", "RATE_LIMIT_PER_MIN", "FALLBACK_PER_MIN", "FALLBACK_MAX_QUEUE", "FALLBACK_QUEUE_WAIT_MS", "COVER_REFRESH_AFTER_DAYS", "COVER_REFRESH_MAX_ROWS", "COVER_REFRESH_MAX_RECHECK", "LRCLIB_TIMEOUT_MS", "RICH_LYRICS_TIMEOUT_MS", "APPLE_MUSIC_TIMEOUT_MS", "MUSIXMATCH_TIMEOUT_MS", "METADATA_TIMEOUT_MS", "COVER_TIMEOUT_MS", "PREFETCH_PER_MIN", "PREFETCH_CONCURRENCY", "PREFETCH_QUEUE_SIZE", "ENRICH_PER_MIN", "ENRICH_CONCURRENCY", "ENRICH_QUEUE_SIZE", "BETTERLYRICS_TIMEOUT_MS", "KUGOU_TIMEOUT_MS", "PAXSENIX_TIMEOUT_MS", "LYRICSPLUS_TIMEOUT_MS", "YOUTUBE_TIMEOUT_MS"} {
 		if err := validatePositiveIntEnv(name); err != nil {
 			return err
 		}
@@ -494,7 +562,7 @@ func validateEnvironment() error {
 			return fmt.Errorf("REQUEST_LOG_RETENTION_DAYS must be an integer >= -1 (-1 means keep forever)")
 		}
 	}
-	for _, name := range []string{"TRUST_PROXY", "LRCLIB_FALLBACK_ENABLED", "RICH_LYRICS_ENABLED", "APPLE_MUSIC_ENABLED", "MUSIXMATCH_ENABLED", "METADATA_FALLBACK_ENABLED", "COVER_FALLBACK_ENABLED", "COVER_REFRESH_ENABLED", "REQUEST_LOG_ENABLED", "REQUEST_LOG_UA_OPTIMIZE", "REQUEST_LOG_UA_SAVE_UNKNOWN", "REQUESTS_TODAY_ENABLED", "PREFETCH_ENABLED", "PREFETCH_LYRICS", "PREFETCH_ALBUM_COVER", "PREFETCH_ARTIST_COVER", "ENRICH_ENABLED", "BETTERLYRICS_ENABLED", "KUGOU_ENABLED", "PAXSENIX_ENABLED", "LYRICSPLUS_ENABLED", "ZEMER_ENABLED", "YOUTUBE_LYRICS_ENABLED", "YOUTUBE_SUBTITLE_ENABLED"} {
+	for _, name := range []string{"TRUST_PROXY", "LRCLIB_FALLBACK_ENABLED", "RICH_LYRICS_ENABLED", "APPLE_MUSIC_ENABLED", "MUSIXMATCH_ENABLED", "METADATA_FALLBACK_ENABLED", "COVER_FALLBACK_ENABLED", "COVER_REFRESH_ENABLED", "REQUEST_LOG_ENABLED", "REQUEST_LOG_UA_OPTIMIZE", "REQUEST_LOG_UA_SAVE_UNKNOWN", "REQUESTS_TODAY_ENABLED", "PREFETCH_ENABLED", "PREFETCH_LYRICS", "PREFETCH_ALBUM_COVER", "PREFETCH_ARTIST_COVER", "ENRICH_ENABLED", "BETTERLYRICS_ENABLED", "KUGOU_ENABLED", "PAXSENIX_ENABLED", "LYRICSPLUS_ENABLED", "YOUTUBE_LYRICS_ENABLED", "YOUTUBE_SUBTITLE_ENABLED"} {
 		if value := strings.TrimSpace(os.Getenv(name)); value != "" {
 			if _, err := strconv.ParseBool(value); err != nil {
 				return fmt.Errorf("%s must be a boolean", name)
@@ -560,6 +628,23 @@ func int64OrDefault(name string, fallback int64) int64 {
 
 func intOrDefault(name string, fallback int) int {
 	value := os.Getenv(name)
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed < 1 {
+		return fallback
+	}
+	return parsed
+}
+
+// optionalIntOrDefault reads an int env value that is allowed to be absent, where
+// absent is a real setting rather than a missing one: zero means "not set" and the
+// caller decides what to do instead. An unparseable or non-positive value is
+// treated as absent, so a typo cannot turn a pacing override into a negative
+// interval, which the pacers would read as "do not wait at all".
+func optionalIntOrDefault(name string, fallback int) int {
+	value := strings.TrimSpace(os.Getenv(name))
 	if value == "" {
 		return fallback
 	}

@@ -15,6 +15,7 @@ import (
 	"github.com/sillygru/music-utils/internal/db"
 	"github.com/sillygru/music-utils/internal/names"
 	"github.com/sillygru/music-utils/internal/pacer"
+	"github.com/sillygru/music-utils/internal/upstream"
 )
 
 type deezerAlbum struct {
@@ -123,18 +124,21 @@ func (c *Deezer) Lookup(ctx context.Context, input Input) (*db.Track, error) {
 	return trackFromDeezer(candidate, input), nil
 }
 
+// deezerQuery builds the search terms for a Deezer lookup.
+//
+// Deezer's /search is plain full-text, not the field-qualified grammar of
+// Last.fm or MusicBrainz. It tolerates track:"..." but silently returns an
+// empty set for artist:"...", which is why this is bare terms. bestDeezer
+// already rejects candidates whose title or artist do not match.
 func deezerQuery(input Input) string {
-	var parts []string
+	var terms []string
 	if track := strings.TrimSpace(input.TrackName); track != "" {
-		parts = append(parts, `track:"`+strings.ReplaceAll(track, `"`, `\"`)+`"`)
+		terms = append(terms, track)
 	}
 	if artist := strings.TrimSpace(input.ArtistName); artist != "" {
-		parts = append(parts, `artist:"`+strings.ReplaceAll(artist, `"`, `\"`)+`"`)
+		terms = append(terms, artist)
 	}
-	if len(parts) == 0 {
-		return ""
-	}
-	return strings.Join(parts, " ")
+	return strings.Join(terms, " ")
 }
 
 func (c *Deezer) do(ctx context.Context, endpoint string, value any) error {
@@ -152,11 +156,8 @@ func (c *Deezer) do(ctx context.Context, endpoint string, value any) error {
 		return fmt.Errorf("request Deezer: %w", err)
 	}
 	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		if isRateLimitStatus(response.StatusCode) {
-			return newRateLimitError(c.Name(), response)
-		}
-		return fmt.Errorf("Deezer returned HTTP %d", response.StatusCode)
+	if err := upstream.CheckStatus(c.Name(), response); err != nil {
+		return err
 	}
 	if err := json.NewDecoder(io.LimitReader(response.Body, maxResponseBytes)).Decode(value); err != nil {
 		return fmt.Errorf("decode Deezer response: %w", err)

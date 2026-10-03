@@ -99,6 +99,103 @@ func TestInsertDeduplicatesLyricsContent(t *testing.T) {
 	}
 }
 
+// A track can hold one lyrics row per provider, because a batch run asks all of
+// them. Only the winner is served, so this pins both halves of that: every answer
+// is on disk, and the pointer still addresses the one the job chose.
+func TestStoreLyricsVariantsKeepsEveryProviderAndPointsAtTheWinner(t *testing.T) {
+	metadataDB, lyricsDB := testDatabases(t)
+	ctx := context.Background()
+	track := Track{Name: "Midnight City", ArtistName: "M83", AlbumName: "Hurry Up, We're Dreaming", Duration: 243}
+
+	winner := Lyrics{PlainLyrics: "words", SyncedLyrics: "[00:01.00]timed", Source: "synced"}
+	variants := []Lyrics{
+		{PlainLyrics: "different words", Source: "plain"},
+		{PlainLyrics: "words", SyncedLyrics: "[00:01.00]timed", Source: "identical"},
+	}
+	trackID, lyricsID, err := StoreLyricsVariants(ctx, metadataDB, lyricsDB, track, winner, variants)
+	if err != nil {
+		t.Fatalf("store variants: %v", err)
+	}
+
+	// Three rows are linked, but the third is byte-identical to the winner, so
+	// content-addressing folds it into the winner's row: two rows, three
+	// associations. This is the behaviour that keeps "store everything" from
+	// growing the database by the number of providers.
+	var rowCount, associationCount int
+	if err := lyricsDB.QueryRowContext(ctx, `SELECT count(*) FROM lyrics`).Scan(&rowCount); err != nil {
+		t.Fatalf("count lyrics rows: %v", err)
+	}
+	if err := lyricsDB.QueryRowContext(ctx, `SELECT count(*) FROM lyrics_tracks WHERE track_id = ?`, trackID).Scan(&associationCount); err != nil {
+		t.Fatalf("count associations: %v", err)
+	}
+	if rowCount != 2 || associationCount != 2 {
+		t.Fatalf("got %d lyrics rows and %d associations, want 2 and 2 (the duplicate folds into the winner)", rowCount, associationCount)
+	}
+
+	// The pointer addresses the winner, and only the winner.
+	storedTrack, storedLyrics, err := FindTrackExact(ctx, metadataDB, lyricsDB, track.Name, track.ArtistName, track.AlbumName, track.Duration)
+	if err != nil {
+		t.Fatalf("find track: %v", err)
+	}
+	if storedTrack == nil || storedTrack.LastLyricsID != lyricsID {
+		t.Fatalf("last_lyrics_id = %d, want the winner %d", storedTrack.LastLyricsID, lyricsID)
+	}
+	if storedLyrics == nil || storedLyrics.SyncedLyrics != winner.SyncedLyrics {
+		t.Fatalf("served lyrics = %+v, want the winner's synced text", storedLyrics)
+	}
+	if storedLyrics.Source != "synced" {
+		t.Errorf("served source = %q, want the winning provider's name", storedLyrics.Source)
+	}
+
+	// The alternative that lost is still on disk, still findable, and still says
+	// which provider it came from.
+	var variantID int64
+	if err := lyricsDB.QueryRowContext(ctx, `SELECT id FROM lyrics WHERE track_id = ? AND source = ?`, trackID, "plain").Scan(&variantID); err != nil {
+		t.Fatalf("find the losing variant: %v", err)
+	}
+	loser, err := FindLyricsByID(ctx, lyricsDB, variantID)
+	if err != nil {
+		t.Fatalf("read the losing variant: %v", err)
+	}
+	if loser.PlainLyrics != "different words" || loser.Source != "plain" {
+		t.Errorf("losing variant = %+v, want its own text and provider name intact", loser)
+	}
+}
+
+// A track with several provider answers is still one song, or the stats endpoints
+// and TotalCached inflate by the number of providers asked.
+func TestCountLyricsTracksCountsTracksNotVariants(t *testing.T) {
+	metadataDB, lyricsDB := testDatabases(t)
+	ctx := context.Background()
+
+	trackID, _, err := StoreLyricsVariants(ctx, metadataDB, lyricsDB,
+		Track{Name: "Midnight City", ArtistName: "M83", AlbumName: "Hurry Up, We're Dreaming", Duration: 243},
+		Lyrics{PlainLyrics: "words", SyncedLyrics: "[00:01.00]timed", Source: "synced"},
+		[]Lyrics{
+			{PlainLyrics: "different words", Source: "plain"},
+			{Instrumental: false, PlainLyrics: "more words", Source: "second"},
+		})
+	if err != nil {
+		t.Fatalf("store variants: %v", err)
+	}
+
+	var associationCount int
+	if err := lyricsDB.QueryRowContext(ctx, `SELECT count(*) FROM lyrics_tracks WHERE track_id = ?`, trackID).Scan(&associationCount); err != nil {
+		t.Fatalf("count associations: %v", err)
+	}
+	if associationCount != 3 {
+		t.Fatalf("expected 3 stored associations to exercise the collapse, got %d", associationCount)
+	}
+
+	count, err := CountLyricsTracks(ctx, lyricsDB)
+	if err != nil {
+		t.Fatalf("count lyrics tracks: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("CountLyricsTracks = %d, want 1 song", count)
+	}
+}
+
 func TestSearchTracksUsesFTS(t *testing.T) {
 	metadataDB, lyricsDB := testDatabases(t)
 	ctx := context.Background()

@@ -13,11 +13,21 @@ import (
 
 	"github.com/sillygru/music-utils/internal/names"
 	"github.com/sillygru/music-utils/internal/pacer"
+	"github.com/sillygru/music-utils/internal/upstream"
 )
 
 var ErrNotFound = errors.New("apple music lyrics not found")
 
 const maxResponseBytes = 8 << 20
+
+// RequestInterval is how far apart two Apple Music requests are spaced when the
+// caller does not supply its own pacer.
+//
+// It is exported because the server has to state the same rate when it applies
+// UPSTREAM_PACE_MS to this client. Apple Music sits on no shared lease, because the
+// lyrics backfill never asks it for lyrics, so the number the client paces itself
+// at and the number the server hands it have to come from the same place.
+const RequestInterval = 500 * time.Millisecond
 
 type Result struct {
 	Content  string
@@ -33,10 +43,18 @@ type Client struct {
 	userAgent      string
 	mediaTokens    []string
 	http           *http.Client
-	pace           *pacer.Pacer
+	pace           pacer.Waiter
 }
 
 func New(catalogBaseURL, lyricsBaseURL, storefront, userAgent string, mediaTokens []string, timeout time.Duration) (*Client, error) {
+	return NewWithPacer(catalogBaseURL, lyricsBaseURL, storefront, userAgent, mediaTokens, timeout, nil)
+}
+
+// NewWithPacer creates a client that spaces its requests using pace, falling
+// back to the provider's own interval when pace is nil. A batch job passes a
+// pacer shared with the live server so a backfill yields to real traffic
+// instead of competing with it for the same upstream budget.
+func NewWithPacer(catalogBaseURL, lyricsBaseURL, storefront, userAgent string, mediaTokens []string, timeout time.Duration, pace pacer.Waiter) (*Client, error) {
 	catalogBaseURL = strings.TrimRight(strings.TrimSpace(catalogBaseURL), "/")
 	lyricsBaseURL = strings.TrimRight(strings.TrimSpace(lyricsBaseURL), "/")
 	for _, raw := range []string{catalogBaseURL, lyricsBaseURL} {
@@ -58,7 +76,7 @@ func New(catalogBaseURL, lyricsBaseURL, storefront, userAgent string, mediaToken
 		userAgent:      userAgent,
 		mediaTokens:    cleanTokens(mediaTokens),
 		http:           &http.Client{Timeout: timeout},
-		pace:           pacer.New(500 * time.Millisecond),
+		pace:           pacer.OrDefault(pace, RequestInterval),
 	}, nil
 }
 
@@ -138,8 +156,8 @@ func (c *Client) doJSON(ctx context.Context, endpoint string, target any) error 
 	if response.StatusCode == http.StatusNotFound {
 		return ErrNotFound
 	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return fmt.Errorf("Apple Music returned HTTP %d", response.StatusCode)
+	if err := upstream.CheckStatus("Apple Music", response); err != nil {
+		return err
 	}
 	if err := json.NewDecoder(io.LimitReader(response.Body, maxResponseBytes)).Decode(target); err != nil {
 		return fmt.Errorf("decode Apple Music response: %w", err)

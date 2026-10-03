@@ -13,6 +13,7 @@ import (
 
 	"github.com/sillygru/music-utils/internal/names"
 	"github.com/sillygru/music-utils/internal/pacer"
+	"github.com/sillygru/music-utils/internal/upstream"
 )
 
 var ErrNotFound = errors.New("lrclib track not found")
@@ -20,11 +21,24 @@ var ErrNotFound = errors.New("lrclib track not found")
 const (
 	maxResponseBytes = 2 << 20
 	maxIdleConns     = 100
-	// requestInterval paces LRCLIB to five requests per second process-wide.
-	// LRCLIB is community-run with no documented quota; a gentle shared rate
-	// keeps the server's IP welcome regardless of client traffic.
-	requestInterval = time.Second / 5
 )
+
+// RequestInterval is how far apart two LRCLIB requests are spaced when the
+// caller does not supply its own pacer.
+//
+// It is exported because the server has to state the same rate when it puts this
+// client on the shared upstream lease. A lease configured with a different number
+// would pace one process at LRCLIB's rate and the other at something else, which
+// is the doubling the shared lease exists to prevent.
+const RequestInterval = time.Second / 5
+
+// LeaseName is the upstream's name on the shared pacing lease.
+//
+// It is exported because two processes have to agree on it for a shared lease to
+// be shared at all: the lyrics backfill claims this name while it works, and the
+// server claims it on every live request. Spelling it in one place is what keeps a
+// rename from silently turning a shared budget into two private ones.
+const LeaseName = "lrclib"
 
 // RemoteResult is the response shape returned by LRCLIB search and exact
 // lookup. ID and Name are populated by search; exact lookup may omit them.
@@ -45,11 +59,19 @@ type Client struct {
 	baseURL   string
 	userAgent string
 	http      *http.Client
-	pace      *pacer.Pacer
+	pace      pacer.Waiter
 }
 
 // New creates a client for baseURL, which should point at LRCLIB's /api path.
 func New(baseURL, userAgent string, timeout time.Duration) (*Client, error) {
+	return NewWithPacer(baseURL, userAgent, timeout, nil)
+}
+
+// NewWithPacer creates a client that spaces its requests using pace, falling
+// back to the client's own interval when pace is nil. A batch job passes a
+// pacer shared with the live server so a backfill yields to real traffic
+// instead of competing with it for the same upstream budget.
+func NewWithPacer(baseURL, userAgent string, timeout time.Duration, pace pacer.Waiter) (*Client, error) {
 	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	parsed, err := url.Parse(baseURL)
 	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
@@ -74,7 +96,7 @@ func New(baseURL, userAgent string, timeout time.Duration) (*Client, error) {
 		baseURL:   baseURL,
 		userAgent: userAgent,
 		http:      &http.Client{Timeout: timeout, Transport: transport},
-		pace:      pacer.New(requestInterval),
+		pace:      pacer.OrDefault(pace, RequestInterval),
 	}, nil
 }
 
@@ -266,8 +288,8 @@ func (c *Client) doJSON(ctx context.Context, endpoint string, value any) error {
 	if response.StatusCode == http.StatusNotFound {
 		return ErrNotFound
 	}
-	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return fmt.Errorf("LRCLIB returned HTTP %d", response.StatusCode)
+	if err := upstream.CheckStatus("LRCLIB", response); err != nil {
+		return err
 	}
 	if err := json.NewDecoder(io.LimitReader(response.Body, maxResponseBytes)).Decode(value); err != nil {
 		return fmt.Errorf("decode LRCLIB response: %w", err)

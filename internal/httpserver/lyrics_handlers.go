@@ -126,7 +126,7 @@ func getLyricsHandler(metadataDB, lyricsDB *sql.DB, providers *lyricsProviders, 
 			return
 		}
 		// video_id is an optional hint forwarded only to video-keyed providers
-		// (Zemer, YouTube official lyrics, YouTube subtitles). An invalid value
+		// (YouTube official lyrics, YouTube subtitles). An invalid value
 		// is ignored rather than rejected so older clients keep working.
 		videoID := sanitizeVideoID(query.Get("video_id"))
 
@@ -1054,7 +1054,7 @@ func setRichOnlyResponse(response *lyricsResponse, rich *db.RichLyrics) {
 	if strings.TrimSpace(response.SyncedLyrics) == "" {
 		response.SyncedLyrics = compactRichSyncToLRC(rich)
 	}
-	response.SyncedLyrics = ttml.CleanSyncedLyrics(response.SyncedLyrics)
+	response.SyncedLyrics = normalizeStoredSyncedLyrics(response.SyncedLyrics, rich.Source)
 	if strings.TrimSpace(response.PlainLyrics) == "" {
 		if crs, ok := content.(compactRichSync); ok && len(crs.Lines) > 0 {
 			var b strings.Builder
@@ -1094,7 +1094,7 @@ func toLyricsResponse(track *db.Track, lyrics *db.Lyrics) lyricsResponse {
 	if lyrics != nil {
 		response.Instrumental = lyrics.Instrumental
 		response.PlainLyrics = lyrics.PlainLyrics
-		response.SyncedLyrics = ttml.CleanSyncedLyrics(lyrics.SyncedLyrics)
+		response.SyncedLyrics = normalizeStoredSyncedLyrics(lyrics.SyncedLyrics, lyrics.Source)
 		if response.PlainLyrics == "" && response.SyncedLyrics != "" {
 			response.PlainLyrics = ttml.ExtractPlainFromLRC(response.SyncedLyrics)
 		}

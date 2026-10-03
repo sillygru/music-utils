@@ -23,9 +23,18 @@ type Track struct {
 	MetadataSource            string
 	CoverURLSource            string
 	MetadataChecked           bool
-	CoverURLChecked           bool
-	LastLyricsID              int64
-	Source                    string
+	// LyricsChecked records that a lyrics provider gave a definitive answer for
+	// the track, whether that answer was lyrics or a confirmed miss. It is the
+	// lyrics counterpart of MetadataChecked and is driven the same way: set on a
+	// real result, left alone by a write that carries no upstream answer.
+	//
+	// It is not read back from the database, because nothing needs to know an
+	// individual track's settle state; the jobs select whole sets of them. It
+	// exists to be written and to be counted.
+	LyricsChecked   bool
+	CoverURLChecked bool
+	LastLyricsID    int64
+	Source          string
 }
 
 // CoverEntity distinguishes album art from artist art in the cover_urls table.
@@ -73,11 +82,11 @@ type Lyrics struct {
 
 // RichLyrics is a cached source-native word or syllable synchronized payload.
 type RichLyrics struct {
-	ID        int64
-	TrackID   int64
-	Content   string
-	Format    string
-	SyncType  string
-	Source    string
-	Hash      string
+	ID       int64
+	TrackID  int64
+	Content  string
+	Format   string
+	SyncType string
+	Source   string
+	Hash     string
 }

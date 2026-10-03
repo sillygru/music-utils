@@ -93,13 +93,16 @@ cover_url=CASE WHEN ? <> '' THEN ? ELSE cover_url END, metadata_source=CASE WHEN
 cover_url_source=CASE WHEN ? <> '' THEN ? ELSE cover_url_source END,
 metadata_checked=MAX(metadata_checked, ?), cover_url_checked=MAX(cover_url_checked, ?),
 metadata_checked_at=CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE metadata_checked_at END,
+lyrics_checked=MAX(lyrics_checked, ?),
+lyrics_checked_at=CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE lyrics_checked_at END,
 updated_at=CURRENT_TIMESTAMP, source=? WHERE id=?`,
 				track.Name, track.NameLower, track.ArtistName, track.ArtistNameLower, track.AlbumName, track.AlbumNameLower,
 				track.Duration, track.Duration, track.Genre, track.Genre, track.GenreLower, track.GenreLower, track.Year, track.Year,
 				track.ReleaseDate, track.ReleaseDate, track.ISRC, track.ISRC, track.MusicBrainzReleaseID, track.MusicBrainzReleaseID,
 				track.MusicBrainzReleaseGroupID, track.MusicBrainzReleaseGroupID, track.MusicBrainzArtistID, track.MusicBrainzArtistID,
 				track.CoverURL, track.CoverURL, track.MetadataSource, track.MetadataSource, track.CoverURLSource, track.CoverURLSource,
-				track.MetadataChecked, track.CoverURLChecked, track.MetadataChecked, track.Source, existingID)
+				track.MetadataChecked, track.CoverURLChecked, track.MetadataChecked,
+				track.LyricsChecked, track.LyricsChecked, track.Source, existingID)
 			if err != nil {
 				return 0, fmt.Errorf("update metadata by recording ID: %w", err)
 			}
@@ -113,7 +116,7 @@ updated_at=CURRENT_TIMESTAMP, source=? WHERE id=?`,
 name,name_lower,artist_name,artist_name_lower,album_name,album_name_lower,duration,
 genre,genre_lower,year,release_date,isrc,musicbrainz_recording_id,musicbrainz_release_id,
 musicbrainz_release_group_id,musicbrainz_artist_id,cover_url,metadata_source,cover_url_source,
-metadata_checked,metadata_checked_at,cover_url_checked,source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE NULL END,?,?)
+metadata_checked,metadata_checked_at,lyrics_checked,lyrics_checked_at,cover_url_checked,source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE NULL END,?,CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE NULL END,?,?)
 ON CONFLICT(name_lower,artist_name_lower,album_name_lower,duration) DO UPDATE SET
 name=excluded.name, artist_name=excluded.artist_name, album_name=excluded.album_name,
 genre=CASE WHEN excluded.genre<>'' THEN excluded.genre ELSE tracks.genre END,
@@ -130,19 +133,68 @@ metadata_source=CASE WHEN excluded.metadata_source<>'' THEN excluded.metadata_so
 cover_url_source=CASE WHEN excluded.cover_url_source<>'' THEN excluded.cover_url_source ELSE tracks.cover_url_source END,
 metadata_checked=MAX(tracks.metadata_checked,excluded.metadata_checked), cover_url_checked=MAX(tracks.cover_url_checked,excluded.cover_url_checked),
 metadata_checked_at=CASE WHEN excluded.metadata_checked THEN CURRENT_TIMESTAMP ELSE tracks.metadata_checked_at END,
+lyrics_checked=MAX(tracks.lyrics_checked,excluded.lyrics_checked),
+lyrics_checked_at=CASE WHEN excluded.lyrics_checked THEN CURRENT_TIMESTAMP ELSE tracks.lyrics_checked_at END,
 updated_at=CURRENT_TIMESTAMP, source=excluded.source RETURNING id`
 	args := []any{track.Name, track.NameLower, track.ArtistName, track.ArtistNameLower, track.AlbumName, track.AlbumNameLower, track.Duration,
 		nullableText(track.Genre), nullableText(track.GenreLower), track.Year, nullableText(track.ReleaseDate), nullableText(track.ISRC),
 		nullableText(track.MusicBrainzRecordingID), nullableText(track.MusicBrainzReleaseID), nullableText(track.MusicBrainzReleaseGroupID), nullableText(track.MusicBrainzArtistID),
-		nullableText(track.CoverURL), nullableText(track.MetadataSource), nullableText(track.CoverURLSource), track.MetadataChecked, track.MetadataChecked, track.CoverURLChecked, track.Source}
+		nullableText(track.CoverURL), nullableText(track.MetadataSource), nullableText(track.CoverURLSource), track.MetadataChecked, track.MetadataChecked, track.LyricsChecked, track.LyricsChecked, track.CoverURLChecked, track.Source}
 	if err := database.QueryRowContext(ctx, statement, args...).Scan(&track.ID); err != nil {
 		return 0, fmt.Errorf("upsert metadata: %w", err)
 	}
 	return track.ID, nil
 }
 
+// prepareLyricsRow fills in the values a lyrics row can be stored with but the
+// caller may not have computed: the content hash, and the two availability flags
+// that the has_* columns are always read as. It is shared by every write path
+// because TrackIDsWithUsableLyrics and the live request path disagree unless the
+// flags and the text stay in step.
+func prepareLyricsRow(lyrics Lyrics) Lyrics {
+	if lyrics.ContentHash == "" {
+		lyrics.ContentHash = contentHash(lyrics.PlainLyrics, lyrics.SyncedLyrics)
+	}
+	lyrics.HasPlain = lyrics.HasPlain || lyrics.PlainLyrics != ""
+	lyrics.HasSynced = lyrics.HasSynced || lyrics.SyncedLyrics != ""
+	return lyrics
+}
+
+// insertLyricsRow stores one lyrics row and its track association inside the
+// caller's transaction, returning the row's id.
+//
+// The lyrics table is content-addressed on content_hash, so a payload already on
+// disk resolves to the existing row rather than a duplicate. That dedup is
+// global, not per provider: two providers returning identical text share one row,
+// and the second INSERT OR IGNORE reports no row, which is why the lookup below
+// exists. It also means lyrics.source records whichever provider wrote first, so
+// source is provenance for a row that can hold more than one answer, not a
+// guarantee that every provider appears in it.
+func insertLyricsRow(ctx context.Context, tx *sql.Tx, trackID int64, lyrics Lyrics) (int64, error) {
+	lyrics = prepareLyricsRow(lyrics)
+	var lyricsID int64
+	err := tx.QueryRowContext(ctx, `INSERT OR IGNORE INTO lyrics (track_id,plain_lyrics,synced_lyrics,has_plain_lyrics,has_synced_lyrics,instrumental,content_hash,source) VALUES (?,?,?,?,?,?,?,?) RETURNING id`, trackID, nullableText(lyrics.PlainLyrics), nullableText(lyrics.SyncedLyrics), lyrics.HasPlain, lyrics.HasSynced, lyrics.Instrumental, lyrics.ContentHash, lyrics.Source).Scan(&lyricsID)
+	if err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			return 0, fmt.Errorf("insert lyrics: %w", err)
+		}
+		if err = tx.QueryRowContext(ctx, `SELECT id FROM lyrics WHERE content_hash=? LIMIT 1`, lyrics.ContentHash).Scan(&lyricsID); err != nil {
+			return 0, fmt.Errorf("select lyrics: %w", err)
+		}
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO lyrics_tracks(track_id,lyrics_id) VALUES(?,?)`, trackID, lyricsID); err != nil {
+		return 0, fmt.Errorf("associate lyrics: %w", err)
+	}
+	return lyricsID, nil
+}
+
 // InsertTrackWithLyrics writes metadata and lyrics to their respective databases.
 // Metadata remains valid if the separate lyrics write fails.
+//
+// A lyrics row in hand is a definitive upstream answer, so the track is stamped
+// lyrics-checked here. That is what lets a later refresh judge the track's age:
+// without it, every track the request path ever served would still read as
+// never-settled and the lyrics backfill would re-fetch the whole library.
 func InsertTrackWithLyrics(ctx context.Context, metadataDB, lyricsDB *sql.DB, track Track, lyrics Lyrics) (trackID, lyricsID int64, err error) {
 	if metadataDB == nil || lyricsDB == nil {
 		return 0, 0, errors.New("metadata and lyrics databases are required")
@@ -150,15 +202,11 @@ func InsertTrackWithLyrics(ctx context.Context, metadataDB, lyricsDB *sql.DB, tr
 	if track.Source == "" {
 		track.Source = "local"
 	}
+	track.LyricsChecked = true
 	normalizeTrack(&track)
 	if lyrics.Source == "" {
 		lyrics.Source = track.Source
 	}
-	if lyrics.ContentHash == "" {
-		lyrics.ContentHash = contentHash(lyrics.PlainLyrics, lyrics.SyncedLyrics)
-	}
-	lyrics.HasPlain = lyrics.HasPlain || lyrics.PlainLyrics != ""
-	lyrics.HasSynced = lyrics.HasSynced || lyrics.SyncedLyrics != ""
 	trackID, err = UpsertTrackMetadata(ctx, metadataDB, track)
 	if err != nil {
 		return 0, 0, err
@@ -172,16 +220,8 @@ func InsertTrackWithLyrics(ctx context.Context, metadataDB, lyricsDB *sql.DB, tr
 			_ = lyricsTx.Rollback()
 		}
 	}()
-	if err = lyricsTx.QueryRowContext(ctx, `INSERT OR IGNORE INTO lyrics (track_id,plain_lyrics,synced_lyrics,has_plain_lyrics,has_synced_lyrics,instrumental,content_hash,source) VALUES (?,?,?,?,?,?,?,?) RETURNING id`, trackID, nullableText(lyrics.PlainLyrics), nullableText(lyrics.SyncedLyrics), lyrics.HasPlain, lyrics.HasSynced, lyrics.Instrumental, lyrics.ContentHash, lyrics.Source).Scan(&lyricsID); err != nil {
-		if !errors.Is(err, sql.ErrNoRows) {
-			return trackID, 0, fmt.Errorf("insert lyrics: %w", err)
-		}
-		if err = lyricsTx.QueryRowContext(ctx, `SELECT id FROM lyrics WHERE content_hash=? LIMIT 1`, lyrics.ContentHash).Scan(&lyricsID); err != nil {
-			return trackID, 0, fmt.Errorf("select lyrics: %w", err)
-		}
-	}
-	if _, err = lyricsTx.ExecContext(ctx, `INSERT OR IGNORE INTO lyrics_tracks(track_id,lyrics_id) VALUES(?,?)`, trackID, lyricsID); err != nil {
-		return trackID, 0, fmt.Errorf("associate lyrics: %w", err)
+	if lyricsID, err = insertLyricsRow(ctx, lyricsTx, trackID, lyrics); err != nil {
+		return trackID, 0, err
 	}
 	if err = lyricsTx.Commit(); err != nil {
 		return trackID, 0, fmt.Errorf("commit lyrics: %w", err)
@@ -190,6 +230,229 @@ func InsertTrackWithLyrics(ctx context.Context, metadataDB, lyricsDB *sql.DB, tr
 		return trackID, lyricsID, fmt.Errorf("link lyrics reference: %w", err)
 	}
 	return trackID, lyricsID, nil
+}
+
+// StoreLyricsVariants stores every provider's answer for one track in a single
+// lyrics transaction, and points the track at exactly one of them.
+//
+// It exists because the batch job asks all providers at once: the schema already
+// allows a track many lyrics rows, but only one of them is served, and
+// InsertTrackWithLyrics moved that pointer on every call. Writing the variants
+// through it in a loop would leave the pointer on whichever provider was written
+// last, which under a concurrent fan-out is not even stable between runs. So the
+// winner is written first, the alternatives in the same transaction, and the
+// pointer is set once at the end.
+//
+// The transaction spans all the rows, so a track is never left with some of its
+// provider answers and not others. It cannot span both databases, because SQLite
+// has no two-database transaction, so the order is still metadata-then-pointer
+// and a crash in between leaves a track with lyrics and no flag, which the next
+// run re-settles.
+func StoreLyricsVariants(ctx context.Context, metadataDB, lyricsDB *sql.DB, track Track, winner Lyrics, variants []Lyrics) (trackID, lyricsID int64, err error) {
+	if metadataDB == nil || lyricsDB == nil {
+		return 0, 0, errors.New("metadata and lyrics databases are required")
+	}
+	if track.Source == "" {
+		track.Source = "local"
+	}
+	track.LyricsChecked = true
+	normalizeTrack(&track)
+	if winner.Source == "" {
+		winner.Source = track.Source
+	}
+	trackID, err = UpsertTrackMetadata(ctx, metadataDB, track)
+	if err != nil {
+		return 0, 0, err
+	}
+	lyricsTx, err := lyricsDB.BeginTx(ctx, nil)
+	if err != nil {
+		return trackID, 0, fmt.Errorf("begin lyrics insert: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = lyricsTx.Rollback()
+		}
+	}()
+	if lyricsID, err = insertLyricsRow(ctx, lyricsTx, trackID, winner); err != nil {
+		return trackID, 0, err
+	}
+	for _, variant := range variants {
+		if _, err = insertLyricsRow(ctx, lyricsTx, trackID, variant); err != nil {
+			return trackID, 0, err
+		}
+	}
+	if err = lyricsTx.Commit(); err != nil {
+		return trackID, 0, fmt.Errorf("commit lyrics: %w", err)
+	}
+	if _, err = metadataDB.ExecContext(ctx, `UPDATE tracks SET last_lyrics_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`, lyricsID, trackID); err != nil {
+		return trackID, lyricsID, fmt.Errorf("link lyrics reference: %w", err)
+	}
+	return trackID, lyricsID, nil
+}
+
+// StoreLyricsAnswer stores one provider's answer for a track and links the row to
+// it, returning the row's id.
+//
+// It deliberately moves neither the served pointer nor the settle flag, because a
+// batch run now asks one provider at a time and a song is not answered until all
+// of them have replied. Both of those decisions belong to PointTrackAtBestLyrics,
+// which can compare this answer against the ones already on disk rather than
+// against a fan-out that no longer exists.
+//
+// The track row is not upserted: the caller works from an existing row whose
+// identity is already correct, so re-writing the lowercased keys here could only
+// risk re-keying it. Unlike InsertTrackWithLyrics this also cannot be the path
+// that creates a track, which is right because only the request path does that.
+func StoreLyricsAnswer(ctx context.Context, lyricsDB *sql.DB, trackID int64, lyrics Lyrics) (int64, error) {
+	if lyricsDB == nil {
+		return 0, errors.New("lyrics database is nil")
+	}
+	if trackID <= 0 {
+		return 0, errors.New("track is required")
+	}
+	tx, err := lyricsDB.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("begin lyrics insert: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	lyricsID, err := insertLyricsRow(ctx, tx, trackID, lyrics)
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit lyrics: %w", err)
+	}
+	return lyricsID, nil
+}
+
+// lyricsQualityTier ranks a stored row for the purpose of choosing which one a
+// track should serve.
+//
+// It is the same tiering the live fan-out and the batch job apply in memory, read
+// back out of the has_* columns because that is all a stored row keeps. Synced
+// beats plain, and plain and instrumental are one tier: neither carries timing.
+func lyricsQualityTier(hasSynced, hasPlainOrInstrumental bool) int {
+	switch {
+	case hasSynced:
+		return 2
+	case hasPlainOrInstrumental:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// PointTrackAtBestLyrics points a track at the best of the given stored rows,
+// returning the id it now serves, or 0 when the pointer was left alone.
+//
+// The pointer moves only when the track serves nothing or the candidate is a
+// strict improvement. Both halves matter for a run that resumes: an earlier run
+// may already have stored synced lyrics from one provider, and a later one that
+// only draws plain answers from another must not replace them; and an equally good
+// answer must not displace an equally good one either, or every answer in a song
+// would shuffle the pointer as it arrived and a refresh run would keep flipping it.
+//
+// An empty candidate list is not an error. It is how a run reports that the
+// provider it asked had nothing, and the track is left pointing wherever it
+// already pointed, which for a track with no lyrics at all is nowhere.
+func PointTrackAtBestLyrics(ctx context.Context, metadataDB, lyricsDB *sql.DB, trackID int64, candidateIDs []int64) (int64, error) {
+	if metadataDB == nil || lyricsDB == nil {
+		return 0, errors.New("metadata and lyrics databases are required")
+	}
+	if trackID <= 0 {
+		return 0, errors.New("track is required")
+	}
+	best, bestTier, err := bestLyricsCandidate(ctx, lyricsDB, trackID, candidateIDs)
+	if err != nil || best == 0 {
+		return 0, err
+	}
+	current, currentTier, err := pointedLyrics(ctx, metadataDB, lyricsDB, trackID)
+	if err != nil {
+		return 0, err
+	}
+	if current > 0 && currentTier >= bestTier {
+		return 0, nil
+	}
+	if _, err := metadataDB.ExecContext(ctx,
+		`UPDATE tracks SET last_lyrics_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`, best, trackID); err != nil {
+		return 0, fmt.Errorf("link lyrics reference: %w", err)
+	}
+	return best, nil
+}
+
+// bestLyricsCandidate returns the highest-ranked candidate id and its tier.
+//
+// Candidates are read with one query so the comparison is against the rows as
+// they are actually stored, not against what the caller believes it wrote.
+func bestLyricsCandidate(ctx context.Context, lyricsDB *sql.DB, trackID int64, candidateIDs []int64) (int64, int, error) {
+	ids := make([]int64, 0, len(candidateIDs))
+	seen := make(map[int64]bool, len(candidateIDs))
+	for _, id := range candidateIDs {
+		if id <= 0 || seen[id] {
+			continue
+		}
+		seen[id] = true
+		ids = append(ids, id)
+	}
+	if len(ids) == 0 {
+		return 0, 0, nil
+	}
+	placeholders := make([]string, 0, len(ids))
+	args := make([]any, 0, len(ids))
+	for _, id := range ids {
+		placeholders = append(placeholders, "?")
+		args = append(args, id)
+	}
+	rows, err := lyricsDB.QueryContext(ctx,
+		`SELECT id, has_synced_lyrics, (has_plain_lyrics OR instrumental) FROM lyrics WHERE id IN (`+strings.Join(placeholders, ",")+`)`,
+		args...)
+	if err != nil {
+		return 0, 0, fmt.Errorf("read stored lyrics: %w", err)
+	}
+	var best int64
+	bestTier := 0
+	scanErr := func() error {
+		defer rows.Close()
+		for rows.Next() {
+			var id int64
+			var hasSynced, hasPlainOrInstrumental bool
+			if err := rows.Scan(&id, &hasSynced, &hasPlainOrInstrumental); err != nil {
+				return fmt.Errorf("scan stored lyrics: %w", err)
+			}
+			if tier := lyricsQualityTier(hasSynced, hasPlainOrInstrumental); tier > bestTier {
+				best, bestTier = id, tier
+			}
+		}
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("iterate stored lyrics: %w", err)
+		}
+		return nil
+	}()
+	if scanErr != nil {
+		return 0, 0, scanErr
+	}
+	// A candidate that resolves to a row with nothing in it is not worth serving,
+	// so it is treated as absent rather than as a tier-zero improvement.
+	if bestTier == 0 {
+		return 0, 0, nil
+	}
+	// Only rows actually associated with this track may be served for it, so a
+	// caller cannot point one track at another track's lyrics by passing its id.
+	//
+	// The candidate scan above is closed before this runs. A handle opened with
+	// MaxOpenConns of 1 hands its connection back only when the rows are closed, so
+	// querying again with the cursor still open would wait on the connection the
+	// cursor is holding.
+	var linked bool
+	if err := lyricsDB.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM lyrics_tracks WHERE track_id=? AND lyrics_id=?)`, trackID, best).Scan(&linked); err != nil {
+		return 0, 0, fmt.Errorf("check lyrics association: %w", err)
+	}
+	if !linked {
+		return 0, 0, nil
+	}
+	return best, bestTier, nil
 }
 
 // UpsertRichLyrics stores one source-native rich/syllable payload for a track.
@@ -363,6 +626,214 @@ func ListRecentProviderFetches(ctx context.Context, database *sql.DB, trackID in
 		return nil, fmt.Errorf("iterate provider fetches: %w", err)
 	}
 	return recent, nil
+}
+
+// BestStoredLyrics returns the id and tier of the best usable lyrics row linked
+// to a track, or 0 and 0 when the track has none.
+//
+// It searches the track's whole history rather than the rows one run just wrote,
+// because a track's lyrics arrive from more places than a batch job: earlier
+// passes of this one, and the live request path. Settling against the full set is
+// what lets a run that resumed pick up the better answer an earlier run stored.
+//
+// The tie-break is the lowest id, which is the oldest row. It is arbitrary but it
+// is not arrival order, so re-settling the same track twice in a row picks the same
+// answer both times.
+func BestStoredLyrics(ctx context.Context, lyricsDB *sql.DB, trackID int64) (int64, int, error) {
+	if lyricsDB == nil {
+		return 0, 0, errors.New("lyrics database is nil")
+	}
+	if trackID <= 0 {
+		return 0, 0, nil
+	}
+	var id int64
+	var hasSynced, hasPlainOrInstrumental bool
+	err := lyricsDB.QueryRowContext(ctx,
+		`SELECT l.id, l.has_synced_lyrics, (l.has_plain_lyrics OR l.instrumental)
+FROM lyrics_tracks AS lt JOIN lyrics AS l ON l.id = lt.lyrics_id
+WHERE lt.track_id = ?
+AND (l.has_plain_lyrics OR l.has_synced_lyrics OR l.instrumental)
+ORDER BY CASE WHEN l.has_synced_lyrics THEN 2
+              WHEN l.has_plain_lyrics OR l.instrumental THEN 1
+              ELSE 0 END DESC, l.id
+LIMIT 1`, trackID).Scan(&id, &hasSynced, &hasPlainOrInstrumental)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, 0, nil
+	}
+	if err != nil {
+		return 0, 0, fmt.Errorf("read best stored lyrics: %w", err)
+	}
+	return id, lyricsQualityTier(hasSynced, hasPlainOrInstrumental), nil
+}
+
+// SettleTrackLyrics records that a lyrics provider answered for a track and points
+// the track at the best lyrics stored for it, in one metadata transaction.
+//
+// It is the last step of a batch lookup, and it runs only once every provider has
+// given a definitive answer. That is what makes the flag worth having: it says
+// the run checked everywhere rather than that one upstream happened to answer.
+//
+// A track with nothing stored is settled with no pointer. "Every provider says
+// this song has no lyrics" is a real answer and the run needs to record it, or
+// every pass would ask the same question again forever.
+//
+// The pointer moves only when the track serves nothing or the best stored row is
+// a strict improvement, which is the same rule PointTrackAtBestLyrics applies per
+// answer. A song that already serves synced lyrics is not replaced by the plain
+// answer a later run happened to draw, and two equally good answers do not shuffle
+// the pointer back and forth.
+func SettleTrackLyrics(ctx context.Context, metadataDB, lyricsDB *sql.DB, trackID int64) error {
+	if metadataDB == nil || lyricsDB == nil {
+		return errors.New("metadata and lyrics databases are required")
+	}
+	if trackID <= 0 {
+		return errors.New("track is required")
+	}
+	best, bestTier, err := BestStoredLyrics(ctx, lyricsDB, trackID)
+	if err != nil {
+		return err
+	}
+	// The pointer and the row it names live in different files, so the comparison
+	// needs a read outside the transaction below. A handle opened with
+	// MaxOpenConns of 1 hands its connection to that transaction and takes it back
+	// only at commit, so reading here rather than inside is not a style preference:
+	// the other order waits on the connection the transaction is holding.
+	//
+	// It leaves a narrow window in which the request path could move the pointer to
+	// something better in between, and then this write wins a race it should have
+	// lost. The request path sets the pointer unconditionally too, so the two are
+	// already last-writer-wins and neither is relying on the other to be careful.
+	current := int64(0)
+	if best > 0 {
+		var currentTier int
+		current, currentTier, err = pointedLyrics(ctx, metadataDB, lyricsDB, trackID)
+		if err != nil {
+			return err
+		}
+		if current > 0 && currentTier >= bestTier {
+			best = 0
+		}
+	}
+
+	tx, err := metadataDB.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin lyrics settle: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if best > 0 {
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE tracks SET last_lyrics_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`, best, trackID); err != nil {
+			return fmt.Errorf("link lyrics reference: %w", err)
+		}
+	}
+	if err := MarkTrackLyricsChecked(ctx, tx, trackID); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit lyrics settle: %w", err)
+	}
+	return nil
+}
+
+// pointedLyrics reports the id and tier of the row a track already serves, or 0
+// and 0 when it serves nothing.
+//
+// The two halves come from two databases and cannot be joined: the pointer lives
+// in the metadata file and the lyrics rows in the other one. That is why every
+// function needing both takes both handles rather than one connection that could
+// have done it in a single statement.
+func pointedLyrics(ctx context.Context, metadataDB, lyricsDB *sql.DB, trackID int64) (int64, int, error) {
+	// last_lyrics_id is nullable: a track nobody has found lyrics for has no row
+	// to point at, and COALESCE reads that as zero rather than failing the scan.
+	var pointed int64
+	if err := metadataDB.QueryRowContext(ctx,
+		"SELECT COALESCE(last_lyrics_id, 0) FROM tracks WHERE id=?", trackID).Scan(&pointed); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, 0, nil
+		}
+		return 0, 0, fmt.Errorf("read current lyrics pointer: %w", err)
+	}
+	if pointed <= 0 {
+		return 0, 0, nil
+	}
+	tier, err := storedLyricsTier(ctx, lyricsDB, pointed)
+	if err != nil {
+		return 0, 0, err
+	}
+	return pointed, tier, nil
+}
+
+// storedLyricsTier reports the tier of one stored lyrics row, or 0 when the row is
+// gone.
+func storedLyricsTier(ctx context.Context, lyricsDB *sql.DB, lyricsID int64) (int, error) {
+	var hasSynced, hasPlainOrInstrumental bool
+	if err := lyricsDB.QueryRowContext(ctx,
+		"SELECT has_synced_lyrics, (has_plain_lyrics OR instrumental) FROM lyrics WHERE id=?", lyricsID).
+		Scan(&hasSynced, &hasPlainOrInstrumental); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			// A pointer at a row that is gone is treated as serving nothing, so a
+			// settle repairs it rather than leaving the track unserveable.
+			return 0, nil
+		}
+		return 0, fmt.Errorf("read current lyrics row: %w", err)
+	}
+	return lyricsQualityTier(hasSynced, hasPlainOrInstrumental), nil
+}
+
+// ListProviderFetchesForTracks returns, for each of the given tracks, every
+// provider already asked about it and whether that last attempt succeeded.
+//
+// Unlike ListRecentProviderFetches this applies no freshness window. It exists so
+// the lyrics backfill can resume a track a previous run left partway: a track
+// still flagged as unsettled that already has ledger rows is by definition an
+// interrupted run, so its rows describe real work that does not need repeating,
+// however long ago they were written. Each re-ask refreshes last_fetched_at, so
+// the request path's own skip window stays correct.
+func ListProviderFetchesForTracks(ctx context.Context, database *sql.DB, trackIDs []int64) (map[int64]map[string]bool, error) {
+	fetches := make(map[int64]map[string]bool)
+	if database == nil || len(trackIDs) == 0 {
+		return fetches, nil
+	}
+	placeholders := make([]string, 0, len(trackIDs))
+	args := make([]any, 0, len(trackIDs))
+	for _, id := range trackIDs {
+		if id <= 0 {
+			continue
+		}
+		placeholders = append(placeholders, "?")
+		args = append(args, id)
+	}
+	if len(placeholders) == 0 {
+		return fetches, nil
+	}
+	rows, err := database.QueryContext(ctx,
+		`SELECT track_id, provider, last_success FROM lyrics_provider_fetches WHERE track_id IN (`+strings.Join(placeholders, ",")+`)`,
+		args...)
+	if err != nil {
+		return nil, fmt.Errorf("list provider fetches for tracks: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var trackID int64
+		var provider string
+		var success bool
+		if err := rows.Scan(&trackID, &provider, &success); err != nil {
+			return nil, fmt.Errorf("scan provider fetch for track: %w", err)
+		}
+		name := strings.ToLower(strings.TrimSpace(provider))
+		if name == "" {
+			continue
+		}
+		if fetches[trackID] == nil {
+			fetches[trackID] = make(map[string]bool)
+		}
+		fetches[trackID][name] = success
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate provider fetches for tracks: %w", err)
+	}
+	return fetches, nil
 }
 
 func ListRichLyricsSources(ctx context.Context, database *sql.DB, trackID int64) (map[string]struct{}, error) {
@@ -785,8 +1256,13 @@ func CountDistinctTrackNames(ctx context.Context, database *sql.DB) (int64, erro
 // CountLyricsTracks reports how many songs have cached lyrics. Mindful of
 // content deduplication in the lyrics table, this counts the song-to-lyrics
 // associations rather than the deduplicated content rows.
+//
+// Distinct tracks, though: a track can hold several rows at once, because a batch
+// run that asks every provider stores all of their answers and serves the best one
+// (see StoreLyricsVariants). Counting associations would report that as six songs
+// where there is one, so the count is collapsed to the tracks themselves.
 func CountLyricsTracks(ctx context.Context, database *sql.DB) (int64, error) {
-	return countQuery(ctx, database, "SELECT COUNT(*) FROM lyrics_tracks", "count lyrics tracks")
+	return countQuery(ctx, database, "SELECT COUNT(DISTINCT track_id) FROM lyrics_tracks", "count lyrics tracks")
 }
 
 // CountCovers reports how many cached cover entries exist: songs whose metadata

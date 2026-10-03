@@ -105,6 +105,38 @@ func (g *Gate) Wait(ctx context.Context) error {
 	}
 }
 
+// WaitThrottle blocks until any active rate-limit pause has expired, without
+// consuming the steady ceiling.
+//
+// It is the pause half of Wait for a job that issues several requests per unit of
+// work. Waiting once per unit is enough when a unit is one request, but a run that
+// fans a single piece of work out across several providers can sit mid-way
+// through it when the first provider refuses it, and the rest of that work would
+// otherwise go out during the cooldown the refusal just asked for.
+//
+// Counting the pause here rather than in Wait is what keeps the two controls
+// independent: the ceiling still admits one unit per interval, and this only
+// holds a caller back for as long as a provider has actually said it needs.
+func (g *Gate) WaitThrottle(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	g.mu.Lock()
+	wait := time.Until(g.pausedUntil)
+	g.mu.Unlock()
+	if wait <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 // Throttle records an upstream rate-limit rejection. Every worker is held until
 // max(retryAfter, exponential backoff) has elapsed, so the whole job backs off
 // together rather than each lane discovering the limit on its own.

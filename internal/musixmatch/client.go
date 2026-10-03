@@ -14,6 +14,7 @@ import (
 
 	"github.com/sillygru/music-utils/internal/names"
 	"github.com/sillygru/music-utils/internal/pacer"
+	"github.com/sillygru/music-utils/internal/upstream"
 )
 
 var ErrNotFound = errors.New("Musixmatch lyrics not found")
@@ -32,10 +33,18 @@ type Client struct {
 	apiKey    string
 	userAgent string
 	http      *http.Client
-	pace      *pacer.Pacer
+	pace      pacer.Waiter
 }
 
 func New(baseURL, apiKey, userAgent string, timeout time.Duration) (*Client, error) {
+	return NewWithPacer(baseURL, apiKey, userAgent, timeout, nil)
+}
+
+// NewWithPacer creates a client that spaces its requests using pace, falling
+// back to the provider's own interval when pace is nil. A batch job passes a
+// pacer shared with the live server so a backfill yields to real traffic
+// instead of competing with it for the same upstream budget.
+func NewWithPacer(baseURL, apiKey, userAgent string, timeout time.Duration, pace pacer.Waiter) (*Client, error) {
 	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	parsed, err := url.Parse(baseURL)
 	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
@@ -44,8 +53,21 @@ func New(baseURL, apiKey, userAgent string, timeout time.Duration) (*Client, err
 	if strings.TrimSpace(apiKey) == "" || strings.TrimSpace(userAgent) == "" || timeout <= 0 {
 		return nil, fmt.Errorf("Musixmatch API key, user agent, and timeout are required")
 	}
-	return &Client{baseURL: baseURL, apiKey: strings.TrimSpace(apiKey), userAgent: userAgent, http: &http.Client{Timeout: timeout}, pace: pacer.New(200 * time.Millisecond)}, nil
+	return &Client{baseURL: baseURL, apiKey: strings.TrimSpace(apiKey), userAgent: userAgent, http: &http.Client{Timeout: timeout}, pace: pacer.OrDefault(pace, RequestInterval)}, nil
 }
+
+// RequestInterval is how far apart two Musixmatch requests are spaced when the
+// caller does not supply its own pacer. See lrclib.RequestInterval for why it is
+// exported rather than kept private.
+const RequestInterval = 200 * time.Millisecond
+
+// LeaseName is the upstream's name on the shared pacing lease.
+//
+// It is exported because two processes have to agree on it for a shared lease to
+// be shared at all: the lyrics backfill claims this name while it works, and the
+// server claims it on every live request. Spelling it in one place is what keeps a
+// rename from silently turning a shared budget into two private ones.
+const LeaseName = "musixmatch"
 
 func (c *Client) SearchTrack(ctx context.Context, trackName, artistName, albumName string) (*Track, error) {
 	input := names.Normalize(trackName, artistName, albumName)
@@ -119,8 +141,8 @@ func (c *Client) doJSON(ctx context.Context, endpoint string, target any) error 
 	if response.StatusCode == http.StatusNotFound {
 		return ErrNotFound
 	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return fmt.Errorf("Musixmatch returned HTTP %d", response.StatusCode)
+	if err := upstream.CheckStatus("Musixmatch", response); err != nil {
+		return err
 	}
 	if err := json.NewDecoder(io.LimitReader(response.Body, maxResponseBytes)).Decode(target); err != nil {
 		return fmt.Errorf("decode Musixmatch response: %w", err)

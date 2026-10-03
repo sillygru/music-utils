@@ -276,26 +276,6 @@ func runParallelLyricsGet(
 	}
 
 	if videoID != "" {
-		if providers.zemerEnabled && providers.zemer != nil && !skip["zemer"] {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				started := time.Now()
-				remote, err := providers.zemer.Get(ctx, videoID)
-				elapsed := time.Since(started)
-				if err != nil {
-					recordProviderMiss(ctx, lyricsDB, trackIDOf(existingTrack), "zemer", artistName, albumName)
-					return
-				}
-				row := &lrclib.RemoteResult{TrackName: trackName, ArtistName: artistName, AlbumName: albumName, Duration: duration, PlainLyrics: remote.PlainLyrics, SyncedLyrics: remote.SyncedLyrics}
-				trackRow, lyrics, ok := persistProviderLyrics(ctx, metadataDB, lyricsDB, existingTrack, row, trackName, artistName, albumName, duration, "zemer")
-				if ok {
-					recordProviderFetch(ctx, lyricsDB, trackRow.ID, "zemer", true)
-					publish(lyricsLookupResult{track: trackRow, lyrics: lyrics, upstream: elapsed})
-				}
-			}()
-		}
-
 		if providers.tube != nil && providers.tubeLyricsEnabled && !skip["youtube"] {
 			wg.Add(1)
 			go func() {

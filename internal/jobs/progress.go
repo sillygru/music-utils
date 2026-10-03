@@ -6,6 +6,7 @@ package jobs
 import (
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"strings"
 	"sync"
@@ -448,6 +449,19 @@ func humanCount(value int64) string {
 	if value <= 0 {
 		return "?"
 	}
+	return exactCount(value)
+}
+
+// exactCount formats a finished count.
+//
+// It exists because humanCount renders zero as "?", which is the right affordance
+// for a lane that has not started yet but reads as a missing value in a summary
+// line: a run that found nothing would otherwise report "? lyrics fetched" and look
+// like it had lost the count.
+func exactCount(value int64) string {
+	if value < 0 {
+		return "?"
+	}
 	digits := fmt.Sprintf("%d", value)
 	var builder strings.Builder
 	for i, digit := range digits {
@@ -457,6 +471,31 @@ func humanCount(value int64) string {
 		builder.WriteRune(digit)
 	}
 	return builder.String()
+}
+
+// paceText renders a pace interval as the rate a run header claims to be working
+// at, in whichever unit is honest for that interval.
+//
+// A sub-second interval reads best as a whole req/s figure, and rounding up keeps
+// the claim on the safe side of the truth. An interval of a second or more has no
+// whole req/s value at all: a 2s interval is half a request per second, and
+// rounding that to "1 req/s" would state twice the rate the run is actually allowed
+// to use, which is the one thing a rate line must never do. Past a second the
+// interval is therefore stated directly, which stays exact for a value that is not
+// a round number of seconds rather than only for the ones that are.
+func paceText(interval time.Duration) string {
+	switch {
+	case interval <= 0:
+		return "unpaced"
+	case interval == time.Second:
+		return "1 req/s"
+	case interval < time.Second:
+		return fmt.Sprintf("%d req/s", int(math.Ceil(float64(time.Second)/float64(interval))))
+	case interval%time.Second == 0:
+		return fmt.Sprintf("1 req/%ds", int(interval/time.Second))
+	default:
+		return fmt.Sprintf("1 req/%s", interval)
+	}
 }
 
 func truncate(value string, width int) string {

@@ -120,3 +120,39 @@ func TestMirrorWordModeConvertsMillisToSeconds(t *testing.T) {
 		}
 	}
 }
+
+func TestConvertMirrorLinesUnitsAndBounds(t *testing.T) {
+	// The mirror contract is milliseconds, so 44363 is 44.363 seconds and must
+	// render as [00:44.36].
+	millis := func(v float64) float64 { return v * 1000 }
+	lines := []mirrorLine{
+		{Time: millis(0), Text: "first"},
+		{Time: millis(44.363), Text: "second"},
+		{Time: millis(195.954), Text: "third"},
+	}
+	synced, plain := convertMirrorLines(lines, false)
+	want := "[00:00.00]first\n[00:44.36]second\n[03:15.95]third"
+	if synced != want {
+		t.Fatalf("mirror timings wrong:\n got %q\nwant %q", synced, want)
+	}
+	if plain != "first\nsecond\nthird" {
+		t.Fatalf("plain lyrics wrong: %q", plain)
+	}
+
+	// A mirror that reports seconds where milliseconds were expected hands back a
+	// number a thousand times too large. Those lines are dropped rather than
+	// stored as a song with an eighteen-hour first verse, and plain text stays in
+	// step with the synced lines so the two never disagree.
+	bad := []mirrorLine{
+		{Time: millis(0), Text: "kept"},
+		{Time: 66909000, Text: "seconds read as milliseconds"},
+		{Time: millis(4), Text: "also kept"},
+	}
+	synced, plain = convertMirrorLines(bad, false)
+	if synced != "[00:00.00]kept\n[00:04.00]also kept" {
+		t.Fatalf("implausible line was not dropped: %q", synced)
+	}
+	if plain != "kept\nalso kept" {
+		t.Fatalf("plain and synced fell out of step: %q", plain)
+	}
+}

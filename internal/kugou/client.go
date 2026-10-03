@@ -16,6 +16,7 @@ import (
 
 	"github.com/sillygru/music-utils/internal/names"
 	"github.com/sillygru/music-utils/internal/pacer"
+	"github.com/sillygru/music-utils/internal/upstream"
 )
 
 // ErrNotFound reports that KuGou has no lyrics for the track.
@@ -44,13 +45,21 @@ type Client struct {
 	lyricsBaseURL string
 	userAgent     string
 	http          *http.Client
-	pace          *pacer.Pacer
+	pace          pacer.Waiter
 }
 
 // New creates a client. searchBaseURL is the mobileservice host
 // (https://mobileservice.kugou.com), lyricsBaseURL the lyrics host
 // (https://lyrics.kugou.com).
 func New(searchBaseURL, lyricsBaseURL, userAgent string, timeout time.Duration) (*Client, error) {
+	return NewWithPacer(searchBaseURL, lyricsBaseURL, userAgent, timeout, nil)
+}
+
+// NewWithPacer creates a client that spaces its requests using pace, falling
+// back to the provider's own interval when pace is nil. A batch job passes a
+// pacer shared with the live server so a backfill yields to real traffic
+// instead of competing with it for the same upstream budget.
+func NewWithPacer(searchBaseURL, lyricsBaseURL, userAgent string, timeout time.Duration, pace pacer.Waiter) (*Client, error) {
 	searchBaseURL = strings.TrimRight(strings.TrimSpace(searchBaseURL), "/")
 	lyricsBaseURL = strings.TrimRight(strings.TrimSpace(lyricsBaseURL), "/")
 	for _, raw := range []string{searchBaseURL, lyricsBaseURL} {
@@ -67,9 +76,22 @@ func New(searchBaseURL, lyricsBaseURL, userAgent string, timeout time.Duration) 
 		lyricsBaseURL: lyricsBaseURL,
 		userAgent:     userAgent,
 		http:          &http.Client{Timeout: timeout},
-		pace:          pacer.New(500 * time.Millisecond),
+		pace:          pacer.OrDefault(pace, RequestInterval),
 	}, nil
 }
+
+// RequestInterval is how far apart two KuGou requests are spaced when the caller
+// does not supply its own pacer. See lrclib.RequestInterval for why it is exported
+// rather than kept private.
+const RequestInterval = 500 * time.Millisecond
+
+// LeaseName is the upstream's name on the shared pacing lease.
+//
+// It is exported because two processes have to agree on it for a shared lease to
+// be shared at all: the lyrics backfill claims this name while it works, and the
+// server claims it on every live request. Spelling it in one place is what keeps a
+// rename from silently turning a shared budget into two private ones.
+const LeaseName = "kugou"
 
 // Get resolves lyrics by title/artist/album. Duration is seconds; negative or
 // zero means unknown and disables duration filtering.
@@ -271,8 +293,8 @@ func (c *Client) doJSON(ctx context.Context, endpoint string, target any) error 
 	if response.StatusCode == http.StatusNotFound {
 		return ErrNotFound
 	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return fmt.Errorf("KuGou returned HTTP %d", response.StatusCode)
+	if err := upstream.CheckStatus("KuGou", response); err != nil {
+		return err
 	}
 	if err := json.NewDecoder(io.LimitReader(response.Body, maxResponseBytes)).Decode(target); err != nil {
 		return fmt.Errorf("decode KuGou response: %w", err)

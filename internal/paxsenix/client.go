@@ -16,6 +16,7 @@ import (
 	"github.com/sillygru/music-utils/internal/names"
 	"github.com/sillygru/music-utils/internal/pacer"
 	"github.com/sillygru/music-utils/internal/ttml"
+	"github.com/sillygru/music-utils/internal/upstream"
 )
 
 // ErrNotFound reports that Paxsenix has no lyrics for the track.
@@ -47,7 +48,7 @@ type Client struct {
 	catalogBaseURL string
 	userAgent      string
 	http           *http.Client
-	pace           *pacer.Pacer
+	pace           pacer.Waiter
 	tokens         *tokenManager
 }
 
@@ -55,6 +56,14 @@ type Client struct {
 // (https://lyrics.paxsenix.org); appleBaseURL is Apple's site used only for
 // Bearer-token scraping (https://beta.music.apple.com).
 func New(proxyBaseURL, appleBaseURL, userAgent string, timeout time.Duration) (*Client, error) {
+	return NewWithPacer(proxyBaseURL, appleBaseURL, userAgent, timeout, nil)
+}
+
+// NewWithPacer creates a client that spaces its requests using pace, falling
+// back to the provider's own interval when pace is nil. A batch job passes a
+// pacer shared with the live server so a backfill yields to real traffic
+// instead of competing with it for the same upstream budget.
+func NewWithPacer(proxyBaseURL, appleBaseURL, userAgent string, timeout time.Duration, pace pacer.Waiter) (*Client, error) {
 	proxyBaseURL = strings.TrimRight(strings.TrimSpace(proxyBaseURL), "/")
 	appleBaseURL = strings.TrimRight(strings.TrimSpace(appleBaseURL), "/")
 	for _, raw := range []string{proxyBaseURL, appleBaseURL} {
@@ -73,10 +82,23 @@ func New(proxyBaseURL, appleBaseURL, userAgent string, timeout time.Duration) (*
 		catalogBaseURL: "https://amp-api.music.apple.com",
 		userAgent:      userAgent,
 		http:           httpClient,
-		pace:           pacer.New(500 * time.Millisecond),
+		pace:           pacer.OrDefault(pace, RequestInterval),
 		tokens:         newTokenManager(appleBaseURL, httpClient),
 	}, nil
 }
+
+// RequestInterval is how far apart two Paxsenix or Apple Music requests are
+// spaced when the caller does not supply its own pacer. See
+// lrclib.RequestInterval for why it is exported rather than kept private.
+const RequestInterval = 500 * time.Millisecond
+
+// LeaseName is the upstream's name on the shared pacing lease.
+//
+// It is exported because two processes have to agree on it for a shared lease to
+// be shared at all: the lyrics backfill claims this name while it works, and the
+// server claims it on every live request. Spelling it in one place is what keeps a
+// rename from silently turning a shared budget into two private ones.
+const LeaseName = "paxsenix"
 
 // NewWithToken creates a client with a fixed Bearer token (tests, or
 // deployments that manage the Apple token out of band).
@@ -163,8 +185,8 @@ func (c *Client) searchApple(ctx context.Context, token string, input names.Inpu
 	if response.StatusCode == http.StatusNotFound {
 		return nil, ErrNotFound
 	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return nil, fmt.Errorf("Apple catalog returned HTTP %d", response.StatusCode)
+	if err := upstream.CheckStatus("Apple catalog", response); err != nil {
+		return nil, err
 	}
 	var payload struct {
 		Results struct {
@@ -287,8 +309,8 @@ func (c *Client) lyricsForID(ctx context.Context, song *appleSong) (*Result, err
 	if response.StatusCode == http.StatusNotFound {
 		return nil, ErrNotFound
 	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return nil, fmt.Errorf("Paxsenix returned HTTP %d", response.StatusCode)
+	if err := upstream.CheckStatus("Paxsenix", response); err != nil {
+		return nil, err
 	}
 	var payload lyricsPayload
 	if err := json.NewDecoder(io.LimitReader(response.Body, maxResponseBytes)).Decode(&payload); err != nil {
@@ -466,8 +488,8 @@ func (m *tokenManager) fetchBody(ctx context.Context, endpoint string) (string, 
 		return "", fmt.Errorf("request Apple site: %w", err)
 	}
 	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return "", fmt.Errorf("Apple site returned HTTP %d", response.StatusCode)
+	if err := upstream.CheckStatus("Apple site", response); err != nil {
+		return "", err
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, maxResponseBytes))
 	if err != nil {

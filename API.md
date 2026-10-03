@@ -352,7 +352,7 @@ internal error.
 Exact lyrics lookup. Serves cached lyrics when available; on a miss it
 consults every enabled lyrics provider in parallel — LRCLIB, BetterLyrics
 (TTML), KuGou, Paxsenix (Apple Music catalog + proxy), LyricsPlus
-(Binimum + mirrors), plus Zemer and YouTube (official shelf + transcript)
+(Binimum + mirror), plus YouTube (official shelf + transcript)
 when a `video_id` hint is supplied, plus Apple Music TTML and/or official
 Musixmatch when enabled — races them within a 3s response window, and caches
 every result. Late providers that finish after the window still persist for
@@ -364,7 +364,7 @@ Query parameters: required `track_name`; optional `artist_name`,
 `^[A-Za-z0-9_-]{6,16}$`; invalid values are ignored). Text providers receive
 at most `track_name`, `artist_name`, and `album_name`; `duration` is used
 only for local cache matching and is never forwarded, while `video_id` is
-forwarded only to Zemer and YouTube. When `artist_name`/`album_name`
+forwarded only to YouTube. When `artist_name`/`album_name`
 are omitted, the server first queries providers with exactly what was
 supplied and only retries once with artist/album backfilled from cached
 metadata if that finds nothing. Without `include_rich_sync=true`, the response contains the available plain and/or line-synchronized lyrics. With `include_rich_sync=true`, the server additionally includes syllable- or word-synchronized `richSync` when available, while preserving clean standard `plainLyrics` and `syncedLyrics` (standard LRC without voice tags).
@@ -439,7 +439,7 @@ found (memoized for 24 hours) · `429` rate limited · `503` upstream busy ·
 
 Searches the local catalog and merges it with every enabled lyrics provider —
 LRCLIB plus BetterLyrics, KuGou, Paxsenix, and LyricsPlus on structured hints,
-and Zemer/YouTube when a `video_id` hint is supplied — plus any cached local
+and YouTube when a `video_id` hint is supplied — plus any cached local
 rows. Each result carries the compact fields `id`, `name`, `trackName`,
 `artistName`, `albumName`, `duration`, `instrumental`, `plainLyrics`, and
 `syncedLyrics` when available. The redundant LRCLIB `lyricsfile` YAML field is

@@ -32,6 +32,12 @@ URL dumps (see [Seed dumps](#seed-dumps)) contain only factual data and links.
   Deezer in order, caching URLs (and checked misses).
 - **Searchable catalog** — local FTS5 search covers title, artist, album, and
   genre.
+- **Batch backfill jobs** — `metadata-backfill` and `lyrics-backfill`
+  (`music-utils --run-job`) fill in metadata and lyrics for tracks that entered the
+  library through a single lookup and were never resolved against a provider. Both
+  take an optional `-refresh [age]`, share the live server's per-provider upstream
+  budget, and only record a negative when every provider actually answered. See
+  [Batch jobs](#batch-jobs).
 
 ### Planned
 
@@ -49,8 +55,8 @@ URL dumps (see [Seed dumps](#seed-dumps)) contain only factual data and links.
 | `GET /api/cover/search` | Free-text cover search across artists, albums, and songs, plus typed per-type search. |
 | `GET /api/cover/artist` | Artist cover URL; resolves Last.fm → iTunes → Deezer on a miss and caches. |
 | `GET /api/cover/album` | Album cover URL; resolves Last.fm → iTunes → Deezer on a miss and caches. |
-| `GET /api/lyrics/get` | Exact lyrics lookup; local-first with parallel multi-provider fallback (LRCLIB, BetterLyrics, KuGou, Paxsenix, LyricsPlus, Zemer/YouTube via optional `video_id`). |
-| `GET /api/lyrics/search` | Multi-result lyrics search across the local catalog and the same providers (videoId hint for Zemer/YouTube). |
+| `GET /api/lyrics/get` | Exact lyrics lookup; local-first with parallel multi-provider fallback (LRCLIB, BetterLyrics, KuGou, Paxsenix, LyricsPlus, YouTube via optional `video_id`). |
+| `GET /api/lyrics/search` | Multi-result lyrics search across the local catalog and the same providers (videoId hint for YouTube). |
 
 The previous `/api/get` and `/api/search` paths are intentionally removed.
 There are no aliases or compatibility redirects.
@@ -73,7 +79,7 @@ Full request and response reference is in [`API.md`](API.md).
 
 ## Local-first caching
 
-Metadata and lyrics are stored in independent SQLite files. Metadata and lyrics lookups check their respective local database before making an upstream request. Lyrics misses fan out in parallel to every enabled provider — LRCLIB, BetterLyrics (TTML), KuGou, Paxsenix (Apple Music catalog + proxy), LyricsPlus (Binimum + mirrors), plus Zemer and YouTube (official shelf + transcript) when a `video_id` hint is supplied — and share the 3s response window. Direct Apple Music TTML and official Musixmatch also run in parallel when enabled; the former aggregation service is no longer used.
+Metadata and lyrics are stored in independent SQLite files. Metadata and lyrics lookups check their respective local database before making an upstream request. Lyrics misses fan out in parallel to every enabled provider — LRCLIB, BetterLyrics (TTML), KuGou, Paxsenix (Apple Music catalog + proxy), LyricsPlus (Binimum + mirror), plus YouTube (official shelf + transcript) when a `video_id` hint is supplied — and share the 3s response window. Direct Apple Music TTML and official Musixmatch also run in parallel when enabled; the former aggregation service is no longer used.
 
 Before local or upstream lookup, music names are cleaned consistently across metadata, lyrics, and cover endpoints: known media extensions and downloader/source labels (for example `Official Music Video`, `AMV`, `Visualizer`, `Lyrics`, `Nightcore`, `Hardstyle`, `Sped Up`, and `Slowed`) are removed, and `Artist - Song`/`Artist ｜ Song` filenames can supply a missing artist. Explicit `artist_name` values remain authoritative, and provider-returned canonical names are preserved in responses.
 Successful provider responses are upserted transactionally and subsequent
@@ -116,12 +122,15 @@ cold-lookup latency and has been removed.
 
 - **FTS5 search** — title, artist, album, and genre search over SQLite.
 - **Metadata fallback** — iTunes + Deezer provider chain with local caching.
-- **Lyrics providers** — LRCLIB, BetterLyrics, KuGou, Paxsenix, LyricsPlus, Zemer (videoId), and YouTube (official + subtitle) plus optional direct Apple Music TTML and official Musixmatch, all fanned out in parallel and cached locally (videoId providers only when `video_id` is supplied; 3s response cap, background persistence).
+- **Lyrics providers** — LRCLIB, BetterLyrics, KuGou, Paxsenix, LyricsPlus, and YouTube (official + subtitle) plus optional direct Apple Music TTML and official Musixmatch, all fanned out in parallel and cached locally (videoId providers only when `video_id` is supplied; 3s response cap, background persistence).
 - **Opt-in rich lyrics** — Unison-compatible word/syllable payloads are cached separately and returned alone with `include_rich_sync=true`; unavailable rich lyrics fall back to plain/LRC lyrics.
 - **Rate limiting** — per-client-IP limits with `Retry-After` headers.
-- **Upstream pacing** — every provider (LRCLIB, BetterLyrics, KuGou, Paxsenix, LyricsPlus, Zemer, YouTube, Apple Music, Musixmatch, iTunes, Deezer, Last.fm) is
+- **Upstream pacing** — every provider (LRCLIB, BetterLyrics, KuGou, Paxsenix, LyricsPlus, YouTube, Apple Music, Musixmatch, iTunes, Deezer, Last.fm) is
   paced process-wide to a fixed interval, so no client traffic can exceed a
-  provider's rate limit or get the server's IP blocked.
+  provider's rate limit or get the server's IP blocked. The pace is also shared
+  across processes through the database, so a batch job draws on the same budget
+  instead of competing with live traffic for it — see
+  [Sharing upstream budget with the server](#sharing-upstream-budget-with-the-server).
 - **Lyrics negative caching** — LRCLIB misses are memoized in memory for 24
   hours, so repeated lookups of non-existent songs never re-hit LRCLIB.
 - **Fallback budget and queue guard** — a per-IP cap on upstream-triggering
@@ -233,15 +242,11 @@ cold-lookup latency and has been removed.
 | `PAXSENIX_APPLE_BASE_URL` | `https://beta.music.apple.com` | Apple site used for bearer-token scraping. |
 | `PAXSENIX_USER_AGENT` | `music-utils/v0.14.0 (+https://gru0.dev)` | Paxsenix User-Agent. |
 | `PAXSENIX_TIMEOUT_MS` | `10000` | Paxsenix timeout. |
-| `LYRICSPLUS_ENABLED` | `false` | LyricsPlus Binimum + mirrors (default off; community mirrors). |
+| `LYRICSPLUS_ENABLED` | `true` | LyricsPlus Binimum + mirror. |
 | `LYRICSPLUS_API_BASE_URL` | `https://lyrics-api.binimum.org` | LyricsPlus Binimum index URL. |
 | `LYRICSPLUS_MIRRORS` | *(empty)* | Comma-separated LyricsPlus mirror hosts for `/v2/lyrics/get`; empty uses defaults. |
 | `LYRICSPLUS_USER_AGENT` | `music-utils/v0.14.0 (+https://gru0.dev)` | LyricsPlus User-Agent. |
 | `LYRICSPLUS_TIMEOUT_MS` | `10000` | LyricsPlus timeout. |
-| `ZEMER_ENABLED` | `true` | Zemer (`search.zemer.io`) videoId resolver. |
-| `ZEMER_BASE_URL` | `https://search.zemer.io` | Zemer base URL. |
-| `ZEMER_USER_AGENT` | `music-utils/v0.14.0 (+https://gru0.dev)` | Zemer User-Agent. |
-| `ZEMER_TIMEOUT_MS` | `10000` | Zemer timeout. |
 | `YOUTUBE_LYRICS_ENABLED` | `true` | YouTube official lyrics shelf (InnerTube, needs `video_id`). |
 | `YOUTUBE_SUBTITLE_ENABLED` | `true` | YouTube subtitle transcript (InnerTube, needs `video_id`). |
 | `YOUTUBE_BASE_URL` | `https://music.youtube.com/youtubei/v1` | InnerTube base URL. |
@@ -309,6 +314,192 @@ go run ./cmd/server stats
 ./bin/music-utils stats -db ./data/request_log.db -metadata ./data/metadata.db -lyrics ./data/lyrics.db -cover ./data/cover.db -days 30 -top 15
 ```
 
+## Batch jobs
+
+Content that entered the library through a lookup is only ever as complete as that
+one lookup. Two batch jobs fill the gaps, and both are safe to run against the same
+databases the live server is using.
+
+```sh
+# List the available jobs
+./bin/music-utils --jobs
+
+# Fill in metadata for tracks that were cached from lyrics only
+./bin/music-utils --run-job metadata-backfill
+
+# Fill in lyrics for tracks that have none
+./bin/music-utils --run-job lyrics-backfill
+
+# See what would change, without writing anything
+./bin/music-utils --run-job lyrics-backfill -dry-run
+```
+
+Both jobs share these flags:
+
+| Flag | Meaning |
+| --- | --- |
+| `-concurrency N` | songs worked on at once (default 4) |
+| `-rate N` | songs started per minute (default 0, provider pacing only) |
+| `-limit N` | cap the number of tracks processed |
+| `-dry-run` | report what would change without writing |
+| `-refresh` | also re-fetch work a provider already answered |
+| `-user-idle-gap D` | how long live traffic must stay quiet before touching a shared upstream |
+| `-max-write-errors N` | abort after this many consecutive failed write batches |
+
+Ctrl-C stops between work units. Everything already resolved is still committed, and
+whatever was left is picked up by the next run.
+
+### Refreshing settled answers
+
+By default a job only touches work **no provider has ever answered for**. Once a
+track has an answer it is left alone, because re-asking costs upstream budget and
+the answer is usually still good.
+
+`-refresh` re-asks anyway, which matters for two things: a negative (a track with no
+metadata or no lyrics that a provider may have added since), and a track whose
+cached answer has simply gone stale.
+
+```sh
+# Re-fetch everything, never-answered work first
+./bin/music-utils --run-job lyrics-backfill -refresh
+
+# Re-fetch only answers older than three days
+./bin/music-utils --run-job metadata-backfill -refresh 3d
+
+# Weeks work too, and so do plain Go durations
+./bin/music-utils --run-job metadata-backfill -refresh 1w
+./bin/music-utils --run-job metadata-backfill -refresh 72h
+```
+
+A bare `-refresh` and `-refresh 0` mean the same thing, and a negative age is
+rejected rather than reinterpreted.
+
+The two phases are ordered, not merged: the never-answered set is drained
+completely before the refresh set begins, so a limited run spends its budget on
+tracks that have never been asked rather than re-confirming ones that already have
+an answer. Within the refresh set, the oldest answer goes first, and a track settled
+before settle times were recorded counts as the oldest of all.
+
+Note that a track's answer is only re-fetched when every provider it is asked
+actually answers. A rate limit, a refusal, or a network failure leaves the track
+untouched and schedules it for the next run, rather than recording a permanent
+"this has no lyrics" on the strength of a bad minute.
+
+### Scope of the lyrics job
+
+`lyrics-backfill` fetches **plain and synced** lyrics. It does not:
+
+- fetch from **YouTube**, which is keyed by a video ID the batch path has no way to
+  resolve;
+- write **word-level sync** payloads (Unison, and the TTML paths of Apple Music and
+  the other rich providers). The server compacts TTML into a canonical form before
+  storing it, and a job writing the raw payload would create rows in a different
+  shape than the one path that reads them. These are filled in by the live request
+  path as songs are played.
+
+### Every provider is asked, and every answer is kept
+
+The job does not stop at the first provider that has lyrics. Every configured
+provider is asked about every song, and every answer is stored.
+
+That costs more upstream budget per song than a sequential walk would, and it is
+deliberate: a run that stops at the first hit stores one answer and learns nothing
+about the rest, so a provider outage is invisible until the stored answer has to be
+replaced. Asking everyone means the alternatives are already on disk.
+
+The best answer is chosen by what it contains, not by which provider replied first
+— synced lyrics beat plain, and a tie goes to the provider with better coverage.
+That is the same ranking the live request path applies, so the job and the server
+agree about which lyrics are the good ones. **Only the winner is served**: a track's
+`last_lyrics_id` points at one row, and the losing answers are stored alongside it
+rather than instead of it, tagged with the provider they came from. They are not
+returned by a lookup today, but they are there for a provider that starts returning
+worse lyrics, or goes away entirely, without another full-library pass. The pointer
+only ever moves to a strict improvement, so a run that draws a plainer answer than
+one already stored leaves the better one serving.
+
+Identical answers still collapse into a single row. The lyrics table is keyed by
+content hash, so two providers that return the same text share one row and do not
+grow the database.
+
+### How the work is spread: songs across providers, not providers across songs
+
+Each provider is limited to **1 request per 5 seconds**
+(`UPSTREAM_LYRICS_JOB_PACE_MS`), and several songs are worked on at once
+(`-concurrency`, default 4). A song is not finished until every provider has
+answered it.
+
+The order matters as much as the rate. Asking all six providers about one song at
+once would put six requests into the air simultaneously, but they are already
+limited to one per interval each, so the extra concurrency cannot become extra
+throughput — it can only become a queue in front of each provider. So the run asks
+**one provider at a time per song** and spreads the songs across providers instead:
+each of the slots in flight starts on a different provider, so four songs make
+progress on four distinct upstreams rather than queueing behind one.
+
+That costs the same number of requests at the same rate and leaves the parallelism
+somewhere it can actually be used. The ceiling is `-concurrency` songs in flight,
+capped at the number of configured providers, since extra slots on one provider
+would only queue.
+
+Answers are written **as each provider gives them**, not held to the end, so a run
+you interrupt keeps what it got. A song is marked resolved only once every provider
+has answered it; a song with no lyrics anywhere is marked resolved too, because
+"no provider has these" is an answer worth recording.
+
+### Resuming a half-finished song
+
+Each provider attempt is recorded per song, which is what makes an interrupted run
+cheap to finish rather than expensive to redo. A song the last run left partway is
+asked only about the providers it has not already answered — one request instead of
+six.
+
+`-refresh` is the exception: it is you asking again on purpose, so it ignores that
+record entirely and re-asks every provider.
+
+### Sharing upstream budget with the server
+
+Both jobs share one per-provider upstream budget with the live server, stored in the
+metadata database, and both yield to real traffic: a job only reaches an upstream
+during a window in which no request is pending. If the server is in steady use the
+job still makes progress — it defers for a bounded time and then takes its slot — so
+a busy server slows a run down rather than stalling it.
+
+The two sides are paced at **different rates on the same lease**, because they are
+doing different jobs. A live request is one person waiting on one answer, so it is
+served at the rate that provider's client normally uses (between 2 and 5 requests a
+second depending on the provider). A batch run is working through a library and
+nobody is waiting on it, so it is served at its own slower rate. They still take
+turns: a live request is never delayed by a job, and a job is only admitted while
+the server is idle.
+
+The two jobs are held to different rates from each other as well, because they spend
+their budget differently. The lyrics backfill asks every configured provider about
+every song, so one song costs five or six requests and a library pass costs that
+times every track in it; it is served at `UPSTREAM_LYRICS_JOB_PACE_MS` (default
+5000, one request every five seconds). The metadata backfill asks iTunes and Deezer
+about one track at a time, so it stays at `UPSTREAM_JOB_PACE_MS` (default 2000, one
+request every two seconds). One rate for both would have to be either too slow for a
+two-upstream lookup or too fast for a five-provider pass. Each job's rate goes on the
+shared lease for the upstreams that job asks, so raising one does not touch the
+other.
+
+A job always claims its own job rate, so the settings cannot be confused for one
+another: `UPSTREAM_PACE_MS` overrides the live request path for every upstream at
+once and never reaches background work, and neither job rate ever speeds up the
+request path. `UPSTREAM_PACE_MS` is unset by default, which leaves each provider on
+its own rate — the rates are not interchangeable, so there is deliberately no default
+for it. Set it when an upstream starts throttling and the request path needs slowing
+globally; a value of zero or less is read as unset rather than as an absence of
+pacing.
+
+That means the aggregate load on an upstream is the ceiling of either side rather
+than the sum of both, and `-user-idle-gap` applies to the lyrics job as it does to
+metadata. A shared lease that has stopped working is logged, rather than the two
+processes silently reverting to private pacing.
+
+`JOB_IDLE_GAP_MS` sets how long the server must stay quiet before a job is admitted.
+
 ## Running a public instance
 
 The server ships no authentication by design. For a public instance behind a
@@ -347,7 +538,6 @@ internal/betterlyrics/     BetterLyrics TTML client
 internal/kugou/            KuGou 3-step lyrics client
 internal/paxsenix/         Paxsenix Apple-catalog + proxy client
 internal/lyricsplus/       LyricsPlus Binimum + mirrors client
-internal/zemer/            Zemer videoId resolver
 internal/innertube/        InnerTube YouTube official + transcript client
 internal/applemusic/      Apple Music catalog and TTML lyrics client
 internal/musixmatch/      Official Musixmatch lyrics client

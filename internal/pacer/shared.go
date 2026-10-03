@@ -43,18 +43,34 @@ const DefaultIdleGap = 10 * time.Second
 // and stamps last_user_at, which starts an idle window. Background work is only
 // admitted once that window has passed without traffic, and it re-reads the
 // lease after every wait, so a job that was mid-flight when a user arrived hands
-// the slot back and re-queues instead of firing into that request.
+// the slot back and re-queues instead of firing into that request. That wait is
+// bounded, or a server in steady use would deny it forever.
+//
+// The two classes are paced at different rates, because what a request costs an
+// upstream and what a batch pass may spend on it are not the same question. A
+// user-facing lookup is waiting on this one answer, so it is served at the rate
+// the provider's own client uses. A background job is working through a library
+// and can afford to be slower than the thing it is competing with, and its rate
+// is set to whatever the job needs rather than to the request path's latency.
+// They share one lease and still take turns; they simply no longer have to agree
+// on a single number to do it.
 type Shared struct {
-	db       *sql.DB
-	name     string
-	interval time.Duration
-	idleGap  time.Duration
+	db   *sql.DB
+	name string
+	// userInterval spaces live requests against each other, and jobInterval
+	// spaces background work against itself. Each is used only by its own class.
+	userInterval time.Duration
+	jobInterval  time.Duration
+	idleGap      time.Duration
 
-	// fallback paces locally if the coordination table is unavailable, so a
-	// database problem degrades to private pacing instead of no pacing.
-	fallback *Pacer
-	mu       sync.Mutex
-	usable   bool
+	// userFallback and jobFallback pace locally if the coordination table is
+	// unavailable, so a database problem degrades to private pacing instead of no
+	// pacing. There is one per class because the degraded mode has to preserve
+	// the same two rates the shared lease would have applied.
+	userFallback *Pacer
+	jobFallback  *Pacer
+	mu           sync.Mutex
+	usable       bool
 	// disabledUntil is when a failed claim may be retried. A single transient
 	// error, most often the live server holding the write lock, must not cost
 	// this process shared pacing for the rest of its life: the alternative is
@@ -65,21 +81,29 @@ type Shared struct {
 	lastError error
 }
 
-// NewShared builds a Shared pacer for the named upstream host, spacing claims
-// at least interval apart. An idleGap of zero uses DefaultIdleGap.
+// NewShared builds a Shared pacer for the named upstream host, spacing live
+// requests at least userInterval apart and background work at least jobInterval
+// apart. An idleGap of zero uses DefaultIdleGap.
 //
-// A nil database builds a pacer that only ever paces locally, which is what a
-// caller without a metadata database wants.
-func NewShared(database *sql.DB, name string, interval, idleGap time.Duration) *Shared {
+// A jobInterval of zero or below falls back to userInterval, so an upstream the
+// two classes should share a rate on does not have to say so twice. A nil
+// database builds a pacer that only ever paces locally, which is what a caller
+// without a metadata database wants.
+func NewShared(database *sql.DB, name string, userInterval, jobInterval, idleGap time.Duration) *Shared {
 	if idleGap <= 0 {
 		idleGap = DefaultIdleGap
 	}
+	if jobInterval <= 0 {
+		jobInterval = userInterval
+	}
 	shared := &Shared{
-		db:       database,
-		name:     name,
-		interval: interval,
-		idleGap:  idleGap,
-		fallback: New(interval),
+		db:           database,
+		name:         name,
+		userInterval: userInterval,
+		jobInterval:  jobInterval,
+		idleGap:      idleGap,
+		userFallback: New(userInterval),
+		jobFallback:  New(jobInterval),
 	}
 	shared.usable = database != nil
 	return shared
@@ -88,13 +112,31 @@ func NewShared(database *sql.DB, name string, interval, idleGap time.Duration) *
 // ForUser returns a Waiter for live API traffic.
 func (s *Shared) ForUser() Waiter { return &sharedWaiter{shared: s, class: ClassUser} }
 
-// ForJob returns a Waiter for background batch work, which is only admitted
-// while the server is idle.
+// ForJob returns a Waiter for background batch work, which yields to live
+// traffic but is admitted anyway once the idle wait has been held back too many
+// times.
 func (s *Shared) ForJob() Waiter { return &sharedWaiter{shared: s, class: ClassJob} }
 
 // Wait satisfies Waiter using the user class, so a Shared can stand in for a
 // plain Pacer wherever live traffic is expected.
 func (s *Shared) Wait(ctx context.Context) error { return s.ForUser().Wait(ctx) }
+
+// intervalFor reports the spacing this class claims at.
+func (s *Shared) intervalFor(class Class) time.Duration {
+	if class == ClassUser {
+		return s.userInterval
+	}
+	return s.jobInterval
+}
+
+// fallbackFor reports the local pacer used when the shared lease is unavailable,
+// which has to match the rate the lease would have applied for this class.
+func (s *Shared) fallbackFor(class Class) *Pacer {
+	if class == ClassUser {
+		return s.userFallback
+	}
+	return s.jobFallback
+}
 
 // idle returns how long live traffic must stay quiet before background work is
 // admitted.
@@ -170,8 +212,13 @@ func (w *sharedWaiter) Wait(ctx context.Context) error {
 		return err
 	}
 	if !w.shared.available() {
-		return w.shared.fallback.Wait(ctx)
+		return w.shared.fallbackFor(w.class).Wait(ctx)
 	}
+	// The job defers for at most this long, then proceeds anyway. A user claim
+	// serializes against user_next_at and ignores next_at, so a job that stops
+	// deferring costs a user nothing; deferring without limit means a server in
+	// steady use never grants the idle window and no batch work ever runs.
+	started := time.Now()
 	for {
 		lease, err := w.shared.claim(ctx, w.class)
 		if err != nil {
@@ -185,12 +232,15 @@ func (w *sharedWaiter) Wait(ctx context.Context) error {
 			// retained so the degradation is observable.
 			w.shared.setLastError(err)
 			w.shared.disable()
-			return w.shared.fallback.Wait(ctx)
+			return w.shared.fallbackFor(w.class).Wait(ctx)
 		}
 		if err := sleepUntil(ctx, time.UnixMilli(lease.AdmitAt)); err != nil {
 			return err
 		}
 		if w.class != ClassJob {
+			return nil
+		}
+		if time.Since(started) >= maxIdleWait {
 			return nil
 		}
 		// Background work re-reads the lease after waiting, because the value
@@ -215,6 +265,20 @@ func (w *sharedWaiter) Wait(ctx context.Context) error {
 	}
 }
 
+// maxIdleWait bounds how long one call defers for the server's idle window
+// before taking its slot anyway.
+const maxIdleWait = 20 * time.Second
+
+// maxJobReserve caps how far into the future a job may reserve a slot on the
+// shared lease.
+//
+// Without a cap the lease compounds: a deferred job reserves lastUserAt+idleGap,
+// pushes next_at past it, and on its next attempt reserves further out again, so
+// the waits grow 10s, 12s, 24s, 48s. That is what made a busy server look like a
+// hang rather than a slow queue. Clamping the reservation keeps a deferred job
+// from pushing the lease it is queued behind.
+const maxJobReserve = 5 * time.Second
+
 // claim reserves the next slot for a caller.
 //
 // The read-modify-write runs inside one transaction that takes its write lock
@@ -231,7 +295,7 @@ func (s *Shared) claim(ctx context.Context, class Class) (db.PacerLease, error) 
 
 	now := time.Now()
 	nowMillis := now.UnixMilli()
-	interval := s.interval.Milliseconds()
+	interval := s.intervalFor(class).Milliseconds()
 
 	var nextAt, userNextAt, lastUserAt int64
 	row := tx.QueryRowContext(ctx,
@@ -266,7 +330,15 @@ func (s *Shared) claim(ctx context.Context, class Class) (db.PacerLease, error) 
 		// Background work only runs while no live request is pending, and also
 		// honors the shared lease so it cannot stack on live traffic.
 		if lastUserAt > 0 {
-			if floor := lastUserAt + s.idle().Milliseconds(); floor > admit {
+			floor := lastUserAt + s.idle().Milliseconds()
+			// A job that is only waiting out traffic must not be able to push
+			// the shared lease arbitrarily far ahead: each deferred attempt would
+			// reserve further out than the last, and the waits would compound
+			// until the job is effectively never admitted.
+			if limit := nowMillis + maxJobReserve.Milliseconds(); floor > limit {
+				floor = limit
+			}
+			if floor > admit {
 				admit = floor
 			}
 		}

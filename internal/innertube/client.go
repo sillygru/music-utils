@@ -15,12 +15,23 @@ import (
 	"time"
 
 	"github.com/sillygru/music-utils/internal/pacer"
+	"github.com/sillygru/music-utils/internal/upstream"
 )
 
 // ErrNotFound reports that YouTube has no lyrics for the video.
 var ErrNotFound = errors.New("youtube lyrics not found")
 
 const maxResponseBytes = 8 << 20
+
+// RequestInterval is how far apart two InnerTube requests are spaced when the
+// caller does not supply its own pacer.
+//
+// It is exported because the server has to state the same rate when it applies
+// UPSTREAM_PACE_MS to this client. YouTube sits on no shared lease, because a
+// batch run cannot key a lookup by the video ID YouTube is searched with, so the
+// number the client paces itself at and the number the server hands it have to
+// come from the same place.
+const RequestInterval = 500 * time.Millisecond
 
 // webClientKey is the public YouTube web client API key embedded in YouTube's
 // own web app. It is not a secret; deployments may override it via config.
@@ -39,13 +50,21 @@ type Client struct {
 	apiKey    string
 	userAgent string
 	http      *http.Client
-	pace      *pacer.Pacer
+	pace      pacer.Waiter
 }
 
 // New creates a client. baseURL is the InnerTube root
 // (https://music.youtube.com/youtubei/v1); apiKey may be empty to use the
 // public web client key.
 func New(baseURL, apiKey, userAgent string, timeout time.Duration) (*Client, error) {
+	return NewWithPacer(baseURL, apiKey, userAgent, timeout, nil)
+}
+
+// NewWithPacer creates a client that spaces its requests using pace, falling
+// back to the provider's own interval when pace is nil. A batch job passes a
+// pacer shared with the live server so a backfill yields to real traffic
+// instead of competing with it for the same upstream budget.
+func NewWithPacer(baseURL, apiKey, userAgent string, timeout time.Duration, pace pacer.Waiter) (*Client, error) {
 	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	parsed, err := url.Parse(baseURL)
 	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
@@ -62,7 +81,7 @@ func New(baseURL, apiKey, userAgent string, timeout time.Duration) (*Client, err
 		apiKey:    strings.TrimSpace(apiKey),
 		userAgent: userAgent,
 		http:      &http.Client{Timeout: timeout},
-		pace:      pacer.New(500 * time.Millisecond),
+		pace:      pacer.OrDefault(pace, RequestInterval),
 	}, nil
 }
 
@@ -175,8 +194,8 @@ func (c *Client) post(ctx context.Context, path string, payload map[string]any) 
 	if response.StatusCode == http.StatusNotFound {
 		return nil, ErrNotFound
 	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return nil, fmt.Errorf("InnerTube returned HTTP %d", response.StatusCode)
+	if err := upstream.CheckStatus("InnerTube", response); err != nil {
+		return nil, err
 	}
 	var decoded map[string]any
 	if err := json.NewDecoder(io.LimitReader(response.Body, maxResponseBytes)).Decode(&decoded); err != nil {
@@ -200,8 +219,8 @@ func (c *Client) get(ctx context.Context, endpoint string) (string, error) {
 		return "", fmt.Errorf("request captions: %w", err)
 	}
 	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return "", fmt.Errorf("captions returned HTTP %d", response.StatusCode)
+	if err := upstream.CheckStatus("InnerTube", response); err != nil {
+		return "", err
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, maxResponseBytes))
 	if err != nil {
@@ -313,9 +332,9 @@ type timedText struct {
 }
 
 type timedPara struct {
-	Start string `xml:"t,attr"`
-	Dur   string `xml:"d,attr"`
-	Text  string `xml:",chardata"`
+	Start string      `xml:"t,attr"`
+	Dur   string      `xml:"d,attr"`
+	Text  string      `xml:",chardata"`
 	P     []timedPara `xml:"p"`
 	S     []timedSpan `xml:"s"`
 }

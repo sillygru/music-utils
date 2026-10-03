@@ -2,6 +2,7 @@ package config
 
 import (
 	"testing"
+	"time"
 
 	"github.com/sillygru/music-utils/internal/version"
 )
@@ -271,5 +272,131 @@ func TestLoadRateLimitValuesAndFallbacks(t *testing.T) {
 	cfg = Load()
 	if cfg.RateLimitPerSec != 20 || cfg.RateLimitPerMin != 600 || cfg.TrustProxy {
 		t.Fatalf("invalid values did not fall back to defaults: %+v", cfg)
+	}
+}
+
+// The live and job rates are two different questions, and the operator's answer to
+// one must not answer the other. A job working through a library is not a person
+// waiting on an answer, so a fast live rate has to leave the job rate alone.
+func TestUpstreamJobPaceIgnoresTheUserOverride(t *testing.T) {
+	t.Setenv("UPSTREAM_PACE_MS", "50")
+	t.Setenv("UPSTREAM_JOB_PACE_MS", "")
+	t.Setenv("UPSTREAM_LYRICS_JOB_PACE_MS", "")
+
+	cfg := Load()
+	if got := cfg.UpstreamUserInterval(time.Minute); got != 50*time.Millisecond {
+		t.Fatalf("user interval = %s, want the 50ms override", got)
+	}
+	if got := cfg.UpstreamJobInterval(); got != 2*time.Second {
+		t.Fatalf("job interval = %s, want 2s: a live override must not reach the job", got)
+	}
+	if got := cfg.UpstreamLyricsJobInterval(); got != 5*time.Second {
+		t.Fatalf("lyrics job interval = %s, want 5s: a live override must not reach the job", got)
+	}
+}
+
+// The two jobs ask the same upstreams for different things and pay for it in
+// different numbers of requests, so their rates are two settings rather than one.
+// An operator tuning the metadata job must not slow the lyrics pass, or speed it
+// up, by editing the number they did not mean to change.
+func TestUpstreamJobPacesAreIndependent(t *testing.T) {
+	t.Setenv("UPSTREAM_JOB_PACE_MS", "")
+	t.Setenv("UPSTREAM_LYRICS_JOB_PACE_MS", "7000")
+
+	cfg := Load()
+	if got := cfg.UpstreamJobInterval(); got != 2*time.Second {
+		t.Fatalf("metadata job interval = %s, want the 2s default: setting the lyrics rate must not reach it", got)
+	}
+	if got := cfg.UpstreamLyricsJobInterval(); got != 7*time.Second {
+		t.Fatalf("lyrics job interval = %s, want 7s", got)
+	}
+
+	t.Setenv("UPSTREAM_JOB_PACE_MS", "3000")
+	cfg = Load()
+	if got := cfg.UpstreamJobInterval(); got != 3*time.Second {
+		t.Fatalf("metadata job interval = %s, want 3s", got)
+	}
+	if got := cfg.UpstreamLyricsJobInterval(); got != 7*time.Second {
+		t.Fatalf("lyrics job interval = %s, want its own 7s: setting the metadata rate must not reach it", got)
+	}
+}
+
+func TestUpstreamPaceDefaultsToPerProviderIntervals(t *testing.T) {
+	t.Setenv("UPSTREAM_PACE_MS", "")
+	t.Setenv("UPSTREAM_JOB_PACE_MS", "")
+	t.Setenv("UPSTREAM_LYRICS_JOB_PACE_MS", "")
+
+	cfg := Load()
+	if cfg.UpstreamPaceMS != 0 {
+		t.Fatalf("UpstreamPaceMS = %d, want 0 (unset) so each upstream keeps its own rate", cfg.UpstreamPaceMS)
+	}
+	// Each provider's own constant has to survive untouched, or one global number
+	// would quietly replace rates chosen per upstream.
+	if got := cfg.UpstreamUserInterval(200 * time.Millisecond); got != 200*time.Millisecond {
+		t.Fatalf("user interval = %s, want the provider's own 200ms", got)
+	}
+	if got := cfg.UpstreamUserInterval(500 * time.Millisecond); got != 500*time.Millisecond {
+		t.Fatalf("user interval = %s, want the provider's own 500ms", got)
+	}
+	if got := cfg.UpstreamJobInterval(); got != 2*time.Second {
+		t.Fatalf("job interval = %s, want 2s", got)
+	}
+	if got := cfg.UpstreamLyricsJobInterval(); got != 5*time.Second {
+		t.Fatalf("lyrics job interval = %s, want 5s: it asks every provider about every song", got)
+	}
+}
+
+func TestUpstreamPaceOverridesEveryProvider(t *testing.T) {
+	t.Setenv("UPSTREAM_PACE_MS", "750")
+
+	cfg := Load()
+	if cfg.UpstreamPaceMS != 750 {
+		t.Fatalf("UpstreamPaceMS = %d, want 750", cfg.UpstreamPaceMS)
+	}
+	for _, providerDefault := range []time.Duration{200 * time.Millisecond, 300 * time.Millisecond, 500 * time.Millisecond, 2 * time.Second} {
+		if got := cfg.UpstreamUserInterval(providerDefault); got != 750*time.Millisecond {
+			t.Fatalf("user interval = %s, want 750ms regardless of the %s provider default", got, providerDefault)
+		}
+	}
+}
+
+// A pace of zero means "do not wait at all", so every path that can produce one
+// has to refuse it. Getting this wrong does not fail loudly, it removes the
+// ceiling on an upstream and the run simply floods it.
+func TestUpstreamPaceNeverResolvesToNoPacing(t *testing.T) {
+	for _, value := range []string{"0", "-1", "not-a-number", ""} {
+		t.Run("user="+value, func(t *testing.T) {
+			t.Setenv("UPSTREAM_PACE_MS", value)
+			cfg := Load()
+			if got := cfg.UpstreamUserInterval(200 * time.Millisecond); got != 200*time.Millisecond {
+				t.Fatalf("user interval = %s, want the 200ms provider default: %q must read as unset", got, value)
+			}
+		})
+		t.Run("job="+value, func(t *testing.T) {
+			t.Setenv("UPSTREAM_JOB_PACE_MS", value)
+			cfg := Load()
+			if got := cfg.UpstreamJobInterval(); got != 2*time.Second {
+				t.Fatalf("job interval = %s, want the 2s default: %q must not disable pacing", got, value)
+			}
+		})
+		t.Run("lyrics-job="+value, func(t *testing.T) {
+			t.Setenv("UPSTREAM_LYRICS_JOB_PACE_MS", value)
+			cfg := Load()
+			if got := cfg.UpstreamLyricsJobInterval(); got != 5*time.Second {
+				t.Fatalf("lyrics job interval = %s, want the 5s default: %q must not disable pacing", got, value)
+			}
+		})
+	}
+}
+
+// Config is built by hand in plenty of places that never call Load, so the
+// accessor has to be safe on a zero value rather than only on a loaded one.
+func TestUpstreamJobIntervalOnZeroValueConfig(t *testing.T) {
+	var cfg Config
+	if got := cfg.UpstreamJobInterval(); got != 2*time.Second {
+		t.Fatalf("job interval = %s, want 2s: an unloaded Config must not mean no pacing", got)
+	}
+	if got := cfg.UpstreamUserInterval(300 * time.Millisecond); got != 300*time.Millisecond {
+		t.Fatalf("user interval = %s, want the 300ms provider default", got)
 	}
 }

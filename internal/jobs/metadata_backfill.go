@@ -71,19 +71,34 @@ func (j *metadataBackfill) Summary() string {
 }
 
 func (j *metadataBackfill) Flags() string {
-	return "-concurrency, -rate, -limit, -dry-run"
+	return "-concurrency, -rate, -limit, -dry-run, -refresh"
 }
 
 func (j *metadataBackfill) Run(ctx context.Context, opts Options) error {
 	if opts.MetadataDB == nil {
 		return errors.New("metadata database is required")
 	}
-	total, err := db.CountTracksMissingMetadata(ctx, opts.MetadataDB)
+	selection := selectionFrom(opts)
+	pending, err := db.CountTracksMissingMetadata(ctx, opts.MetadataDB)
 	if err != nil {
 		return err
 	}
+	// The refresh set is only counted when it is going to be worked on, so the
+	// header does not advertise a number of tracks this run will never touch.
+	stale := int64(0)
+	if selection.enabled {
+		if stale, err = db.CountStaleTracksMetadata(ctx, opts.MetadataDB, selection.cutoff()); err != nil {
+			return err
+		}
+	}
+	total := pending + stale
 	if total == 0 {
 		fmt.Fprintln(opts.Out, "Nothing to do: every track already has upstream metadata.")
+		if !selection.enabled {
+			// Only worth saying when refreshing was not already asked for,
+			// otherwise it just restates the command that was run.
+			fmt.Fprintln(opts.Out, "  use -refresh to re-fetch tracks a provider has already settled.")
+		}
 		return nil
 	}
 	planned := total
@@ -98,13 +113,17 @@ func (j *metadataBackfill) Run(ctx context.Context, opts Options) error {
 	rate := opts.RatePerMinute
 
 	fmt.Fprintf(opts.Out, "Metadata backfill\n")
-	fmt.Fprintf(opts.Out, "  tracks awaiting metadata : %s\n", humanCount(planned))
+	fmt.Fprintf(opts.Out, "  never settled            : %s\n", exactCount(pending))
+	if selection.enabled {
+		fmt.Fprintf(opts.Out, "  settled before cutoff    : %s\n", exactCount(stale))
+	}
 	fmt.Fprintf(opts.Out, "  workers                  : %d\n", workers)
 	if rate > 0 {
 		fmt.Fprintf(opts.Out, "  upstream ceiling         : %d/min\n", rate)
 	} else {
 		fmt.Fprintf(opts.Out, "  upstream ceiling         : provider pacing only\n")
 	}
+	fmt.Fprintf(opts.Out, "  selection                : %s\n", selection.describe())
 	if opts.DryRun {
 		fmt.Fprintf(opts.Out, "  mode                     : dry run (no writes)\n")
 	}
@@ -161,6 +180,7 @@ func (j *metadataBackfill) Run(ctx context.Context, opts Options) error {
 		gate:           gate,
 		progress:       progress,
 		lanes:          lanes,
+		selection:      selection,
 		maxWriteErrors: opts.MaxWriteErrors,
 		writeAbort:     make(chan struct{}),
 		writeOK:        make(chan struct{}, 1),
@@ -218,15 +238,21 @@ func newBackfillResolver(cfg config.Config, metadataDB *sql.DB, idleGap time.Dur
 	// The pacers are shared with the live server through the metadata database
 	// and run in the job class, so this job only reaches an upstream during a
 	// window in which no real request is pending. Live traffic always wins.
-	var itunesPace pacer.Waiter = pacer.New(2 * time.Second)
-	var deezerPace pacer.Waiter = pacer.New(2 * time.Second)
+	//
+	// These two have no per-provider client interval, so unlike the lyrics
+	// providers there is nothing to fall back to: one rate from config is both the
+	// job's own pacing and the job half of the lease, which is what the live server
+	// has to agree with.
+	jobPace := cfg.UpstreamJobInterval()
+	var itunesPace pacer.Waiter = pacer.New(jobPace)
+	var deezerPace pacer.Waiter = pacer.New(jobPace)
 	coordinated := false
 	if metadataDB != nil {
 		if err := db.EnsureCoordination(context.Background(), metadataDB); err != nil {
 			fmt.Fprintf(errOut, "shared upstream pacing unavailable, pacing locally: %v\n", err)
 		} else {
-			itunesPace = pacer.NewShared(metadataDB, "itunes", 2*time.Second, idleGap).ForJob()
-			deezerPace = pacer.NewShared(metadataDB, "deezer", 2*time.Second, idleGap).ForJob()
+			itunesPace = pacer.NewShared(metadataDB, "itunes", jobPace, jobPace, idleGap).ForJob()
+			deezerPace = pacer.NewShared(metadataDB, "deezer", jobPace, jobPace, idleGap).ForJob()
 			coordinated = true
 		}
 	}
@@ -254,6 +280,9 @@ type backfillRun struct {
 	gate     *Gate
 	progress *Progress
 	lanes    []*Lane
+	// selection is what -refresh asked for, which decides whether the producer
+	// also walks the already-settled set.
+	selection refreshSelection
 
 	writes chan writeOp
 	wg     sync.WaitGroup
@@ -269,6 +298,9 @@ type backfillRun struct {
 	// for another attempt rather than written off.
 	deferred    int64
 	writeErrors int64
+	// rejections counts lookups that failed because a provider refused this
+	// host. A refusal pauses the worker rather than ending the run.
+	rejections int64
 	// consecutiveWriteErrors counts failed batches back to back. A run that
 	// cannot persist anything must stop rather than keep spending upstream
 	// requests on lookups whose results are discarded.
@@ -371,37 +403,107 @@ func (r *backfillRun) execute(ctx context.Context, planned int64) error {
 	return ctx.Err()
 }
 
+// produce streams pages so a library of any size runs in constant memory.
+//
+// It walks two phases. The first is every track no provider has ever settled,
+// which is the whole of a default run. The second is the refresh set: tracks a
+// provider did settle, but before the -refresh cutoff. Phase one is drained
+// completely before phase two starts, so a run with a limit spends it on work
+// that has never been attempted rather than re-resolving rows that already have
+// an answer. That ordering is the whole of the "prioritizes pending" behaviour,
+// and it holds regardless of how the two sets interleave in the table.
+//
+// The stale phase pages on (age, id) instead of id because it orders by age.
+// A row the run commits gets a fresh settle time and leaves the set; a row it
+// could not settle keeps its old one but is still not re-read, because the
+// cursor only advances past it.
 func (r *backfillRun) produce(ctx context.Context, out chan<- db.MetadataWork, planned int64) {
+	var produced int64
+	produced += r.producePending(ctx, out, planned-produced)
+	if produced >= planned {
+		return
+	}
+	if !r.selection.enabled {
+		return
+	}
+	r.produceStale(ctx, out, planned-produced)
+}
+
+// producePending feeds tracks no provider has ever settled.
+func (r *backfillRun) producePending(ctx context.Context, out chan<- db.MetadataWork, budget int64) int64 {
+	if budget <= 0 {
+		return 0
+	}
 	var afterID int64
 	var produced int64
-	for produced < planned {
+	for produced < budget {
 		if ctx.Err() != nil {
-			return
+			return produced
 		}
 		page, err := db.ListTracksMissingMetadata(ctx, r.opts.MetadataDB, afterID, pageSize)
 		if err != nil {
 			if ctx.Err() == nil {
 				r.progress.Notice("read tracks: %v", err)
 			}
-			return
+			return produced
 		}
 		if len(page) == 0 {
-			return
+			return produced
 		}
 		for _, item := range page {
 			select {
 			case <-ctx.Done():
-				return
+				return produced
 			case out <- item:
 			}
 			r.inFlight.Add(1)
 			produced++
 			afterID = item.ID
-			if produced >= planned {
-				return
+			if produced >= budget {
+				return produced
 			}
 		}
 	}
+	return produced
+}
+
+// produceStale feeds tracks a provider settled before the refresh cutoff.
+func (r *backfillRun) produceStale(ctx context.Context, out chan<- db.MetadataWork, budget int64) int64 {
+	if budget <= 0 {
+		return 0
+	}
+	var afterAge string
+	var afterID int64
+	var produced int64
+	for produced < budget {
+		if ctx.Err() != nil {
+			return produced
+		}
+		page, err := db.ListStaleTracksMetadata(ctx, r.opts.MetadataDB, r.selection.cutoff(), afterAge, afterID, pageSize)
+		if err != nil {
+			if ctx.Err() == nil {
+				r.progress.Notice("read stale tracks: %v", err)
+			}
+			return produced
+		}
+		if len(page) == 0 {
+			return produced
+		}
+		for _, item := range page {
+			select {
+			case <-ctx.Done():
+				return produced
+			case out <- item:
+			}
+			r.inFlight.Add(1)
+			produced++
+			afterAge, afterID = item.CheckedAt, item.ID
+			if produced >= budget {
+				return produced
+			}
+		}
+	}
+	return produced
 }
 
 // retryLater hands a throttled track back for another attempt, reporting
@@ -505,6 +607,7 @@ func (r *backfillRun) resolveOne(ctx context.Context, lane *Lane, item db.Metada
 	})
 
 	outcome := classifyLookup(track, err)
+	r.noteRejected(ctx, err)
 	switch outcome {
 	case OutcomeSucceeded:
 		r.gate.Succeed()
@@ -543,6 +646,27 @@ func (r *backfillRun) resolveOne(ctx context.Context, lane *Lane, item db.Metada
 	// leaves the remaining tracks for the next run, which is where they
 	// would have ended up regardless.
 	return !r.writeFailed()
+}
+
+// rejectionPause is how long a worker sits out after a provider refuses it (403
+// and friends). The refusal is usually a short block or a rate-limit that tripped
+// a stricter threshold, so waiting costs a minute instead of ending the run.
+const rejectionPause = 60 * time.Second
+
+// noteRejected counts a provider refusal and pauses the worker, so a blocked
+// request costs a minute of quiet rather than the whole run.
+func (r *backfillRun) noteRejected(ctx context.Context, err error) {
+	if !metadata.IsProviderRejected(err) {
+		return
+	}
+	r.mu.Lock()
+	r.rejections++
+	r.mu.Unlock()
+	r.progress.Notice("provider refused (%s); pausing %s", metadata.RejectionSummary(err), rejectionPause)
+	select {
+	case <-ctx.Done():
+	case <-time.After(rejectionPause):
+	}
 }
 
 // classifyLookup decides how a lookup result is counted, and by extension
@@ -800,8 +924,12 @@ func (r *backfillRun) deferredCount() int64 {
 	return r.deferred
 }
 
-// remaining reports how many planned tracks are still unresolved, so the
-// summary can tell the operator whether a re-run would do anything.
+// remaining reports how many tracks are still never-settled, so the summary can
+// tell the operator whether a plain re-run would do anything.
+//
+// The stale set is deliberately left out. A refresh run leaves freshly settled
+// rows behind on purpose, and reporting them as outstanding would tell the
+// operator to run the same refresh again immediately.
 func (r *backfillRun) remaining(ctx context.Context) int64 {
 	if r.opts.DryRun {
 		return 0
@@ -817,20 +945,23 @@ func (r *backfillRun) summary() string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	parts := []string{
-		fmt.Sprintf("%s resolved", humanCount(r.succeeded)),
-		fmt.Sprintf("%s not found upstream", humanCount(r.missed)),
+		fmt.Sprintf("%s resolved", exactCount(r.succeeded)),
+		fmt.Sprintf("%s not found upstream", exactCount(r.missed)),
 	}
 	if r.throttled > 0 {
-		parts = append(parts, fmt.Sprintf("%s rate limited", humanCount(r.throttled)))
+		parts = append(parts, fmt.Sprintf("%s rate limited", exactCount(r.throttled)))
 	}
 	if r.deferred > 0 {
-		parts = append(parts, fmt.Sprintf("%s rate limited and retried", humanCount(r.deferred)))
+		parts = append(parts, fmt.Sprintf("%s rate limited and retried", exactCount(r.deferred)))
 	}
 	if r.failed > 0 {
-		parts = append(parts, fmt.Sprintf("%s failed", humanCount(r.failed)))
+		parts = append(parts, fmt.Sprintf("%s failed", exactCount(r.failed)))
+	}
+	if r.rejections > 0 {
+		parts = append(parts, fmt.Sprintf("%s rejected by the provider", exactCount(r.rejections)))
 	}
 	if r.writeErrors > 0 {
-		parts = append(parts, fmt.Sprintf("%s write errors", humanCount(r.writeErrors)))
+		parts = append(parts, fmt.Sprintf("%s write errors", exactCount(r.writeErrors)))
 	}
 	return strings.Join(parts, ", ") + "."
 }

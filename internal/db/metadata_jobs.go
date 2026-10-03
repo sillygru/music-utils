@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 )
 
 // MetadataWork is one track awaiting an upstream metadata lookup, reduced to
@@ -17,6 +18,92 @@ type MetadataWork struct {
 	Album     string
 	Duration  float64
 	CreatedAt string
+	// CheckedAt is the stored settle time for a stale refresh candidate, in the
+	// same form the column holds: "2006-01-02 15:04:05", or empty when the answer
+	// predates the column. A caller paging the stale set carries this forward as
+	// its keyset cursor, so it is selected rather than re-read.
+	CheckedAt string
+}
+
+// sqlTime renders a time the way SQLite's CURRENT_TIMESTAMP stores it.
+//
+// The settle columns hold that exact layout, so a cutoff has to be written the
+// same way: comparing a Go time.Time against a text column would let SQLite cast
+// it to a number and compare "2024" against "1756...", silently matching every
+// row or none. Lexicographic order over this fixed-width format is also
+// chronological, which is what lets the stale scan page on it as a cursor.
+func sqlTime(t time.Time) string {
+	return t.UTC().Format("2006-01-02 15:04:05")
+}
+
+// staleAge is the expression the stale scans filter and order on.
+//
+// COALESCE maps a missing settle time to the empty string, which sorts before
+// every real timestamp and compares less than the current cutoff. That gives the
+// rows with an unknown age the oldest possible age for free, instead of the
+// alternative of asking for them with an OR: SQLite cannot serve
+// "metadata_checked_at IS NULL OR metadata_checked_at < ?" from an index and
+// falls back to a full table scan, which is exactly what makes a refresh slow on
+// a large library. Treating "settled before we started recording when" as
+// maximally stale is also the reading the column's own comment asks for.
+const staleAge = "COALESCE(metadata_checked_at, '')"
+
+// ListStaleTracksMetadata returns tracks a provider settled before cutoff,
+// oldest answer first. It is the second phase of a refresh run, used only when
+// -refresh is set.
+//
+// Rows are paged by the (age, id) pair rather than by id alone, because ordering
+// by age is what makes "oldest answer first" fall out of the index, and because
+// the cursor has to be a tuple to be a valid resume point. A row the run commits
+// gets a fresh settle time and leaves the stale set; a row it could not settle
+// keeps its old one but is still never re-read, because the cursor only advances.
+func ListStaleTracksMetadata(ctx context.Context, database *sql.DB, cutoff time.Time, afterAge string, afterID int64, limit int) ([]MetadataWork, error) {
+	if database == nil {
+		return nil, errors.New("metadata database is nil")
+	}
+	if limit <= 0 {
+		limit = 500
+	}
+	rows, err := database.QueryContext(ctx, `SELECT id, name, artist_name,
+COALESCE(album_name, ''), COALESCE(duration, 0), created_at, `+staleAge+`
+FROM tracks
+WHERE metadata_checked = 1
+AND `+staleAge+` < ?
+AND (`+staleAge+` > ? OR (`+staleAge+` = ? AND id > ?))
+ORDER BY `+staleAge+`, id
+LIMIT ?`, sqlTime(cutoff), afterAge, afterAge, afterID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list stale tracks metadata: %w", err)
+	}
+	defer rows.Close()
+
+	work := make([]MetadataWork, 0, limit)
+	for rows.Next() {
+		var item MetadataWork
+		if err := rows.Scan(&item.ID, &item.Name, &item.Artist, &item.Album, &item.Duration, &item.CreatedAt, &item.CheckedAt); err != nil {
+			return nil, fmt.Errorf("scan stale track metadata: %w", err)
+		}
+		work = append(work, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate stale tracks metadata: %w", err)
+	}
+	return work, nil
+}
+
+// CountStaleTracksMetadata returns how many tracks a provider settled before
+// cutoff, which is the size of the second phase of a refresh run.
+func CountStaleTracksMetadata(ctx context.Context, database *sql.DB, cutoff time.Time) (int64, error) {
+	if database == nil {
+		return 0, errors.New("metadata database is nil")
+	}
+	var count int64
+	if err := database.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM tracks WHERE metadata_checked = 1 AND "+staleAge+" < ?",
+		sqlTime(cutoff)).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count stale tracks metadata: %w", err)
+	}
+	return count, nil
 }
 
 // ListTracksMissingMetadata returns tracks that have never been resolved

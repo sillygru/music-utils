@@ -17,6 +17,7 @@ import (
 	"github.com/sillygru/music-utils/internal/names"
 	"github.com/sillygru/music-utils/internal/pacer"
 	"github.com/sillygru/music-utils/internal/ttml"
+	"github.com/sillygru/music-utils/internal/upstream"
 )
 
 // ErrNotFound reports that LyricsPlus has no lyrics for the track.
@@ -45,9 +46,9 @@ type Client struct {
 	mirrors    []string
 	userAgent  string
 	http       *http.Client
-	pace       *pacer.Pacer
+	pace       pacer.Waiter
 
-	mu          sync.Mutex
+	mu      sync.Mutex
 	working hint
 }
 
@@ -58,6 +59,14 @@ type hint struct {
 // New creates a client. apiBaseURL is the Binimum index
 // (https://lyrics-api.binimum.org); mirrors are LyricsPlus /v2/lyrics/get hosts.
 func New(apiBaseURL string, mirrors []string, userAgent string, timeout time.Duration) (*Client, error) {
+	return NewWithPacer(apiBaseURL, mirrors, userAgent, timeout, nil)
+}
+
+// NewWithPacer creates a client that spaces its requests using pace, falling
+// back to the provider's own interval when pace is nil. A batch job passes a
+// pacer shared with the live server so a backfill yields to real traffic
+// instead of competing with it for the same upstream budget.
+func NewWithPacer(apiBaseURL string, mirrors []string, userAgent string, timeout time.Duration, pace pacer.Waiter) (*Client, error) {
 	apiBaseURL = strings.TrimRight(strings.TrimSpace(apiBaseURL), "/")
 	parsed, err := url.Parse(apiBaseURL)
 	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
@@ -78,17 +87,30 @@ func New(apiBaseURL string, mirrors []string, userAgent string, timeout time.Dur
 		mirrors:    cleaned,
 		userAgent:  userAgent,
 		http:       &http.Client{Timeout: timeout},
-		pace:       pacer.New(300 * time.Millisecond),
+		pace:       pacer.OrDefault(pace, RequestInterval),
 	}, nil
 }
 
-// DefaultMirrors is the Metrolist mirror list (workers host disabled: daily cap).
+// RequestInterval is how far apart two LyricsPlus requests are spaced when the
+// caller does not supply its own pacer. See lrclib.RequestInterval for why it is
+// exported rather than kept private.
+const RequestInterval = 300 * time.Millisecond
+
+// LeaseName is the upstream's name on the shared pacing lease.
+//
+// It is exported because two processes have to agree on it for a shared lease to
+// be shared at all: the lyrics backfill claims this name while it works, and the
+// server claims it on every live request. Spelling it in one place is what keeps a
+// rename from silently turning a shared budget into two private ones.
+const LeaseName = "lyricsplus"
+
+// DefaultMirrors is the verified-reachable mirror list. The other Metrolist
+// mirrors were dropped after they stopped resolving: atomix.one serves a cert
+// that does not cover the hostname, prjktla.my.id returns 530, and the Vercel
+// host returns 402 DEPLOYMENT_DISABLED.
 func DefaultMirrors() []string {
 	return []string{
 		"https://lyricsplus.binimum.org",
-		"https://lyricsplus.atomix.one/",
-		"https://lyricsplus.prjktla.my.id",
-		"https://lyricsplus-seven.vercel.app",
 	}
 }
 
@@ -323,8 +345,16 @@ func convertMirrorLines(lines []mirrorLine, wordMode bool) (synced, plain string
 		if text == "" {
 			continue
 		}
-		plainLines = append(plainLines, text)
 		lineBegin := ttml.MillisToSeconds(line.Time)
+		// A mirror that hands back something other than milliseconds lands here
+		// as a stamp no recording could reach. Dropping the line keeps the rest
+		// of the lyric usable, and stops a unit mistake being stored as though it
+		// were a song with a very long first verse. The check sits above the
+		// plain-text append so plain and synced stay in lockstep.
+		if lineBegin < 0 || lineBegin > ttml.MaxPlausibleSyncedSeconds {
+			continue
+		}
+		plainLines = append(plainLines, text)
 		minutes := int(lineBegin) / 60
 		seconds := lineBegin - float64(minutes*60)
 		syncedLines = append(syncedLines, formatLRCLine(minutes, seconds, text))
@@ -434,8 +464,8 @@ func (c *Client) fetchText(ctx context.Context, endpoint string) (string, error)
 	if response.StatusCode == http.StatusNotFound {
 		return "", ErrNotFound
 	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return "", fmt.Errorf("LyricsPlus returned HTTP %d", response.StatusCode)
+	if err := upstream.CheckStatus("LyricsPlus", response); err != nil {
+		return "", err
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, maxResponseBytes))
 	if err != nil {

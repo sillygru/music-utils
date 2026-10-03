@@ -13,14 +13,23 @@ import (
 
 	"github.com/sillygru/music-utils/internal/names"
 	"github.com/sillygru/music-utils/internal/pacer"
+	"github.com/sillygru/music-utils/internal/upstream"
 )
 
 var ErrNotFound = errors.New("rich lyrics not found")
 
 const (
 	maxResponseBytes = 4 << 20
-	requestInterval  = time.Second / 5
 )
+
+// RequestInterval is how far apart two Unison requests are spaced when the caller
+// does not supply its own pacer.
+//
+// It is exported because the server has to state the same rate when it applies
+// UPSTREAM_PACE_MS to this client. Unison sits on no shared lease, because the
+// lyrics backfill never asks it for lyrics, so the number the client paces itself
+// at and the number the server hands it have to come from the same place.
+const RequestInterval = time.Second / 5
 
 // Result is a source-native rich lyrics payload. Content is intentionally
 // preserved rather than converted so TTML/QRC timing and annotations survive.
@@ -36,10 +45,18 @@ type Client struct {
 	baseURL   string
 	userAgent string
 	http      *http.Client
-	pace      *pacer.Pacer
+	pace      pacer.Waiter
 }
 
 func New(baseURL, userAgent string, timeout time.Duration) (*Client, error) {
+	return NewWithPacer(baseURL, userAgent, timeout, nil)
+}
+
+// NewWithPacer creates a client that spaces its requests using pace, falling
+// back to the provider's own interval when pace is nil. A batch job passes a
+// pacer shared with the live server so a backfill yields to real traffic
+// instead of competing with it for the same upstream budget.
+func NewWithPacer(baseURL, userAgent string, timeout time.Duration, pace pacer.Waiter) (*Client, error) {
 	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	parsed, err := url.Parse(baseURL)
 	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
@@ -55,7 +72,7 @@ func New(baseURL, userAgent string, timeout time.Duration) (*Client, error) {
 		baseURL:   baseURL,
 		userAgent: userAgent,
 		http:      &http.Client{Timeout: timeout},
-		pace:      pacer.New(requestInterval),
+		pace:      pacer.OrDefault(pace, RequestInterval),
 	}, nil
 }
 
@@ -100,8 +117,8 @@ func (c *Client) Get(ctx context.Context, trackName, artistName, albumName strin
 	if response.StatusCode == http.StatusNotFound {
 		return nil, ErrNotFound
 	}
-	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return nil, fmt.Errorf("rich lyrics returned HTTP %d", response.StatusCode)
+	if err := upstream.CheckStatus("rich lyrics", response); err != nil {
+		return nil, err
 	}
 
 	var payload unisonResponse
@@ -123,12 +140,12 @@ func (c *Client) Get(ctx context.Context, trackName, artistName, albumName strin
 }
 
 type unisonResponse struct {
-	Success bool             `json:"success"`
-	Data    *unisonData      `json:"data"`
-	Lyrics  string           `json:"lyrics"`
-	Format  string           `json:"format"`
-	Sync    string           `json:"syncType"`
-	Type    string           `json:"sync_type"`
+	Success bool        `json:"success"`
+	Data    *unisonData `json:"data"`
+	Lyrics  string      `json:"lyrics"`
+	Format  string      `json:"format"`
+	Sync    string      `json:"syncType"`
+	Type    string      `json:"sync_type"`
 }
 
 type unisonData struct {

@@ -60,17 +60,38 @@ func RunJobTo(out, errOut io.Writer, args []string) int {
 
 	flags := flag.NewFlagSet("run-job "+job.Name(), flag.ContinueOnError)
 	flags.SetOutput(errOut)
-	concurrency := flags.Int("concurrency", 4, "parallel workers")
-	rate := flags.Int("rate", 0, "upstream requests per minute across all workers (0 = provider pacing only)")
+	concurrency := flags.Int("concurrency", 4, "work items in flight")
+	rate := flags.Int("rate", 0, "work items started per minute (0 = provider pacing only)")
+	// A job whose units differ from the wording above restates them, so `-help`
+	// describes the flag the operator is actually about to set rather than the one
+	// another job would use.
+	if describable, ok := job.(jobs.FlagDescriber); ok {
+		for name, description := range describable.FlagDescriptions() {
+			if registered := flags.Lookup(name); registered != nil {
+				registered.Usage = description
+			}
+		}
+	}
 	limit := flags.Int("limit", 0, "maximum number of tracks to process (0 = no limit)")
 	dryRun := flags.Bool("dry-run", false, "report what would change without writing to the databases")
+	refresh := flags.String("refresh", "", "also re-fetch work a provider already settled; optionally an age (72h, 3d, 1w) so only answers older than that are refreshed. Never set: only work no provider has ever settled")
 	maxWriteErrors := flags.Int("max-write-errors", defaultMaxWriteErrors, "abort after this many consecutive failed write batches (0 = never abort)")
 	idleGap := flags.Duration("user-idle-gap", 0, "how long live traffic must stay quiet before the job touches a shared upstream (0 = server default)")
 	metadataPath := flags.String("metadata", "", "metadata database path (defaults to METADATA_DB_PATH)")
 	lyricsPath := flags.String("lyrics", "", "lyrics database path (defaults to LYRICS_DB_PATH)")
 	coverPath := flags.String("cover", "", "cover database path (defaults to COVER_DB_PATH)")
-	if err := flags.Parse(rest); err != nil {
+	if err := flags.Parse(normalizeBareRefresh(rest)); err != nil {
 		return 2
+	}
+	// A flag's default value cannot be told apart from one the operator typed, and
+	// for -refresh the two mean different things: absent means "never-settled work
+	// only", while a bare -refresh means "re-fetch everything".
+	refreshOn, refreshAge := false, time.Duration(0)
+	if refreshGiven(flags) {
+		if refreshOn, refreshAge, err = jobs.ParseRefresh(*refresh); err != nil {
+			fmt.Fprintf(errOut, "jobs: %v\n", err)
+			return 2
+		}
 	}
 	if *concurrency < 1 {
 		fmt.Fprintln(errOut, "jobs: -concurrency must be at least 1")
@@ -137,6 +158,20 @@ func RunJobTo(out, errOut io.Writer, args []string) int {
 	}
 	if lyricsDB != nil {
 		defer lyricsDB.Close()
+		// A job writes the same schema the server does, and that includes the
+		// lyrics side. Without this a job launched before the server has run the
+		// lyrics migration would fail every write on a missing table, which looks
+		// like a job fault rather than a version mismatch. It is cheap on a
+		// migrated database because every statement is guarded.
+		if !*dryRun {
+			migrateCtx, cancelMigrate := context.WithTimeout(context.Background(), jobMigrateTimeout)
+			err := db.MigrateLyrics(migrateCtx, lyricsDB)
+			cancelMigrate()
+			if err != nil {
+				fmt.Fprintf(errOut, "jobs: migrate lyrics database: %v\n", err)
+				return 1
+			}
+		}
 	}
 
 	coverDB, err := openOptionalJobDB(*coverPath, cfg)
@@ -154,17 +189,21 @@ func RunJobTo(out, errOut io.Writer, args []string) int {
 	defer stop()
 
 	opts := jobs.Options{
-		Config:        cfg,
-		MetadataDB:    metadataDB,
-		LyricsDB:      lyricsDB,
-		CoverDB:       coverDB,
-		Out:           out,
-		ErrOut:        errOut,
-		Concurrency:   *concurrency,
-		RatePerMinute: *rate,
-		Limit:         *limit,
-		DryRun:        *dryRun,
-		UserIdleGap:   *idleGap,
+		Config:           cfg,
+		MetadataDB:       metadataDB,
+		LyricsDB:         lyricsDB,
+		CoverDB:          coverDB,
+		MetadataDBPath:   *metadataPath,
+		LyricsDBPath:     *lyricsPath,
+		Out:              out,
+		ErrOut:           errOut,
+		Concurrency:      *concurrency,
+		RatePerMinute:    *rate,
+		Limit:            *limit,
+		DryRun:           *dryRun,
+		Refresh:          refreshOn,
+		RefreshOlderThan: refreshAge,
+		UserIdleGap:      *idleGap,
 		// A negative value means "no limit"; the job clamps it away.
 		MaxWriteErrors: *maxWriteErrors,
 	}
@@ -181,6 +220,74 @@ func RunJobTo(out, errOut io.Writer, args []string) int {
 		return 1
 	}
 	return 0
+}
+
+// refreshGiven reports whether -refresh appeared on the command line.
+//
+// It exists because the flag's default value is indistinguishable from a value the
+// operator typed, and the two mean different things. Read as a string alone, the
+// default "" is exactly what a bare -refresh produces, so a job given the default
+// would silently re-fetch the entire library on every run.
+func refreshGiven(flags *flag.FlagSet) bool {
+	given := false
+	flags.Visit(func(f *flag.Flag) {
+		if f.Name == "refresh" {
+			given = true
+		}
+	})
+	return given
+}
+
+// normalizeBareRefresh rewrites a valueless -refresh into -refresh=0 so the
+// flag package does not swallow the token after it.
+//
+// The flag package always takes the next argument as a string flag's value, so
+// "-refresh -dry-run" would otherwise be read as an age of "-dry-run" and fail to
+// parse. A bare -refresh with nothing after it fails harder still, with "flag needs
+// an argument", which is the most ordinary way to use the flag. Making the bare
+// form explicit up front means the parser sees one shape and this stays the only
+// place that has to know about the difference.
+func normalizeBareRefresh(args []string) []string {
+	out := make([]string, len(args))
+	copy(out, args)
+	for i := range out {
+		if out[i] != "-refresh" && out[i] != "--refresh" {
+			continue
+		}
+		if i+1 >= len(out) {
+			// Nothing follows, so there is no value to consume.
+			out[i] += "=0"
+			continue
+		}
+		if strings.HasPrefix(out[i+1], "-") && !looksLikeAge(out[i+1]) {
+			out[i] += "=0"
+		}
+	}
+	return out
+}
+
+// looksLikeAge reports whether a dash-leading token is a value rather than a flag.
+//
+// This has to cover every unit jobs.ParseRefresh accepts, not just bare numbers:
+// "-refresh -72h" is a malformed age that the parser will reject, and rewriting it
+// into a bare refresh would instead re-fetch the entire library. The unit letters
+// are restricted to digits, a decimal point, and those units, which is what
+// separates a value from every flag the command defines.
+func looksLikeAge(token string) bool {
+	body := strings.TrimLeft(token, "-")
+	if body == "" {
+		return false
+	}
+	for _, r := range body {
+		switch {
+		case r >= '0' && r <= '9':
+		case r == '.', r == 'h', r == 'm', r == 's', r == 'd', r == 'w':
+		default:
+			return false
+		}
+	}
+	// A token of only unit letters is not a value.
+	return strings.ContainsAny(body, "0123456789")
 }
 
 // splitJobName pulls the job name off the front of the arguments, so flags may
@@ -223,35 +330,18 @@ func openOptionalJobDB(path string, cfg config.Config) (*sql.DB, error) {
 	return openJobDB(path, cfg)
 }
 
-// checkWritable verifies the database accepts a write.
+// checkWritable verifies the metadata database accepts a write, and explains a
+// failure in terms the operator can act on.
 //
-// A BEGIN IMMEDIATE alone is not enough: SQLite acquires the write lock at BEGIN
-// but defers the page write, so the statement succeeds against a read-only file
-// and only the first real write reports SQLITE_READONLY. The probe therefore
-// issues a genuine write inside a transaction and rolls it back, which exercises
-// the same path a job batch takes.
-//
-// Inspecting the mode bits instead would be cheaper but wrong: POSIX ACLs and a
-// setgid directory both change who may write, and root bypasses the check
-// entirely. The rollback leaves no trace, and a crash mid-probe cannot leave one
-// either, because SQLite discards an uncommitted transaction.
+// The probe itself lives in internal/db so a job can run it against a database
+// other than this one; only the message needs the path, so only that stays here.
 func checkWritable(path string, database *sql.DB) error {
 	// Bound the probe so a database held under a long write transaction by the
 	// live server reports as unusable instead of blocking the job's startup.
 	ctx, cancel := context.WithTimeout(context.Background(), writeProbeTimeout)
 	defer cancel()
 
-	tx, err := database.BeginTx(ctx, nil)
-	if err != nil {
-		return unwritableError(path, err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	// The table is never actually created: the rollback discards it. A name
-	// that cannot collide with a real one keeps the probe harmless even if a
-	// future change commits the transaction by mistake.
-	if _, err := tx.ExecContext(ctx,
-		"CREATE TABLE IF NOT EXISTS job_write_probe (id INTEGER PRIMARY KEY)"); err != nil {
+	if err := db.ProbeWritable(ctx, database); err != nil {
 		return unwritableError(path, err)
 	}
 	return nil

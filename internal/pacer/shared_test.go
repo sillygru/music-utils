@@ -37,7 +37,7 @@ func sharedTestDB(t *testing.T) *sql.DB {
 // never made to queue behind a background job that claimed a slot.
 func TestUserTrafficIsServedImmediately(t *testing.T) {
 	database := sharedTestDB(t)
-	shared := NewShared(database, "itunes", 2*time.Second, 10*time.Second)
+	shared := NewShared(database, "itunes", 2*time.Second, 2*time.Second, 10*time.Second)
 
 	// A job claims a far-future slot, as it would while queued behind traffic.
 	if _, err := shared.claim(context.Background(), ClassJob); err != nil {
@@ -65,7 +65,7 @@ func TestUserTrafficIsServedImmediately(t *testing.T) {
 func TestJobWaitsForIdleWindow(t *testing.T) {
 	database := sharedTestDB(t)
 	const idleGap = 3 * time.Second
-	shared := NewShared(database, "itunes", 0, idleGap)
+	shared := NewShared(database, "itunes", 0, 0, idleGap)
 
 	// Live traffic just happened.
 	if err := shared.ForUser().Wait(context.Background()); err != nil {
@@ -99,7 +99,7 @@ func TestJobStepsAsideForUserArrivingMidWait(t *testing.T) {
 		interval = 300 * time.Millisecond
 		idleGap  = time.Second
 	)
-	shared := NewShared(database, "itunes", interval, idleGap)
+	shared := NewShared(database, "itunes", interval, interval, idleGap)
 
 	// Prime the lease so the job's own claim resolves to a slot in the future
 	// and it genuinely has to wait. No user traffic is recorded, so without a
@@ -147,7 +147,7 @@ func TestJobStepsAsideForUserArrivingMidWait(t *testing.T) {
 // transient read error must not become a licence to fire.
 func TestJobReadFailureStandsAside(t *testing.T) {
 	database := sharedTestDB(t)
-	shared := NewShared(database, "itunes", 0, 50*time.Millisecond)
+	shared := NewShared(database, "itunes", 0, 0, 50*time.Millisecond)
 
 	if err := shared.ForJob().Wait(context.Background()); err != nil {
 		t.Fatalf("prime: %v", err)
@@ -174,10 +174,47 @@ func TestJobReadFailureStandsAside(t *testing.T) {
 	}
 }
 
+// TestJobStopsWaitingOutAnIdleWindowItWillNeverGet covers the starvation that
+// made a backfill sit at 0% forever: a server with steady traffic never reaches
+// the idle window, so a job that yields unconditionally never runs.
+func TestJobStopsWaitingOutAnIdleWindowItWillNeverGet(t *testing.T) {
+	database := sharedTestDB(t)
+	shared := NewShared(database, "itunes", 0, 0, 2*time.Second)
+
+	// Live traffic keeps landing, so every idle check fails.
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if err := shared.ForUser().Wait(context.Background()); err != nil {
+				return
+			}
+		}
+	}()
+	defer func() { close(stop); <-done }()
+
+	ctx := context.Background()
+	start := time.Now()
+	if err := shared.ForJob().Wait(ctx); err != nil {
+		t.Fatalf("job wait: %v", err)
+	}
+	// It may defer first, but only within the budget, and it cannot be
+	// unbounded: the real deployment's symptom was a run that never moved.
+	if elapsed := time.Since(start); elapsed > maxIdleWait+2*time.Second {
+		t.Fatalf("job waited %s for an idle window it can never get", elapsed)
+	}
+}
+
 func TestJobProceedsWhenServerIsIdle(t *testing.T) {
 	database := sharedTestDB(t)
 	// A tiny gap keeps the test quick while still exercising the same path.
-	shared := NewShared(database, "itunes", 0, 50*time.Millisecond)
+	shared := NewShared(database, "itunes", 0, 0, 50*time.Millisecond)
 
 	// No user traffic has ever been recorded.
 	start := time.Now()
@@ -194,8 +231,8 @@ func TestJobProceedsWhenServerIsIdle(t *testing.T) {
 func TestCombinedTrafficIsSpaced(t *testing.T) {
 	database := sharedTestDB(t)
 	const interval = 300 * time.Millisecond
-	server := NewShared(database, "itunes", interval, time.Duration(0))
-	job := NewShared(database, "itunes", interval, 1*time.Nanosecond)
+	server := NewShared(database, "itunes", interval, interval, time.Duration(0))
+	job := NewShared(database, "itunes", interval, interval, 1*time.Nanosecond)
 
 	serverWaiter := server.ForUser()
 	jobWaiter := job.ForJob()
@@ -231,8 +268,8 @@ func TestCombinedTrafficIsSpaced(t *testing.T) {
 func TestSeparateInstancesShareOneLease(t *testing.T) {
 	database := sharedTestDB(t)
 	const interval = 200 * time.Millisecond
-	first := NewShared(database, "itunes", interval, 0)
-	second := NewShared(database, "itunes", interval, 0)
+	first := NewShared(database, "itunes", interval, interval, 0)
+	second := NewShared(database, "itunes", interval, interval, 0)
 
 	ctx := context.Background()
 	var mu sync.Mutex
@@ -278,7 +315,7 @@ func TestSeparateInstancesShareOneLease(t *testing.T) {
 // pacing exists to prevent, so the lease has to be retried after a cooldown.
 func TestSharedRecoversAfterTransientFailure(t *testing.T) {
 	database := sharedTestDB(t)
-	shared := NewShared(database, "itunes", 0, 0)
+	shared := NewShared(database, "itunes", 0, 0, 0)
 	ctx := context.Background()
 
 	// A write failure, as a database held by the live server would produce.
@@ -322,7 +359,7 @@ func TestSharedRecoversAfterTransientFailure(t *testing.T) {
 func TestSharedFallsBackToLocalPacing(t *testing.T) {
 	// A nil database means no coordination table; the job must still pace
 	// locally rather than fire unthrottled.
-	shared := NewShared(nil, "itunes", 50*time.Millisecond, 0)
+	shared := NewShared(nil, "itunes", 50*time.Millisecond, 50*time.Millisecond, 0)
 
 	ctx := context.Background()
 	if err := shared.ForJob().Wait(ctx); err != nil {
@@ -339,7 +376,7 @@ func TestSharedFallsBackToLocalPacing(t *testing.T) {
 
 func TestSharedWaitHonorsContextCancellation(t *testing.T) {
 	database := sharedTestDB(t)
-	shared := NewShared(database, "itunes", time.Hour, 0)
+	shared := NewShared(database, "itunes", time.Hour, time.Hour, 0)
 	// Claim once so the next call must wait a full hour.
 	if err := shared.ForUser().Wait(context.Background()); err != nil {
 		t.Fatalf("prime: %v", err)

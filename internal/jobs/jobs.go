@@ -31,6 +31,19 @@ type Job interface {
 	Run(ctx context.Context, opts Options) error
 }
 
+// FlagDescriber is an optional interface a job implements to restate the help text
+// of a flag the command layer defines for every job.
+//
+// The flags are shared, so their default wording has to be written for jobs in
+// general and ends up imprecise for any one of them. The lyrics job works on songs
+// and paces itself per provider rather than per worker, so both of its units differ
+// from the metadata job's, and describing them in the metadata job's terms would
+// tell an operator the wrong thing about what they are limiting.
+type FlagDescriber interface {
+	// FlagDescriptions maps flag names to the help text to use instead.
+	FlagDescriptions() map[string]string
+}
+
 // Options carries everything a job needs. Databases are opened by the caller so
 // every job shares the same connection, busy-timeout, and WAL behavior as the
 // server.
@@ -39,18 +52,45 @@ type Options struct {
 	MetadataDB *sql.DB
 	LyricsDB   *sql.DB
 	CoverDB    *sql.DB
-	Out        io.Writer
-	ErrOut     io.Writer
+	// MetadataDBPath and LyricsDBPath are the files the handles above were opened
+	// from, so a job can name the right one when it reports a failure. They reflect
+	// the command line overrides, not just the environment.
+	MetadataDBPath string
+	LyricsDBPath   string
+	Out            io.Writer
+	ErrOut         io.Writer
 
-	// Concurrency is the number of parallel workers the job may use.
+	// Concurrency is how many items the job may work on at once. For a job that
+	// walks each item through several upstreams in turn, that is items in flight
+	// rather than requests in flight.
 	Concurrency int
-	// RatePerMinute caps total upstream requests per minute across all
+	// RatePerMinute caps how many work items the job starts per minute across all
 	// workers. Zero means "no extra ceiling beyond provider pacing".
+	//
+	// It counts work items, not upstream requests. A job that fans out to several
+	// providers spends one request per provider per item, and those requests are
+	// already spaced by each provider's own pacer; adding a global request ceiling
+	// on top would just make this flag the binding constraint again.
 	RatePerMinute int
 	// Limit caps how many work items are processed; zero means no cap.
 	Limit int
 	// DryRun reports what would change without writing to the databases.
 	DryRun bool
+	// Refresh re-fetches work a provider has already settled instead of only
+	// work that was never attempted.
+	//
+	// It is a separate field from RefreshOlderThan because the two states are
+	// genuinely different and Go's flag package cannot tell them apart: "-refresh"
+	// alone and "-refresh 0" both parse as a zero duration, but the first means
+	// "re-fetch everything, newest work last" and the second is the same thing
+	// only by coincidence. Collapsing them would make it impossible for a caller
+	// to ask for a bare refresh without also allowing a zero cutoff to mean
+	// "never refresh".
+	Refresh bool
+	// RefreshOlderThan is how old a settled answer must be to count as stale
+	// when Refresh is set. Zero means every settled item is stale, so a bare
+	// -refresh re-fetches the whole library.
+	RefreshOlderThan time.Duration
 	// MaxWriteErrors is how many consecutive failed write batches a job
 	// tolerates before stopping. Zero or less disables the abort. This catches
 	// a database that becomes unwritable after startup, which a one-time

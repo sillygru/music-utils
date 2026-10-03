@@ -15,6 +15,7 @@ import (
 	"github.com/sillygru/music-utils/internal/names"
 	"github.com/sillygru/music-utils/internal/pacer"
 	"github.com/sillygru/music-utils/internal/ttml"
+	"github.com/sillygru/music-utils/internal/upstream"
 )
 
 // ErrNotFound reports that BetterLyrics has no lyrics for the track.
@@ -35,11 +36,19 @@ type Client struct {
 	baseURL   string
 	userAgent string
 	http      *http.Client
-	pace      *pacer.Pacer
+	pace      pacer.Waiter
 }
 
 // New creates a client for baseURL (e.g. https://lyrics-api.boidu.dev).
 func New(baseURL, userAgent string, timeout time.Duration) (*Client, error) {
+	return NewWithPacer(baseURL, userAgent, timeout, nil)
+}
+
+// NewWithPacer creates a client that spaces its requests using pace, falling
+// back to the provider's own interval when pace is nil. A batch job passes a
+// pacer shared with the live server so a backfill yields to real traffic
+// instead of competing with it for the same upstream budget.
+func NewWithPacer(baseURL, userAgent string, timeout time.Duration, pace pacer.Waiter) (*Client, error) {
 	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	parsed, err := url.Parse(baseURL)
 	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
@@ -52,9 +61,22 @@ func New(baseURL, userAgent string, timeout time.Duration) (*Client, error) {
 		baseURL:   baseURL,
 		userAgent: userAgent,
 		http:      &http.Client{Timeout: timeout},
-		pace:      pacer.New(200 * time.Millisecond),
+		pace:      pacer.OrDefault(pace, RequestInterval),
 	}, nil
 }
+
+// RequestInterval is how far apart two BetterLyrics requests are spaced when the
+// caller does not supply its own pacer. See lrclib.RequestInterval for why it is
+// exported rather than kept private.
+const RequestInterval = 200 * time.Millisecond
+
+// LeaseName is the upstream's name on the shared pacing lease.
+//
+// It is exported because two processes have to agree on it for a shared lease to
+// be shared at all: the lyrics backfill claims this name while it works, and the
+// server claims it on every live request. Spelling it in one place is what keeps a
+// rename from silently turning a shared budget into two private ones.
+const LeaseName = "betterlyrics"
 
 // Get fetches TTML for a song and converts it to LRC. Duration is seconds;
 // it is forwarded in milliseconds only when positive, matching the upstream
@@ -101,8 +123,8 @@ func (c *Client) Get(ctx context.Context, trackName, artistName, albumName strin
 	if response.StatusCode == http.StatusNotFound {
 		return nil, ErrNotFound
 	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return nil, fmt.Errorf("BetterLyrics returned HTTP %d", response.StatusCode)
+	if err := upstream.CheckStatus("BetterLyrics", response); err != nil {
+		return nil, err
 	}
 	var payload struct {
 		TTML string `json:"ttml"`

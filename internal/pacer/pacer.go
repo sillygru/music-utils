@@ -51,3 +51,16 @@ func (p *Pacer) Wait(ctx context.Context) error {
 	p.last = time.Now()
 	return nil
 }
+
+// OrDefault returns wait, or a plain Pacer at interval when wait is nil.
+//
+// Provider constructors take an optional Waiter so a batch job can inject one
+// shared with the live server. A caller that passes nothing still needs the
+// provider's own pacing, and this keeps that fallback in one place instead of
+// repeating the same nil check in every constructor.
+func OrDefault(wait Waiter, interval time.Duration) Waiter {
+	if wait == nil {
+		return New(interval)
+	}
+	return wait
+}

@@ -358,20 +358,6 @@ func runParallelLyricsSearch(
 
 	// Video-keyed providers resolve exactly one video and merge it when found.
 	if videoID != "" && !skipRemote && remoteAllowed {
-		if providers.zemerEnabled && providers.zemer != nil {
-			ordinaryWG.Add(1)
-			go func() {
-				defer ordinaryWG.Done()
-				remote, err := providers.zemer.Get(ctx, videoID)
-				if err != nil {
-					return
-				}
-				merge([]lyricsResponse{searchPersistResponse(ctx, metadataDB, lyricsDB, lrclib.RemoteResult{
-					TrackName: title, ArtistName: hintArtist, AlbumName: hintAlbum,
-					PlainLyrics: remote.PlainLyrics, SyncedLyrics: remote.SyncedLyrics,
-				}, "zemer")})
-			}()
-		}
 		if providers.tube != nil && (providers.tubeLyricsEnabled || providers.tubeSubtitleEnabled) {
 			ordinaryWG.Add(1)
 			go func() {
