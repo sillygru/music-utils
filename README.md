@@ -88,6 +88,18 @@ that consults iTunes first, then Deezer, and an in-process cache memoizes both
 hits and not-found misses with bounded lifetimes so repeated lookups stop
 re-hitting upstream providers.
 
+Search is local-first with a background fill. `/api/metadata/search` serves what
+the local catalog already holds and only asks a provider when the page is not
+full; the provider answer is persisted either way, so the next search for the
+same query is a pure local read and the per-track `/api/metadata/get` for a
+resolved track becomes a local hit too. When a search has nothing local to show
+it waits on the provider fan-out for up to the 3s window, as lyrics does.
+`/api/cover/search` caches whole responses per canonical query in the cover
+database, including empty results, so a repeated query costs no upstream request
+even after a restart. Both endpoints share one provider fan-out per query across
+concurrent callers, so a burst of identical requests is asked once rather than
+once per caller.
+
 Metadata responses expose provenance:
 
 - `metadataSource` — `itunes`, `deezer`, or user-provided.
@@ -124,7 +136,11 @@ cold-lookup latency and has been removed.
 - **Metadata fallback** — iTunes + Deezer provider chain with local caching.
 - **Lyrics providers** — LRCLIB, BetterLyrics, KuGou, Paxsenix, LyricsPlus, and YouTube (official + subtitle) plus optional direct Apple Music TTML and official Musixmatch, all fanned out in parallel and cached locally (videoId providers only when `video_id` is supplied; 3s response cap, background persistence).
 - **Opt-in rich lyrics** — Unison-compatible word/syllable payloads are cached separately and returned alone with `include_rich_sync=true`; unavailable rich lyrics fall back to plain/LRC lyrics.
-- **Rate limiting** — per-client-IP limits with `Retry-After` headers.
+- **Rate limiting** — per-client-IP limits with `Retry-After` headers. A short-lived
+  response replay cache sits in front of the limiter, so a request the server
+  already answered is served from memory and consumes neither rate-limit budget
+  nor provider budget. Rejections (`429`, `503`) are never cached, so a momentary
+  upstream slowdown does not pin a URL to an error for the rest of the window.
 - **Upstream pacing** — every provider (LRCLIB, BetterLyrics, KuGou, Paxsenix, LyricsPlus, YouTube, Apple Music, Musixmatch, iTunes, Deezer, Last.fm) is
   paced process-wide to a fixed interval, so no client traffic can exceed a
   provider's rate limit or get the server's IP blocked. The pace is also shared

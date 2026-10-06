@@ -1,12 +1,18 @@
 package httpserver
 
 import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/sillygru/music-utils/internal/cover"
+	"github.com/sillygru/music-utils/internal/db"
 	"github.com/sillygru/music-utils/internal/metadata"
 	"github.com/sillygru/music-utils/internal/names"
 )
@@ -28,11 +34,71 @@ type coverTopResponse struct {
 	Results []coverSearchResponse `json:"results,omitempty"`
 }
 
+// coverSearchCacheTTL is how long a cover-search response is replayed before it
+// is refreshed from the providers.
+const coverSearchCacheTTL = db.CoverSearchCacheTTL
+
+// coverSearchCacheKey builds the canonical key for one cover-search query.
+//
+// The key carries the entity kind and the limit because both change the response
+// shape: an artist query and an album query draw on different providers, and a
+// limit of 10 and a limit of 50 are different pages rather than prefixes of one
+// another.
+func coverSearchCacheKey(kindRaw, q string, limit int) string {
+	return strings.ToLower(strings.Join(strings.Fields(strings.TrimSpace(q)), " ")) + "\x00" + strings.ToLower(strings.TrimSpace(kindRaw)) + "\x00" + strconv.Itoa(limit)
+}
+
+// replayCoverSearchCache writes a previously cached response and reports whether
+// it did. A hit is recorded as a local hit so the request log distinguishes it
+// from a search that actually spent upstream budget.
+func replayCoverSearchCache(database *sql.DB, w http.ResponseWriter, r *http.Request, key string) bool {
+	if database == nil {
+		return false
+	}
+	cached, err := db.FindCoverSearchCache(r.Context(), database, key, coverSearchCacheTTL)
+	if err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			setRequestIssue(r, slog.LevelWarn, err.Error())
+		}
+		return false
+	}
+	var results []coverSearchResponse
+	if err := json.Unmarshal(cached, &results); err != nil {
+		setRequestIssue(r, slog.LevelWarn, err.Error())
+		return false
+	}
+	setOutcome(r, "local_hit")
+	writeJSON(w, http.StatusOK, results)
+	return true
+}
+
+// storeCoverSearchCache persists a search response. Failure is not fatal: the
+// response has already been decided, and a cache that cannot be written only
+// costs the next identical query another upstream lookup.
+func storeCoverSearchCache(database *sql.DB, ctx context.Context, r *http.Request, key string, results []coverSearchResponse) {
+	if database == nil || key == "" {
+		return
+	}
+	encoded, err := json.Marshal(results)
+	if err != nil {
+		setRequestIssue(r, slog.LevelWarn, err.Error())
+		return
+	}
+	if err := db.UpsertCoverSearchCache(ctx, database, key, encoded); err != nil && ctx.Err() == nil {
+		setRequestIssue(r, slog.LevelWarn, err.Error())
+	}
+}
+
 // searchCoverHandler searches artwork. A free-text q searches songs, albums,
 // and artists at once and returns a mixed array where each item carries an
 // entityType; q combined with type narrows the search to that kind. Without q
 // the structured per-type search (type plus entity-specific fields) is used.
-func searchCoverHandler(metadataResolver *metadata.Resolver, resolver *cover.Resolver, fallbacks *fallbackGuard, fallbackEnabled bool) http.HandlerFunc {
+//
+// Results are cached whole, per query, in the cover database. The provider
+// resolvers memoize in process, but that map is lost on restart and a burst of
+// identical searches would otherwise queue behind the shared upstream pacers
+// once per caller.
+func searchCoverHandler(metadataResolver *metadata.Resolver, resolver *cover.Resolver, coverDB *sql.DB, fallbacks *fallbackGuard, fallbackEnabled bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
 		q := names.CleanSearch(query.Get("q"))
@@ -68,7 +134,11 @@ func searchCoverHandler(metadataResolver *metadata.Resolver, resolver *cover.Res
 			if !ok {
 				return
 			}
-			searchCoverStructured(w, r, resolver, fallbacks, fallbackEnabled, kind, input, limit)
+			key := coverSearchCacheKey(kind.String(), input.ArtistName+input.AlbumName+input.TrackName, limit)
+			if replayCoverSearchCache(coverDB, w, r, key) {
+				return
+			}
+			searchCoverStructured(w, r, resolver, coverDB, fallbacks, fallbackEnabled, kind, input, limit, key)
 			return
 		}
 
@@ -83,10 +153,18 @@ func searchCoverHandler(metadataResolver *metadata.Resolver, resolver *cover.Res
 				writeJSON(w, http.StatusBadRequest, apiError{Code: http.StatusBadRequest, Message: "type must be artist, album, or song"})
 				return
 			}
-			searchCoverFreeText(w, r, metadataResolver, resolver, fallbacks, fallbackEnabled, kind, q, limit)
+			key := coverSearchCacheKey(kind.String(), q, limit)
+			if replayCoverSearchCache(coverDB, w, r, key) {
+				return
+			}
+			searchCoverFreeText(w, r, metadataResolver, resolver, coverDB, fallbacks, fallbackEnabled, kind, q, limit, key)
 			return
 		}
-		searchCoverFreeTextAll(w, r, metadataResolver, resolver, fallbacks, fallbackEnabled, q, limit)
+		key := coverSearchCacheKey("all", q, limit)
+		if replayCoverSearchCache(coverDB, w, r, key) {
+			return
+		}
+		searchCoverFreeTextAll(w, r, metadataResolver, resolver, coverDB, fallbacks, fallbackEnabled, q, limit, key)
 	}
 }
 
@@ -106,7 +184,7 @@ func coverSearchLimit(w http.ResponseWriter, r *http.Request, raw string) (int, 
 }
 
 // searchCoverStructured runs the legacy per-type provider search.
-func searchCoverStructured(w http.ResponseWriter, r *http.Request, resolver *cover.Resolver, fallbacks *fallbackGuard, fallbackEnabled bool, kind cover.Kind, input cover.Input, limit int) {
+func searchCoverStructured(w http.ResponseWriter, r *http.Request, resolver *cover.Resolver, coverDB *sql.DB, fallbacks *fallbackGuard, fallbackEnabled bool, kind cover.Kind, input cover.Input, limit int, cacheKey string) {
 	if !fallbackEnabled || resolver == nil {
 		setOutcome(r, "miss")
 		writeJSON(w, http.StatusOK, []coverSearchResponse{})
@@ -133,12 +211,13 @@ func searchCoverStructured(w http.ResponseWriter, r *http.Request, resolver *cov
 			AlbumName: result.AlbumName, CoverURL: result.URL, CoverSource: result.Source,
 		})
 	}
+	storeCoverSearchCache(coverDB, r.Context(), r, cacheKey, response)
 	writeCoverSearch(w, r, response)
 }
 
 // searchCoverFreeText runs a free-text search restricted to one kind: songs via
 // the metadata providers, albums and artists via the cover providers.
-func searchCoverFreeText(w http.ResponseWriter, r *http.Request, metadataResolver *metadata.Resolver, resolver *cover.Resolver, fallbacks *fallbackGuard, fallbackEnabled bool, kind cover.Kind, q string, limit int) {
+func searchCoverFreeText(w http.ResponseWriter, r *http.Request, metadataResolver *metadata.Resolver, resolver *cover.Resolver, coverDB *sql.DB, fallbacks *fallbackGuard, fallbackEnabled bool, kind cover.Kind, q string, limit int, cacheKey string) {
 	if !fallbackEnabled || resolver == nil || metadataResolver == nil {
 		setOutcome(r, "miss")
 		writeJSON(w, http.StatusOK, []coverSearchResponse{})
@@ -158,12 +237,13 @@ func searchCoverFreeText(w http.ResponseWriter, r *http.Request, metadataResolve
 	default:
 		results = coverSearchByKind(r, resolver, cover.Artist, cover.Input{ArtistName: q}, limit)
 	}
+	storeCoverSearchCache(coverDB, r.Context(), r, cacheKey, results)
 	writeCoverSearch(w, r, results)
 }
 
 // searchCoverFreeTextAll searches songs, albums, and artists for the same query
 // and merges the results across types, round-robin, up to limit.
-func searchCoverFreeTextAll(w http.ResponseWriter, r *http.Request, metadataResolver *metadata.Resolver, resolver *cover.Resolver, fallbacks *fallbackGuard, fallbackEnabled bool, q string, limit int) {
+func searchCoverFreeTextAll(w http.ResponseWriter, r *http.Request, metadataResolver *metadata.Resolver, resolver *cover.Resolver, coverDB *sql.DB, fallbacks *fallbackGuard, fallbackEnabled bool, q string, limit int, cacheKey string) {
 	if !fallbackEnabled || resolver == nil || metadataResolver == nil {
 		setOutcome(r, "miss")
 		writeJSON(w, http.StatusOK, []coverSearchResponse{})
@@ -177,7 +257,9 @@ func searchCoverFreeTextAll(w http.ResponseWriter, r *http.Request, metadataReso
 	songs := coverSearchSongs(r, metadataResolver, q, limit)
 	albums := coverSearchByKind(r, resolver, cover.Album, cover.Input{AlbumName: q}, limit)
 	artists := coverSearchByKind(r, resolver, cover.Artist, cover.Input{ArtistName: q}, limit)
-	writeCoverSearch(w, r, mergeCoverSearch(limit, songs, albums, artists))
+	results := mergeCoverSearch(limit, songs, albums, artists)
+	storeCoverSearchCache(coverDB, r.Context(), r, cacheKey, results)
+	writeCoverSearch(w, r, results)
 }
 
 // coverSearchSongs resolves up to limit song covers from the metadata

@@ -3,6 +3,7 @@ package httpserver
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -128,7 +129,10 @@ func TestHealthzIsExemptFromRateLimit(t *testing.T) {
 
 	rejected := 0
 	for i := 0; i < 20; i++ {
-		apiResponse := requestFromIP(t, server.Handler, http.MethodGet, "/api/lyrics/search?q=load", "192.0.2.30:1234")
+		// Each request must be distinct. The replay cache sits outside the rate
+		// limiter, so a repeated identical query is answered from cache without
+		// consuming any budget and would never trip the limiter at all.
+		apiResponse := requestFromIP(t, server.Handler, http.MethodGet, fmt.Sprintf("/api/lyrics/search?q=load+%d", i), "192.0.2.30:1234")
 		if apiResponse.Code == http.StatusTooManyRequests {
 			rejected++
 		}
@@ -140,5 +144,27 @@ func TestHealthzIsExemptFromRateLimit(t *testing.T) {
 	}
 	if rejected == 0 {
 		t.Fatal("expected API load to trigger rate limiting")
+	}
+}
+
+// A repeated identical request is answered from the response cache without
+// consuming rate-limit budget. That is what makes a burst of retries survivable:
+// the server already had the answer, so rejecting the next copy of the same
+// question protects nothing.
+func TestReplayCacheHitDoesNotConsumeRateLimitBudget(t *testing.T) {
+	metadataDB, lyricsDB := testHTTPDatabases(t)
+	server := NewWithConfig(rateLimitTestConfig(), metadataDB, lyricsDB)
+	t.Cleanup(func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = server.Shutdown(shutdownCtx)
+	})
+
+	// Well past the configured per-second limit, all the same request.
+	for i := 0; i < 20; i++ {
+		response := requestFromIP(t, server.Handler, http.MethodGet, "/api/lyrics/search?q=replayed", "192.0.2.31:1234")
+		if response.Code == http.StatusTooManyRequests {
+			t.Fatalf("identical request %d was rate limited despite a cache hit", i)
+		}
 	}
 }

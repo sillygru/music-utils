@@ -201,7 +201,7 @@ func TestCoverSearchFreeTextMixed(t *testing.T) {
 		name:   "itunes",
 		result: &cover.Result{URL: "http://img/cover.jpg", Source: "itunes", ArtistName: "Example Artist", AlbumName: "Example Album"},
 	})
-	handler := searchCoverHandler(metadataResolver, coverResolver, testFallbackGuard(), true)
+	handler := searchCoverHandler(metadataResolver, coverResolver, testCoverDB(t), testFallbackGuard(), true)
 
 	response := performRequest(t, handler, "/?q=example&limit=10")
 	if response.Code != http.StatusOK {
@@ -244,7 +244,7 @@ func TestCoverSearchFreeTextNarrowedByType(t *testing.T) {
 		name:   "itunes",
 		result: &cover.Result{URL: "http://img/artist.jpg", Source: "itunes", ArtistName: "Example Artist"},
 	})
-	handler := searchCoverHandler(metadataResolver, coverResolver, testFallbackGuard(), true)
+	handler := searchCoverHandler(metadataResolver, coverResolver, testCoverDB(t), testFallbackGuard(), true)
 
 	response := performRequest(t, handler, "/?q=example&type=artist&limit=10")
 	if response.Code != http.StatusOK {
@@ -256,6 +256,82 @@ func TestCoverSearchFreeTextNarrowedByType(t *testing.T) {
 	}
 	if len(results) != 1 || results[0].EntityType != "artist" || results[0].CoverURL != "http://img/artist.jpg" {
 		t.Fatalf("unexpected narrowed results: %+v", results)
+	}
+}
+
+// A repeated cover search is served from the durable cache, so it costs no
+// upstream request. This is the whole point of the cache: identical queries are
+// the common case, and re-asking a provider for each one is what queues a burst
+// behind the shared pacers.
+//
+// The repeat is issued through a freshly built handler and resolver, sharing
+// only the cover database. That is what a restart looks like, and it is the only
+// way to tell the durable cache apart from the resolver's in-process memo, which
+// would otherwise satisfy the second request on its own.
+func TestCoverSearchRepeatedQueryReusesDurableCache(t *testing.T) {
+	coverDB := testCoverDB(t)
+	query := "/?q=example&type=artist&limit=10"
+
+	provider := &coverStubProvider{
+		name:   "itunes",
+		result: &cover.Result{URL: "http://img/artist.jpg", Source: "itunes", ArtistName: "Example Artist"},
+	}
+	firstHandler := searchCoverHandler(metadata.NewResolver(&metadataStubProvider{name: "itunes"}), cover.NewResolver(provider), coverDB, testFallbackGuard(), true)
+	first := performRequest(t, firstHandler, query)
+	if first.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", first.Code, first.Body.String())
+	}
+	if provider.calls == 0 {
+		t.Fatal("expected the first search to reach the provider")
+	}
+
+	// A brand new resolver, as a restarted process would build. Its in-process
+	// memo is empty, so only the database can answer.
+	restarted := &coverStubProvider{
+		name:   "itunes",
+		result: &cover.Result{URL: "http://img/artist.jpg", Source: "itunes", ArtistName: "Example Artist"},
+	}
+	secondHandler := searchCoverHandler(metadata.NewResolver(&metadataStubProvider{name: "itunes"}), cover.NewResolver(restarted), coverDB, testFallbackGuard(), true)
+	second := performRequest(t, secondHandler, query)
+	if second.Code != http.StatusOK {
+		t.Fatalf("expected 200 on the repeat, got %d: %s", second.Code, second.Body.String())
+	}
+	if restarted.calls != 0 {
+		t.Fatalf("the durable cache did not serve the repeat: provider was called %d time(s) after a restart", restarted.calls)
+	}
+	if second.Body.String() != first.Body.String() {
+		t.Fatalf("replayed response differs:\nfirst:  %s\nsecond: %s", first.Body.String(), second.Body.String())
+	}
+}
+
+// An empty result is cached too. A query that has already been answered with
+// nothing is the case most worth remembering, since re-asking costs the full
+// upstream budget to be told nothing again.
+func TestCoverSearchCachesEmptyResult(t *testing.T) {
+	coverDB := testCoverDB(t)
+	query := "/?q=nobody&type=artist&limit=10"
+
+	provider := &coverStubProvider{name: "itunes"}
+	firstHandler := searchCoverHandler(metadata.NewResolver(&metadataStubProvider{name: "itunes"}), cover.NewResolver(provider), coverDB, testFallbackGuard(), true)
+	first := performRequest(t, firstHandler, query)
+	if first.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", first.Code, first.Body.String())
+	}
+	if provider.calls == 0 {
+		t.Fatal("expected the first search to reach the provider")
+	}
+
+	restarted := &coverStubProvider{name: "itunes"}
+	secondHandler := searchCoverHandler(metadata.NewResolver(&metadataStubProvider{name: "itunes"}), cover.NewResolver(restarted), coverDB, testFallbackGuard(), true)
+	second := performRequest(t, secondHandler, query)
+	if second.Code != http.StatusOK {
+		t.Fatalf("expected 200 on the repeat, got %d: %s", second.Code, second.Body.String())
+	}
+	if restarted.calls != 0 {
+		t.Fatalf("the empty result was not cached: provider was called %d time(s) after a restart", restarted.calls)
+	}
+	if second.Body.String() != first.Body.String() {
+		t.Fatalf("replayed response differs:\nfirst:  %s\nsecond: %s", first.Body.String(), second.Body.String())
 	}
 }
 

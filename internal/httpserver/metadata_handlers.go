@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"log/slog"
@@ -8,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sillygru/music-utils/internal/db"
@@ -124,7 +126,135 @@ func getMetadataHandler(database *sql.DB, resolver *metadata.Resolver, fallbacks
 	}
 }
 
+// metadataSearchWait bounds how long a search with nothing local to show waits
+// on the upstream fan-out before answering. It matches the lyrics response
+// window (lyricsResponseWait) so both endpoints behave the same way: a request
+// that has something to return never waits at all, and one that would otherwise
+// return an empty page gets a bounded wait rather than the full provider
+// timeout.
+const metadataSearchWait = lyricsResponseWait
+
+// metadataSearchJob is one shared upstream fan-out for a search query.
+type metadataSearchJob struct {
+	done chan struct{}
+
+	mu      sync.Mutex
+	results []*db.Track
+}
+
+// publish records whatever the fan-out has resolved so far. It is called once,
+// after the upstream search returns, but it is shaped as a callback so a future
+// provider fan-out can stream partial results the way the lyrics path does.
+func (j *metadataSearchJob) publish(results []*db.Track) {
+	j.mu.Lock()
+	if len(results) > len(j.results) {
+		j.results = append([]*db.Track(nil), results...)
+	}
+	j.mu.Unlock()
+}
+
+func (j *metadataSearchJob) snapshot() []*db.Track {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return append([]*db.Track(nil), j.results...)
+}
+
+// await returns the fan-out's results, giving up after wait or when the request
+// ends. Returning whatever is available is deliberate: a late answer is still
+// worth persisting, it just is not worth holding a response open for.
+func (j *metadataSearchJob) await(ctx context.Context, wait time.Duration) []*db.Track {
+	if results := j.snapshot(); len(results) > 0 {
+		return results
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-j.done:
+	case <-timer.C:
+	case <-ctx.Done():
+	}
+	return j.snapshot()
+}
+
+// metadataSearchGroup guarantees one upstream fan-out per query, so a burst of
+// identical searches spends one provider round trip rather than one per caller.
+//
+// The fan-out runs on a context detached from the request on purpose. A search
+// that already has local rows to answer with returns immediately, and the fetch
+// it triggers has to outlive that response to reach the database and profit the
+// next request.
+type metadataSearchGroup struct {
+	mu   sync.Mutex
+	jobs map[string]*metadataSearchJob
+}
+
+func newMetadataSearchGroup() *metadataSearchGroup {
+	return &metadataSearchGroup{jobs: make(map[string]*metadataSearchJob)}
+}
+
+// join returns the shared job for key, starting the fan-out if this caller is
+// the first to ask for it.
+func (g *metadataSearchGroup) join(key string, start func(context.Context, func([]*db.Track))) *metadataSearchJob {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if job, ok := g.jobs[key]; ok {
+		return job
+	}
+	job := &metadataSearchJob{done: make(chan struct{})}
+	g.jobs[key] = job
+	// The context is bounded so a fan-out that no provider ever answers cannot
+	// outlive the process's patience for one query.
+	jobCtx, cancel := context.WithTimeout(context.Background(), metadataSearchFanOutTimeout)
+	go func() {
+		defer close(job.done)
+		defer cancel()
+		defer func() {
+			g.mu.Lock()
+			delete(g.jobs, key)
+			g.mu.Unlock()
+		}()
+		start(jobCtx, job.publish)
+	}()
+	return job
+}
+
+// metadataSearchFanOutTimeout bounds a single background search fan-out,
+// independently of whichever request is waiting on it.
+const metadataSearchFanOutTimeout = 30 * time.Second
+
+// fillMetadataSearch runs the upstream half of a metadata search and persists
+// every track it resolves.
+//
+// Persisting is what makes a background fill worth doing: without it the fetch
+// only ever serves the request that triggered it, and the next identical
+// search pays upstream again. Upserting also stamps metadata_checked, so the
+// per-track /api/metadata/get lookup for a resolved track becomes a local hit.
+func fillMetadataSearch(ctx context.Context, publish func([]*db.Track), database *sql.DB, resolver *metadata.Resolver, fallbacks *fallbackGuard, clientKey, searchQuery string, limit int) {
+	release, _, _, ok := fallbacks.acquireFor(ctx, clientKey)
+	if !ok {
+		return
+	}
+	defer release()
+	remote, err := resolver.Search(ctx, searchQuery, limit)
+	if err != nil {
+		return
+	}
+	for _, track := range remote {
+		if track == nil {
+			continue
+		}
+		// A search result is a definitive provider answer, so it settles the
+		// track rather than leaving it for the backfill job to ask again.
+		track.MetadataChecked = true
+		if id, persistErr := db.UpsertTrackMetadata(ctx, database, *track); persistErr == nil {
+			track.ID = id
+		}
+	}
+	publish(remote)
+}
+
 func searchMetadataHandlerWithUpstream(database *sql.DB, resolver *metadata.Resolver, fallbacks *fallbackGuard, fallbackEnabled bool) http.HandlerFunc {
+	group := newMetadataSearchGroup()
 	return func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
 		searchQuery := names.CleanSearch(query.Get("q"))
@@ -171,19 +301,24 @@ func searchMetadataHandlerWithUpstream(database *sql.DB, resolver *metadata.Reso
 		for i := range tracks {
 			appendTrack(&tracks[i].Track)
 		}
-		if fallbackEnabled && resolver != nil {
-			release, ok := fallbacks.enter(r, w)
-			if !ok {
-				return
-			}
-			defer release()
-			upstreamStart := time.Now()
-			remote, remoteErr := resolver.Search(r.Context(), searchQuery, limit)
-			setUpstreamDuration(r, time.Since(upstreamStart))
-			if remoteErr == nil {
-				for _, track := range remote {
+
+		// A local page that already fills the limit is the whole answer. Asking a
+		// provider anyway is how a search for a well-known track ends up waiting
+		// on the upstream pacer queue to be told nothing it did not already have.
+		if len(results) < limit && fallbackEnabled && resolver != nil && fallbacks != nil {
+			clientKey := clientIP(r, false)
+			job := group.join(searchQuery+"\x00"+strconv.Itoa(limit), func(ctx context.Context, publish func([]*db.Track)) {
+				fillMetadataSearch(ctx, publish, database, resolver, fallbacks, clientKey, searchQuery, limit)
+			})
+			// Only a search with nothing to show waits. One that already has
+			// local rows answers now and lets the fan-out persist for the next
+			// caller, which is the whole point of running it detached.
+			if len(results) == 0 {
+				upstreamStart := time.Now()
+				for _, track := range job.await(r.Context(), metadataSearchWait) {
 					appendTrack(track)
 				}
+				setUpstreamDuration(r, time.Since(upstreamStart))
 			}
 		}
 		if len(results) == 0 {

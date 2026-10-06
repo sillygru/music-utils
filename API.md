@@ -201,6 +201,16 @@ Searches the local catalog and merges matching results from iTunes and
 Deezer. Results are deduplicated by track, artist, and album; each result
 retains its provider provenance. The final response is a JSON array.
 
+The endpoint is local-first. When the local catalog already fills `limit`, the
+providers are not consulted at all. When it holds some results, they are
+returned immediately and the provider fan-out continues in the background,
+persisting its answers for the next request; the response is not delayed
+waiting for it. Only a search with nothing local to show waits on the provider
+fan-out, bounded to the same 3s window lyrics uses. Provider results are
+persisted, so a repeated query is served entirely from the local database and a
+`/api/metadata/get` for a resolved track becomes a local hit. Concurrent
+requests for the same query share one fan-out.
+
 Query parameters:
 
 - `q`, or one or more of `track_name`, `artist_name`, `album_name`, `genre`.
@@ -272,7 +282,15 @@ curl 'https://music.gru0.dev/api/cover/search?type=song&track_name=No%20Surprise
 
 `artist_name` is optional in structured song/album searches, same as
 `/api/cover/get`. `limit` defaults to `10`, range `1–50`; it caps the final
-merged array.`## `GET /api/cover/artist`
+merged array.
+
+Responses are cached whole, per canonical query (entity kind, query, and
+`limit`), in the cover database for 24 hours. Empty results are cached too, so a
+query that has already been answered with nothing is not re-asked. The cache is
+durable, so a repeat is served without contacting a provider even after a
+restart. Concurrent requests for the same query share one provider fan-out.
+
+## `GET /api/cover/artist`
 
 Returns artist artwork as a cover URL. On a miss it resolves the provider chain
 (Last.fm → iTunes → Deezer) in order, caches **every plausible provider URL**

@@ -259,7 +259,7 @@ func NewWithLogger(cfg config.Config, metadataDB, lyricsDB, coverDB *sql.DB, log
 	mux.HandleFunc("GET /api/cover/get", getCoverTopHandler(metadataDB, coverDB, coverResolver, fallbacks, cfg.CoverFallbackEnabled))
 	mux.HandleFunc("GET /api/cover/artist", getEntityCoverSearchHandler(coverDB, coverResolver, fallbacks, db.CoverArtist, cfg.CoverFallbackEnabled))
 	mux.HandleFunc("GET /api/cover/album", getEntityCoverSearchHandler(coverDB, coverResolver, fallbacks, db.CoverAlbum, cfg.CoverFallbackEnabled))
-	mux.HandleFunc("GET /api/cover/search", searchCoverHandler(metadataResolver, coverResolver, fallbacks, cfg.CoverFallbackEnabled))
+	mux.HandleFunc("GET /api/cover/search", searchCoverHandler(metadataResolver, coverResolver, coverDB, fallbacks, cfg.CoverFallbackEnabled))
 
 	limiter := newRateLimiter(cfg)
 	// The response cache replays identical requests (by method, path, and query)
@@ -267,11 +267,14 @@ func NewWithLogger(cfg config.Config, metadataDB, lyricsDB, coverDB *sql.DB, log
 	// messages from one client cannot hammer the DB. It is registered for
 	// shutdown below so its sweeper goroutine cannot leak.
 	replayCache := newResponseCache(responseReplayTTL)
-	// CORS wraps the limiter so every response (including 429/503) carries the
-	// headers browsers need, and preflight requests are answered before they
-	// can consume rate-limit budget. The replay cache sits inside the limiter
-	// and peers the mux's handlers so real API responses are deduplicated.
-	application := recoverMiddleware(corsMiddleware(limiter.Handler(replayCache.middleware(mux))), logger)
+	// The replay cache sits OUTSIDE the limiter, and that ordering is the point:
+	// a request answered from cache costs no provider budget and no rate-limit
+	// token, so a burst of repeated queries is bounded by what the client can
+	// send rather than by the limiter rejecting requests the server already had
+	// the answers to. The limiter still guards every request that actually
+	// reaches a handler. CORS wraps both so preflights are answered before
+	// either can consume anything.
+	application := recoverMiddleware(corsMiddleware(replayCache.middleware(limiter.Handler(mux))), logger)
 	server := &http.Server{
 		Addr:              ":" + normalizedPort(cfg.Port),
 		Handler:           requestLogger(application, logger, requestLogs),

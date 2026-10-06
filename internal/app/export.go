@@ -90,5 +90,39 @@ func exportDatabase(ctx context.Context, source, dest, label string) error {
 	if _, err := database.ExecContext(ctx, "VACUUM INTO '"+escaped+"'"); err != nil {
 		return fmt.Errorf("dump %s database: %w", label, err)
 	}
+	if err := stripOperationalCaches(dest); err != nil {
+		return fmt.Errorf("dump %s database: %w", label, err)
+	}
+	return nil
+}
+
+// operationalCacheTables are caches of answers rather than content. They make a
+// deployed instance faster to re-query, but a seed dump is meant to carry the
+// resolved data, and a dump full of one machine's recent query history is not
+// that. They are cleared from the copy only; the source database keeps them.
+var operationalCacheTables = []string{"cover_search_cache"}
+
+// stripOperationalCaches empties the cache tables in a freshly written dump.
+//
+// It runs against the destination rather than the source because deleting rows
+// from the live database to produce a cleaner export would trade the server's
+// cache for tidiness, which is the wrong direction.
+func stripOperationalCaches(dest string) error {
+	database, err := db.Open(dest, db.Config{
+		MmapSize:     512 * 1024 * 1024,
+		CacheSizeKB:  -64000,
+		MaxOpenConns: 1,
+	})
+	if err != nil {
+		return err
+	}
+	defer database.Close()
+	for _, table := range operationalCacheTables {
+		// A dump taken from a database that predates the table has nothing to
+		// clear, and that is not a reason to fail the export.
+		if _, err := database.ExecContext(context.Background(), "DELETE FROM "+table); err != nil && !strings.Contains(strings.ToLower(err.Error()), "no such table") {
+			return fmt.Errorf("clear %s: %w", table, err)
+		}
+	}
 	return nil
 }

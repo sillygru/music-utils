@@ -75,12 +75,31 @@ func (c *responseCache) middleware(next http.Handler) http.Handler {
 
 		rec := &recordingWriter{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(rec, r)
-		c.set(key, cachedResponse{
-			status: rec.statusCode(),
-			header: w.Header().Clone(),
-			body:   rec.body.Bytes(),
-		})
+		status := rec.statusCode()
+		if replayableStatus(status) {
+			c.set(key, cachedResponse{
+				status: status,
+				header: w.Header().Clone(),
+				body:   rec.body.Bytes(),
+			})
+		}
 	})
+}
+
+// replayableStatus reports whether a response is worth replaying.
+//
+// A rejection is not an answer. Caching one would let a single moment of
+// upstream congestion or a tripped per-client budget pin that key to an error for
+// the whole TTL, so every retry inside the window is answered with the same
+// failure even after the cause has passed. That is how a brief hiccup becomes a
+// five-second outage, and it is worst exactly where it hurts most: a burst, where
+// one unlucky caller can already tell everyone else the same thing.
+func replayableStatus(status int) bool {
+	switch status {
+	case http.StatusTooManyRequests, http.StatusServiceUnavailable:
+		return false
+	}
+	return true
 }
 
 func (c *responseCache) set(key string, res cachedResponse) {

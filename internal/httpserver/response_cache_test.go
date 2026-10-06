@@ -111,3 +111,74 @@ func TestResponseCacheKeyIgnoresUserAgent(t *testing.T) {
 		t.Fatalf("expected keys to be equal regardless of User-Agent, got %q vs %q", keyA, keyB)
 	}
 }
+
+// TestResponseCacheDoesNotReplayRejections verifies that a rate-limited or
+// upstream-busy response is not replayed.
+//
+// A rejection is not an answer. Caching one pins that key to the error for the
+// whole TTL, so every retry inside the window is refused even after the cause
+// has passed — which turns a momentary congestion spike into a sustained outage
+// for exactly the clients retrying hardest.
+func TestResponseCacheDoesNotReplayRejections(t *testing.T) {
+	for _, status := range []int{http.StatusTooManyRequests, http.StatusServiceUnavailable} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			var calls atomic.Int32
+			inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				// Fail once, then succeed: a cached rejection would keep the
+				// second request failing even though the cause has cleared.
+				if calls.Add(1) == 1 {
+					w.WriteHeader(status)
+					_, _ = w.Write([]byte(`{"error":true}`))
+					return
+				}
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{"ok":true}`))
+			})
+
+			cache := newResponseCache(5 * time.Second)
+			t.Cleanup(cache.Stop)
+			handler := recoverMiddleware(cache.middleware(inner), nil)
+
+			first := httptest.NewRecorder()
+			handler.ServeHTTP(first, httptest.NewRequest(http.MethodGet, "/api/thing", nil))
+			if first.Code != status {
+				t.Fatalf("first request: expected %d, got %d", status, first.Code)
+			}
+
+			second := httptest.NewRecorder()
+			handler.ServeHTTP(second, httptest.NewRequest(http.MethodGet, "/api/thing", nil))
+			if second.Code != http.StatusOK {
+				t.Fatalf("second request replayed the %d rejection: got %d", status, second.Code)
+			}
+			if second.Body.String() != `{"ok":true}` {
+				t.Fatalf("second request body = %q, want the recovered response", second.Body.String())
+			}
+		})
+	}
+}
+
+// A cache miss that returns a real answer, including a 404, is still replayed.
+// A 404 for a track nobody has is a stable fact, not a transient condition.
+func TestResponseCacheStillReplaysNotFound(t *testing.T) {
+	var calls atomic.Int32
+	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":"not found"}`))
+	})
+
+	cache := newResponseCache(5 * time.Second)
+	t.Cleanup(cache.Stop)
+	handler := recoverMiddleware(cache.middleware(inner), nil)
+
+	for i := 0; i < 3; i++ {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/missing", nil))
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("request %d: expected 404, got %d", i, rec.Code)
+		}
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("expected the inner handler to run once, ran %d times", calls.Load())
+	}
+}
