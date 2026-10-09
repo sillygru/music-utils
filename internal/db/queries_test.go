@@ -406,3 +406,129 @@ func TestGetCacheStats(t *testing.T) {
 		t.Errorf("expected TotalCached=9, got %d", stats.TotalCached)
 	}
 }
+
+func seedSearchTrack(t *testing.T, database *sql.DB, track Track) {
+	t.Helper()
+	if _, err := UpsertTrackMetadata(context.Background(), database, track); err != nil {
+		t.Fatalf("seed track %q: %v", track.Name, err)
+	}
+}
+
+func searchNames(tracks []TrackSearchResult) []string {
+	names := make([]string, 0, len(tracks))
+	for i := range tracks {
+		names = append(names, tracks[i].Name)
+	}
+	return names
+}
+
+// The title track of an album is normally written after its siblings, so an
+// id-ordered search buried it behind every other track on the record.
+func TestSearchTracksRanksTitleTrackFirst(t *testing.T) {
+	metadataDB, _ := testDatabases(t)
+	ctx := context.Background()
+	for _, name := range []string{"Rollercoaster Of Life", "Eye Of The Storm", "Life Evermore Pt. 2", "Life Evermore Pt. 3", "Dark Days", "Dragonfire", "Love Me", "Spell On You", "About You", "When I Wake Up", "For I Am Death", "Devil In Disguise"} {
+		seedSearchTrack(t, metadataDB, Track{Name: name, ArtistName: "The Pretty Reckless", AlbumName: "Dear God", Duration: 240, Genre: "Hard Rock", Year: 2026, CoverURL: "https://example.test/cover.jpg"})
+	}
+	seedSearchTrack(t, metadataDB, Track{Name: "Dear God", ArtistName: "The Pretty Reckless", AlbumName: "Dear God", Duration: 368, Genre: "Hard Rock", Year: 2026, CoverURL: "https://example.test/cover.jpg"})
+
+	tracks, err := SearchTracks(ctx, metadataDB, nil, "Dear God The Pretty Reckless", 10)
+	if err != nil {
+		t.Fatalf("search tracks: %v", err)
+	}
+	if len(tracks) != 10 {
+		t.Fatalf("expected a full page of 10, got %d: %v", len(tracks), searchNames(tracks))
+	}
+	if tracks[0].Name != "Dear God" {
+		t.Fatalf("expected the title track first, got %v", searchNames(tracks))
+	}
+}
+
+// Deduplication used to happen in the caller, after LIMIT, so duplicates
+// silently ate page slots and the caller got fewer results than it asked for.
+func TestSearchTracksDeduplicatesBeforeLimit(t *testing.T) {
+	metadataDB, _ := testDatabases(t)
+	ctx := context.Background()
+	// Same track three times, differing only by duration: three rows, one slot.
+	for _, duration := range []float64{240, 240.5, 241} {
+		seedSearchTrack(t, metadataDB, Track{Name: "Shared Song", ArtistName: "Duplicate Artist", AlbumName: "Duplicate Album", Duration: duration})
+	}
+	for i, name := range []string{"Filler One", "Filler Two", "Filler Three", "Filler Four", "Filler Five", "Filler Six", "Filler Seven"} {
+		seedSearchTrack(t, metadataDB, Track{Name: name, ArtistName: "Duplicate Artist", AlbumName: "Duplicate Album", Duration: float64(100 + i)})
+	}
+
+	tracks, err := SearchTracks(ctx, metadataDB, nil, "Duplicate Artist Duplicate Album", 8)
+	if err != nil {
+		t.Fatalf("search tracks: %v", err)
+	}
+	if len(tracks) != 8 {
+		t.Fatalf("expected 8 distinct tracks, got %d: %v", len(tracks), searchNames(tracks))
+	}
+}
+
+// FTS scores an incomplete row higher purely because its document is shorter,
+// which used to let a stub outrank the fully described copy of the same song.
+func TestSearchTracksPrefersTheCompleteCopy(t *testing.T) {
+	metadataDB, _ := testDatabases(t)
+	ctx := context.Background()
+	seedSearchTrack(t, metadataDB, Track{Name: "Stub Song", ArtistName: "Completeness Artist", AlbumName: "Stub Album", Duration: 0})
+	seedSearchTrack(t, metadataDB, Track{Name: "Stub Song", ArtistName: "Completeness Artist", AlbumName: "Stub Album", Duration: 265, Genre: "Rock", Year: 2026, CoverURL: "https://example.test/cover.jpg"})
+
+	tracks, err := SearchTracks(ctx, metadataDB, nil, "Stub Song Completeness Artist", 10)
+	if err != nil {
+		t.Fatalf("search tracks: %v", err)
+	}
+	if len(tracks) != 1 {
+		t.Fatalf("expected the two rows to collapse to one, got %d: %v", len(tracks), searchNames(tracks))
+	}
+	if tracks[0].Duration != 265 || tracks[0].CoverURL == "" {
+		t.Fatalf("expected the complete copy, got duration=%v cover=%q", tracks[0].Duration, tracks[0].CoverURL)
+	}
+}
+
+func TestSearchTracksRelaxedCatchesAMisspelledQuery(t *testing.T) {
+	metadataDB, _ := testDatabases(t)
+	ctx := context.Background()
+	seedSearchTrack(t, metadataDB, Track{Name: "Dear God", ArtistName: "The Pretty Reckless", AlbumName: "Dear God", Duration: 368, Genre: "Rock", Year: 2026})
+	// Right artist, unrelated title: matches the artist words alone and must
+	// not survive the coverage filter.
+	seedSearchTrack(t, metadataDB, Track{Name: "Make Me Wanna Die", ArtistName: "The Pretty Reckless", AlbumName: "Light Me Up", Duration: 224})
+	seedSearchTrack(t, metadataDB, Track{Name: "Unrelated Song", ArtistName: "Somebody Else", AlbumName: "Some Other Album", Duration: 180})
+
+	const misspelled = "Dear Gid The Pretty Reckless"
+	strict, err := SearchTracks(ctx, metadataDB, nil, misspelled, 10)
+	if err != nil {
+		t.Fatalf("strict search: %v", err)
+	}
+	if len(strict) != 0 {
+		t.Fatalf("expected the misspelled query to match nothing strictly, got %v", searchNames(strict))
+	}
+
+	relaxed, err := SearchTracksRelaxed(ctx, metadataDB, nil, misspelled, 10)
+	if err != nil {
+		t.Fatalf("relaxed search: %v", err)
+	}
+	if len(relaxed) == 0 || relaxed[0].Name != "Dear God" {
+		t.Fatalf("expected Dear God from the relaxed pass, got %v", searchNames(relaxed))
+	}
+	for _, track := range relaxed {
+		if track.Name == "Make Me Wanna Die" || track.Name == "Unrelated Song" {
+			t.Fatalf("relaxed pass returned an under-matching row: %v", searchNames(relaxed))
+		}
+	}
+}
+
+// A single query word is already matched as widely as it can be, so the OR
+// form would only re-run the same query.
+func TestSearchTracksRelaxedSkipsSingleWordQueries(t *testing.T) {
+	metadataDB, _ := testDatabases(t)
+	seedSearchTrack(t, metadataDB, Track{Name: "Lonely Song", ArtistName: "Somebody Else", AlbumName: "Some Album", Duration: 180})
+
+	tracks, err := SearchTracksRelaxed(context.Background(), metadataDB, nil, "Lonely", 10)
+	if err != nil {
+		t.Fatalf("relaxed search: %v", err)
+	}
+	if len(tracks) != 0 {
+		t.Fatalf("expected no relaxed results for a single word, got %v", searchNames(tracks))
+	}
+}

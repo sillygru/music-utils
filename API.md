@@ -201,6 +201,19 @@ Searches the local catalog and merges matching results from iTunes and
 Deezer. Results are deduplicated by track, artist, and album; each result
 retains its provider provenance. The final response is a JSON array.
 
+Local results are ranked by relevance rather than by the order they were
+cached, and deduplication happens before `limit` is applied, so a page holds
+`limit` distinct tracks. Rows carrying a real album, duration, genre, year, and
+cover outrank a bare stub of the same song.
+
+When the strict match — which requires every word of the query to appear in the
+title, artist, album, or genre — returns fewer rows than `limit`, a relaxed
+local pass runs before any provider is considered. It matches rows containing
+*any* query word, ranks them the same way, and keeps only those covering at
+least half the query words with at least one of them in the title or album. A
+typo or an abbreviation therefore resolves from the cache instead of costing a
+provider round trip.
+
 The endpoint is local-first. When the local catalog already fills `limit`, the
 providers are not consulted at all. When it holds some results, they are
 returned immediately and the provider fan-out continues in the background,

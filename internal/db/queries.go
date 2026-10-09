@@ -1125,7 +1125,101 @@ type TrackSearchResult struct {
 }
 
 // SearchTracks searches metadata FTS and composes matching lyrics rows in Go.
+//
+// Rows are ranked by bm25 relevance rather than insertion order, and the page
+// is deduplicated on (name, artist, album) inside SQL so `limit` means `limit`
+// distinct tracks instead of `limit` raw rows that a caller then has to collapse
+// into fewer.
 func SearchTracks(ctx context.Context, metadataDB, lyricsDB *sql.DB, query string, limit int) ([]TrackSearchResult, error) {
+	return searchTracksMatching(ctx, metadataDB, lyricsDB, ftsQuery(query), limit)
+}
+
+// SearchTracksRelaxed is the local-only fallback for a query whose words are not
+// all present in the catalog: it asks FTS for rows matching *any* query word
+// instead of all of them, ranks them the same way, and then discards every row
+// that mentions too few of the query words to be a plausible answer.
+//
+// It exists so a typo or an abbreviation resolves from the cache instead of
+// costing a provider round trip. It is deliberately a separate function rather
+// than a relaxation inside SearchTracks: the lyrics search shares SearchTracks
+// and would feed its unrelated rows into a response that is already merged with
+// provider answers.
+func SearchTracksRelaxed(ctx context.Context, metadataDB, lyricsDB *sql.DB, query string, limit int) ([]TrackSearchResult, error) {
+	if limit < 1 {
+		return []TrackSearchResult{}, nil
+	}
+	tokens := strings.Fields(normalize(query))
+	if len(tokens) < 2 {
+		// A single word is already matched as widely as it can be, so the OR
+		// form would only re-run the same query.
+		return []TrackSearchResult{}, nil
+	}
+	match := ftsOrQuery(query)
+	if match == "" {
+		return []TrackSearchResult{}, nil
+	}
+	// The coverage filter below throws rows away, so the query asks for more
+	// than the page needs; without that slack one rejected row under-fills the
+	// page it was fetched to fill.
+	candidates, err := searchTracksMatching(ctx, metadataDB, lyricsDB, match, relaxedFetchLimit(limit))
+	if err != nil {
+		return nil, err
+	}
+	threshold := (len(tokens) + 1) / 2
+	result := make([]TrackSearchResult, 0, limit)
+	for i := range candidates {
+		if !coversQueryTokens(&candidates[i].Track, tokens, threshold) {
+			continue
+		}
+		result = append(result, candidates[i])
+		if len(result) >= limit {
+			break
+		}
+	}
+	return result, nil
+}
+
+// searchTracksQuery is the single ranked lookup behind SearchTracks and
+// SearchTracksRelaxed.
+//
+// scored materializes bm25() because SQLite rejects the function inside an
+// OVER() clause ("unable to use function bm25 in the requested context") and
+// because bm25() must be called with the real table name tracks_fts, not the f
+// alias the join introduces. Its LIMIT is an over-fetch: deduplication in the
+// next CTE removes rows, so a batch no larger than the page would come up short.
+//
+// `missing` counts the presentation columns a row lacks. FTS scores an
+// incomplete row higher for the sole reason that its document is shorter, which
+// let a stub with no album outrank the fully described copy of the same song;
+// adding the count back into the ordering cancels that.
+//
+// deduped assigns every (name, artist, album) identity its most complete row.
+// Collapsing duplicates in the caller, after the LIMIT, is what used to hand
+// back pages holding fewer results than were asked for.
+var searchTracksQuery = `WITH scored AS (
+  SELECT t.*, bm25(tracks_fts, 10.0, 5.0, 2.0, 1.0) AS score,
+         (CASE WHEN COALESCE(TRIM(t.album_name), '') = '' THEN 1 ELSE 0 END)
+       + (CASE WHEN COALESCE(t.duration, 0) <= 0 THEN 1 ELSE 0 END)
+       + (CASE WHEN COALESCE(t.genre, '') = '' THEN 1 ELSE 0 END)
+       + (CASE WHEN COALESCE(t.year, 0) <= 0 THEN 1 ELSE 0 END)
+       + (CASE WHEN COALESCE(t.cover_url, '') = '' THEN 1 ELSE 0 END) AS missing
+  FROM tracks_fts AS f JOIN tracks AS t ON t.id = f.rowid
+  WHERE tracks_fts MATCH ?
+  ORDER BY score, t.id
+  LIMIT ?
+), deduped AS (
+  SELECT *, ROW_NUMBER() OVER (
+    PARTITION BY name_lower, artist_name_lower, COALESCE(album_name_lower, '')
+    ORDER BY missing, id
+  ) AS rep
+  FROM scored
+)
+SELECT ` + trackColumns("deduped") + ` FROM deduped
+WHERE rep = 1
+ORDER BY (score + missing), id
+LIMIT ?`
+
+func searchTracksMatching(ctx context.Context, metadataDB, lyricsDB *sql.DB, match string, limit int) ([]TrackSearchResult, error) {
 	if metadataDB == nil {
 		return nil, errors.New("metadata database is nil")
 	}
@@ -1135,11 +1229,10 @@ func SearchTracks(ctx context.Context, metadataDB, lyricsDB *sql.DB, query strin
 	if limit > 100 {
 		limit = 100
 	}
-	match := ftsQuery(query)
 	if match == "" {
 		return []TrackSearchResult{}, nil
 	}
-	rows, err := metadataDB.QueryContext(ctx, `SELECT `+trackColumns("t")+` FROM tracks_fts AS f JOIN tracks AS t ON t.id=f.rowid WHERE tracks_fts MATCH ? ORDER BY t.id LIMIT ?`, match, limit)
+	rows, err := metadataDB.QueryContext(ctx, searchTracksQuery, match, searchOverfetch(limit), limit)
 	if err != nil {
 		return nil, fmt.Errorf("search metadata: %w", err)
 	}
@@ -1164,6 +1257,60 @@ func SearchTracks(ctx context.Context, metadataDB, lyricsDB *sql.DB, query strin
 		return nil, fmt.Errorf("iterate metadata search: %w", err)
 	}
 	return result, nil
+}
+
+// searchOverfetch bounds how many ranked rows are pulled before deduplication.
+// It has to stay comfortably above the page size: collapsing duplicate
+// identities shrinks the batch, and a batch that shrinks past `limit` returns
+// fewer rows than the caller asked for.
+func searchOverfetch(limit int) int {
+	return clampInt(limit*10, 200, 1000)
+}
+
+// relaxedFetchLimit sizes the candidate batch for SearchTracksRelaxed. The
+// coverage filter discards an unknown share of it, so the batch is several times
+// the page and is floored low enough that a one-row page still has something to
+// choose from.
+func relaxedFetchLimit(limit int) int {
+	return clampInt(limit*3, 50, 100)
+}
+
+func clampInt(value, low, high int) int {
+	if value < low {
+		return low
+	}
+	if value > high {
+		return high
+	}
+	return value
+}
+
+// coversQueryTokens reports whether a row is close enough to the query to be
+// worth showing. An OR match is easy to satisfy by accident, so it takes two
+// conditions:
+//
+//   - covering at least half the query words, so a row sharing one common word
+//     with the query does not qualify;
+//   - landing at least one of those words in the title or the album. A query
+//     like "The Pretty Reckless Burn" spends three of its four words on the
+//     artist, and counting artist matches alone would qualify every other song
+//     the band ever recorded.
+func coversQueryTokens(track *Track, tokens []string, threshold int) bool {
+	// all mirrors the four columns tracks_fts indexes, so a word the FTS match
+	// counted counts here too.
+	all := normalize(track.Name + " " + track.ArtistName + " " + track.AlbumName + " " + track.Genre)
+	own := normalize(track.Name + " " + track.AlbumName)
+	matched, matchedOwn := 0, 0
+	for _, token := range tokens {
+		if !strings.Contains(all, token) {
+			continue
+		}
+		matched++
+		if strings.Contains(own, token) {
+			matchedOwn++
+		}
+	}
+	return matched >= threshold && matchedOwn > 0
 }
 
 // CacheStats holds the complete breakdown of cached content counts across
@@ -1327,11 +1474,22 @@ func normalize(value string) string { return strings.ToLower(strings.TrimSpace(v
 // album column stays NULL there.
 func albumType(value string) string { return normalize(value) }
 func ftsQuery(value string) string {
+	return strings.Join(ftsTokens(value), " AND ")
+}
+
+// ftsOrQuery is ftsQuery's permissive counterpart: any query word may match
+// instead of all of them. See SearchTracksRelaxed for why the row set still
+// needs filtering afterwards.
+func ftsOrQuery(value string) string {
+	return strings.Join(ftsTokens(value), " OR ")
+}
+
+func ftsTokens(value string) []string {
 	parts := strings.Fields(normalize(value))
 	for i, part := range parts {
 		parts[i] = `"` + strings.ReplaceAll(part, `"`, `""`) + `"*`
 	}
-	return strings.Join(parts, " AND ")
+	return parts
 }
 func contentHash(plain, synced string) string {
 	hash := sha256.Sum256([]byte(normalize(plain) + "\x00" + normalize(synced)))

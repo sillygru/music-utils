@@ -274,8 +274,8 @@ func searchMetadataHandlerWithUpstream(database *sql.DB, resolver *metadata.Reso
 		}
 		cacheStart := time.Now()
 		tracks, err := db.SearchTracks(r.Context(), database, nil, searchQuery, limit)
-		setCacheDuration(r, time.Since(cacheStart))
 		if err != nil {
+			setCacheDuration(r, time.Since(cacheStart))
 			setRequestIssue(r, slog.LevelError, err.Error())
 			setOutcome(r, "error")
 			writeJSON(w, http.StatusInternalServerError, apiError{Code: http.StatusInternalServerError, Message: "Internal server error"})
@@ -294,18 +294,46 @@ func searchMetadataHandlerWithUpstream(database *sql.DB, resolver *metadata.Reso
 			seen[key] = struct{}{}
 			results = append(results, toMetadataResponse(track))
 		}
-		// Local FTS rows match only when every query token is present, so they
+		// Strict FTS rows match only when every query token is present, so they
 		// outrank a provider's fuzzy hits. Appending them first also keeps a
 		// full page of loosely related provider results from crowding them out
 		// of the limit entirely.
 		for i := range tracks {
 			appendTrack(&tracks[i].Track)
 		}
+		// Measured before the relaxed pass. The upstream fan-out below is
+		// triggered by a cache that had nothing to show, so growing the local
+		// recall must not turn into extra provider traffic: a query the relaxed
+		// pass fills is a cache hit, not a miss.
+		strictCount := len(results)
+
+		// A query carrying a word the catalog does not hold — a typo, an
+		// abbreviation — gets nothing from the strict match and would otherwise
+		// cost a provider round trip for an answer that is already cached under
+		// a slightly different spelling. Relaxing the match keeps that a local
+		// read; the coverage filter inside SearchTracksRelaxed keeps it from
+		// handing back rows the strict match was right to reject.
+		if strictCount < limit {
+			relaxed, relaxedErr := db.SearchTracksRelaxed(r.Context(), database, nil, searchQuery, limit)
+			setCacheDuration(r, time.Since(cacheStart))
+			if relaxedErr != nil {
+				// The strict read already succeeded, so this is a degraded page
+				// rather than a failed request: report it and serve what the
+				// cache gave us.
+				setRequestIssue(r, slog.LevelWarn, relaxedErr.Error())
+			}
+			for i := range relaxed {
+				appendTrack(&relaxed[i].Track)
+			}
+		} else {
+			setCacheDuration(r, time.Since(cacheStart))
+		}
+		hadLocal := len(results) > 0
 
 		// A local page that already fills the limit is the whole answer. Asking a
 		// provider anyway is how a search for a well-known track ends up waiting
 		// on the upstream pacer queue to be told nothing it did not already have.
-		if len(results) < limit && fallbackEnabled && resolver != nil && fallbacks != nil {
+		if strictCount < limit && fallbackEnabled && resolver != nil && fallbacks != nil {
 			clientKey := clientIP(r, false)
 			job := group.join(searchQuery+"\x00"+strconv.Itoa(limit), func(ctx context.Context, publish func([]*db.Track)) {
 				fillMetadataSearch(ctx, publish, database, resolver, fallbacks, clientKey, searchQuery, limit)
@@ -323,7 +351,7 @@ func searchMetadataHandlerWithUpstream(database *sql.DB, resolver *metadata.Reso
 		}
 		if len(results) == 0 {
 			setOutcome(r, "miss")
-		} else if len(tracks) > 0 {
+		} else if hadLocal {
 			setOutcome(r, "local_hit")
 		} else {
 			setOutcome(r, "provider_fallback_hit")

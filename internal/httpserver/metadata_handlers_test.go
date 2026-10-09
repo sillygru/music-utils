@@ -195,3 +195,67 @@ func (p *countingMetadataProvider) searchCalls() int {
 	defer p.mu.Unlock()
 	return p.calls
 }
+
+// The title track of an album lands in the catalog after its siblings, so an
+// id-ordered search returned every other song on the record first and pushed it
+// off the page entirely.
+func TestSearchMetadataRanksTheTitleTrackFirst(t *testing.T) {
+	metadataDB, _ := testHTTPDatabases(t)
+	for _, name := range []string{"Rollercoaster Of Life", "Eye Of The Storm", "Life Evermore Pt. 2", "Life Evermore Pt. 3", "Dark Days", "Dragonfire", "Love Me", "Spell On You", "About You", "When I Wake Up", "For I Am Death", "Devil In Disguise"} {
+		if _, err := db.UpsertTrackMetadata(context.Background(), metadataDB, db.Track{
+			Name: name, ArtistName: "The Pretty Reckless", AlbumName: "Dear God",
+			Duration: 240, Genre: "Hard Rock", Year: 2026, CoverURL: "https://example.test/cover.jpg",
+		}); err != nil {
+			t.Fatalf("seed %q: %v", name, err)
+		}
+	}
+	if _, err := db.UpsertTrackMetadata(context.Background(), metadataDB, db.Track{
+		Name: "Dear God", ArtistName: "The Pretty Reckless", AlbumName: "Dear God",
+		Duration: 368, Genre: "Hard Rock", Year: 2026, CoverURL: "https://example.test/cover.jpg",
+	}); err != nil {
+		t.Fatalf("seed title track: %v", err)
+	}
+	handler := searchMetadataHandlerWithUpstream(metadataDB, nil, testFallbackGuard(), false)
+
+	response := performRequest(t, handler, "/api/metadata/search?q=Dear+God+The+Pretty+Reckless&limit=10")
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", response.Code, response.Body.String())
+	}
+	var results []metadataResponse
+	if err := json.NewDecoder(response.Body).Decode(&results); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(results) != 10 {
+		t.Fatalf("expected a full page of 10, got %d", len(results))
+	}
+	if results[0].TrackName != "Dear God" {
+		t.Fatalf("expected Dear God first, got %q", results[0].TrackName)
+	}
+}
+
+// A query with a word the catalog does not hold is answered from the cache
+// rather than costing a provider round trip.
+func TestSearchMetadataRelaxedPassAnswersMisspelledQueriesLocally(t *testing.T) {
+	metadataDB, _ := testHTTPDatabases(t)
+	if _, err := db.UpsertTrackMetadata(context.Background(), metadataDB, db.Track{
+		Name: "Dear God", ArtistName: "The Pretty Reckless", AlbumName: "Dear God",
+		Duration: 368, Genre: "Rock", Year: 2026,
+	}); err != nil {
+		t.Fatalf("seed track: %v", err)
+	}
+	// Providers are disabled outright: the only way this returns the track is
+	// if the relaxed pass found it in the catalog.
+	handler := searchMetadataHandlerWithUpstream(metadataDB, nil, testFallbackGuard(), false)
+
+	response := performRequest(t, handler, "/api/metadata/search?q=Dear+Gid+The+Pretty+Reckless&limit=10")
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", response.Code, response.Body.String())
+	}
+	var results []metadataResponse
+	if err := json.NewDecoder(response.Body).Decode(&results); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(results) != 1 || results[0].TrackName != "Dear God" {
+		t.Fatalf("expected the cached hit, got %+v", results)
+	}
+}

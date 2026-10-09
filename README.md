@@ -88,9 +88,13 @@ that consults iTunes first, then Deezer, and an in-process cache memoizes both
 hits and not-found misses with bounded lifetimes so repeated lookups stop
 re-hitting upstream providers.
 
-Search is local-first with a background fill. `/api/metadata/search` serves what
-the local catalog already holds and only asks a provider when the page is not
-full; the provider answer is persisted either way, so the next search for the
+Search is local-first with a background fill. `/api/metadata/search` ranks the
+local catalog by relevance, deduplicates before applying `limit` so a page holds
+`limit` distinct tracks, and prefers a fully described row over a bare stub of
+the same song. If the strict match comes up short it retries locally against any
+query word — which is what turns a typo or an abbreviation into a cache hit
+instead of a provider round trip — and only then falls through to the provider
+fan-out. The provider answer is persisted either way, so the next search for the
 same query is a pure local read and the per-track `/api/metadata/get` for a
 resolved track becomes a local hit too. When a search has nothing local to show
 it waits on the provider fan-out for up to the 3s window, as lyrics does.
