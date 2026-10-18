@@ -1,6 +1,6 @@
 // Package ttml parses TTML timed-text documents into LRC lyrics.
 //
-// It is shared by every provider that serves TTML (BetterLyrics, Paxsenix,
+// It is shared by every provider that serves TTML (BetterLyrics,
 // LyricsPlus-Binimum, Apple Music): each client returns LRC produced here so
 // the HTTP layer can persist it without knowing TTML. Parsing is done with
 // encoding/xml and never resolves external entities or DTDs.

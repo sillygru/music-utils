@@ -66,7 +66,7 @@ func TestLyricsSummarySeparatesCachedFromFetched(t *testing.T) {
 	run.countCommitted([]lyricsWriteOp{
 		{answer: &lyricsHit{provider: "lrclib", lyrics: &db.Lyrics{PlainLyrics: "a"}}},
 		{answer: &lyricsHit{provider: "kugou", lyrics: &db.Lyrics{PlainLyrics: "b"}}},
-		{answer: &lyricsHit{provider: "paxsenix", lyrics: &db.Lyrics{SyncedLyrics: "b"}}},
+		{answer: &lyricsHit{provider: "lyricsplus", lyrics: &db.Lyrics{SyncedLyrics: "b"}}},
 		{settle: true},
 		{settleUnknownAge: true},
 	})

@@ -277,38 +277,6 @@ func runParallelLyricsSearch(
 				}, "kugou")})
 			}()
 		}
-		if providers.paxsenixEnabled && providers.paxsenix != nil {
-			ordinaryWG.Add(1)
-			go func() {
-				defer ordinaryWG.Done()
-				remote, err := providers.paxsenix.Get(ctx, title, hintArtist, hintAlbum)
-				if err != nil {
-					return
-				}
-				resp := searchPersistResponse(ctx, metadataDB, lyricsDB, lrclib.RemoteResult{
-					TrackName: firstNonEmpty(remote.TrackName, title), ArtistName: firstNonEmpty(remote.ArtistName, hintArtist),
-					AlbumName: firstNonEmpty(remote.AlbumName, hintAlbum), Duration: remote.Duration,
-					PlainLyrics: remote.PlainLyrics, SyncedLyrics: remote.SyncedLyrics,
-				}, "paxsenix")
-				if remote.WordSynced && strings.TrimSpace(remote.TTML) != "" && resp.ID > 0 {
-					content, format, converted := compactRichSyncForStorage(remote.TTML, "ttml")
-					if !converted {
-						content, format = remote.TTML, "ttml"
-					}
-					rich := db.RichLyrics{TrackID: resp.ID, Content: content, Format: format, SyncType: "word", Source: "paxsenix"}
-					if !isWordRichEmpty(&rich) {
-						if err := db.UpsertRichLyrics(ctx, lyricsDB, rich); err == nil {
-							if stored, err := db.FindRichLyrics(ctx, lyricsDB, resp.ID, "word"); err == nil && !isWordRichEmpty(stored) {
-								setRichOnlyResponse(&resp, stored)
-							} else {
-								setRichOnlyResponse(&resp, &rich)
-							}
-						}
-					}
-				}
-				merge([]lyricsResponse{resp})
-			}()
-		}
 		if providers.lyricsPlusEnabled && providers.lyricsPlus != nil {
 			ordinaryWG.Add(1)
 			go func() {

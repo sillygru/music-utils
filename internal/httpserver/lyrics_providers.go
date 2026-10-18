@@ -15,7 +15,6 @@ import (
 	"github.com/sillygru/music-utils/internal/lyricsplus"
 	"github.com/sillygru/music-utils/internal/musixmatch"
 	"github.com/sillygru/music-utils/internal/pacer"
-	"github.com/sillygru/music-utils/internal/paxsenix"
 	"github.com/sillygru/music-utils/internal/richlyrics"
 	"github.com/sillygru/music-utils/internal/version"
 )
@@ -108,7 +107,6 @@ type lyricsProviders struct {
 	musix      *musixmatch.Client
 	better     *betterlyrics.Client
 	kugou      *kugou.Client
-	paxsenix   *paxsenix.Client
 	lyricsPlus *lyricsplus.Client
 	tube       *innertube.Client
 
@@ -118,7 +116,6 @@ type lyricsProviders struct {
 	musixEnabled        bool
 	betterEnabled       bool
 	kugouEnabled        bool
-	paxsenixEnabled     bool
 	lyricsPlusEnabled   bool
 	tubeLyricsEnabled   bool
 	tubeSubtitleEnabled bool
@@ -131,7 +128,6 @@ func newLyricsProviders(
 	musixClient *musixmatch.Client,
 	betterClient *betterlyrics.Client,
 	kugouClient *kugou.Client,
-	paxsenixClient *paxsenix.Client,
 	lyricsPlusClient *lyricsplus.Client,
 	tubeClient *innertube.Client,
 	cfg config.Config,
@@ -143,7 +139,6 @@ func newLyricsProviders(
 		musix:      musixClient,
 		better:     betterClient,
 		kugou:      kugouClient,
-		paxsenix:   paxsenixClient,
 		lyricsPlus: lyricsPlusClient,
 		tube:       tubeClient,
 
@@ -153,7 +148,6 @@ func newLyricsProviders(
 		musixEnabled:        cfg.MusixmatchEnabled,
 		betterEnabled:       cfg.BetterLyricsEnabled,
 		kugouEnabled:        cfg.KugouEnabled,
-		paxsenixEnabled:     cfg.PaxsenixEnabled,
 		lyricsPlusEnabled:   cfg.LyricsPlusEnabled,
 		tubeLyricsEnabled:   cfg.YouTubeLyricsEnabled,
 		tubeSubtitleEnabled: cfg.YouTubeSubtitleEnabled,
@@ -190,9 +184,6 @@ func (p *lyricsProviders) anyEnabled(richRequested bool) bool {
 	if p.kugouEnabled && p.kugou != nil {
 		return true
 	}
-	if p.paxsenixEnabled && p.paxsenix != nil {
-		return true
-	}
 	if p.lyricsPlusEnabled && p.lyricsPlus != nil {
 		return true
 	}
@@ -221,18 +212,6 @@ func newKugouClient(cfg config.Config, logger *slog.Logger, pace pacer.Waiter) *
 	client, err := kugou.NewWithPacer(cfg.KugouSearchBaseURL, cfg.KugouLyricsBaseURL, defaultUserAgent(cfg.KugouUserAgent), time.Duration(cfg.KugouTimeoutMS)*time.Millisecond, pace)
 	if err != nil {
 		logger.Error("configure KuGou client", "error", err)
-		return nil
-	}
-	return client
-}
-
-func newPaxsenixClient(cfg config.Config, logger *slog.Logger, pace pacer.Waiter) *paxsenix.Client {
-	if !cfg.PaxsenixEnabled {
-		return nil
-	}
-	client, err := paxsenix.NewWithPacer(cfg.PaxsenixProxyBaseURL, cfg.PaxsenixAppleBaseURL, defaultUserAgent(cfg.PaxsenixUserAgent), time.Duration(cfg.PaxsenixTimeoutMS)*time.Millisecond, pace)
-	if err != nil {
-		logger.Error("configure Paxsenix client", "error", err)
 		return nil
 	}
 	return client

@@ -302,32 +302,6 @@ func fetchLiveRichForSearchResults(ctx context.Context, lyricsDB *sql.DB, provid
 				}()
 			}
 
-			// Paxsenix (priority 2)
-			if providers.paxsenixEnabled && providers.paxsenix != nil {
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
-					remote, err := providers.paxsenix.Get(ctx, trackName, artistName, albumName)
-					if err != nil || remote == nil || !remote.WordSynced || strings.TrimSpace(remote.TTML) == "" {
-						return
-					}
-					content, format, converted := compactRichSyncForStorage(remote.TTML, "ttml")
-					if !converted {
-						content, format = remote.TTML, "ttml"
-					}
-					rich := db.RichLyrics{TrackID: trackID, Content: content, Format: format, SyncType: "word", Source: "paxsenix"}
-					if !isWordRichEmpty(&rich) {
-						if err := db.UpsertRichLyrics(ctx, lyricsDB, rich); err == nil {
-							if stored, err := db.FindRichLyrics(ctx, lyricsDB, trackID, "word"); err == nil && !isWordRichEmpty(stored) {
-								updateBest(candidate{rich: stored, priority: 2})
-							} else {
-								updateBest(candidate{rich: &rich, priority: 2})
-							}
-						}
-					}
-				}()
-			}
-
 			// Unison (priority 1)
 			if providers.richEnabled && providers.rich != nil {
 				wg.Add(1)

@@ -23,7 +23,6 @@ import (
 	"github.com/sillygru/music-utils/internal/metadata"
 	"github.com/sillygru/music-utils/internal/musixmatch"
 	"github.com/sillygru/music-utils/internal/pacer"
-	"github.com/sillygru/music-utils/internal/paxsenix"
 	"github.com/sillygru/music-utils/internal/reqlog"
 	"github.com/sillygru/music-utils/internal/richlyrics"
 	"github.com/sillygru/music-utils/internal/version"
@@ -196,7 +195,6 @@ func NewWithLogger(cfg config.Config, metadataDB, lyricsDB, coverDB *sql.DB, log
 	musixClient := newMusixmatchClient(cfg, logger, lyricsPace.user(musixmatch.LeaseName, cfg.UpstreamUserInterval(musixmatch.RequestInterval)))
 	betterClient := newBetterLyricsClient(cfg, logger, lyricsPace.user(betterlyrics.LeaseName, cfg.UpstreamUserInterval(betterlyrics.RequestInterval)))
 	kugouClient := newKugouClient(cfg, logger, lyricsPace.user(kugou.LeaseName, cfg.UpstreamUserInterval(kugou.RequestInterval)))
-	paxsenixClient := newPaxsenixClient(cfg, logger, lyricsPace.user(paxsenix.LeaseName, cfg.UpstreamUserInterval(paxsenix.RequestInterval)))
 	lyricsPlusClient := newLyricsPlusClient(cfg, logger, lyricsPace.user(lyricsplus.LeaseName, cfg.UpstreamUserInterval(lyricsplus.RequestInterval)))
 	tubeClient := newInnerTubeClient(cfg, logger, pacer.New(cfg.UpstreamUserInterval(innertube.RequestInterval)))
 	richLyricsMigrationStop := startRichLyricsMigration(lyricsDB, logger)
@@ -228,7 +226,7 @@ func NewWithLogger(cfg config.Config, metadataDB, lyricsDB, coverDB *sql.DB, log
 	lyricsMisses := newLyricsMissCache()
 	fallbacks := newFallbackGuard(cfg)
 	coverRefresher := newCoverRefreshJob(cfg, coverDB, coverResolver, logger)
-	providers := newLyricsProviders(client, richClient, appleClient, musixClient, betterClient, kugouClient, paxsenixClient, lyricsPlusClient, tubeClient, cfg)
+	providers := newLyricsProviders(client, richClient, appleClient, musixClient, betterClient, kugouClient, lyricsPlusClient, tubeClient, cfg)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/healthz", healthz)
 	mux.HandleFunc("GET /api/version", versionHandler)

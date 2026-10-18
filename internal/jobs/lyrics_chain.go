@@ -18,7 +18,6 @@ import (
 	"github.com/sillygru/music-utils/internal/lyricsplus"
 	"github.com/sillygru/music-utils/internal/musixmatch"
 	"github.com/sillygru/music-utils/internal/pacer"
-	"github.com/sillygru/music-utils/internal/paxsenix"
 	"github.com/sillygru/music-utils/internal/upstream"
 	"github.com/sillygru/music-utils/internal/version"
 )
@@ -65,7 +64,7 @@ type lyricsProvider struct {
 // equally good answers is served.
 //
 // Every configured provider is asked about every track, one at a time rather than
-// all at once. A fan-out across six upstreams put six requests per track into the
+// all at once. A fan-out across five upstreams put five requests per track into the
 // air simultaneously and bought nothing except a queue in front of each provider:
 // they are already limited to one request per interval, so the extra concurrency
 // could not turn into extra throughput. Asking in turn costs the same requests at
@@ -182,7 +181,6 @@ var providerMisses = []error{
 	lrclib.ErrNotFound,
 	betterlyrics.ErrNotFound,
 	kugou.ErrNotFound,
-	paxsenix.ErrNotFound,
 	lyricsplus.ErrNotFound,
 	musixmatch.ErrNotFound,
 	applemusic.ErrNotFound,
@@ -298,22 +296,6 @@ func newLyricsBackfillResolver(cfg config.Config, metadataDB *sql.DB, idleGap ti
 		} else {
 			resolver.add("kugou", func(ctx context.Context, work db.LyricsWork) (*db.Lyrics, error) {
 				remote, err := client.Get(ctx, work.Name, work.Artist, work.Album, work.Duration)
-				if err != nil {
-					return nil, err
-				}
-				return &db.Lyrics{PlainLyrics: remote.PlainLyrics, SyncedLyrics: remote.SyncedLyrics}, nil
-			})
-		}
-	}
-
-	if cfg.PaxsenixEnabled {
-		client, err := paxsenix.NewWithPacer(cfg.PaxsenixProxyBaseURL, cfg.PaxsenixAppleBaseURL, providerUserAgent(cfg.PaxsenixUserAgent),
-			time.Duration(cfg.PaxsenixTimeoutMS)*time.Millisecond, share(paxsenix.LeaseName))
-		if err != nil {
-			fmt.Fprintf(errOut, "skip Paxsenix provider: %v\n", err)
-		} else {
-			resolver.add("paxsenix", func(ctx context.Context, work db.LyricsWork) (*db.Lyrics, error) {
-				remote, err := client.Get(ctx, work.Name, work.Artist, work.Album)
 				if err != nil {
 					return nil, err
 				}

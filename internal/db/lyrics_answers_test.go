@@ -167,7 +167,7 @@ func TestPointTrackAtBestLyricsPromotesALateBetterAnswer(t *testing.T) {
 	synced, err := StoreLyricsAnswer(ctx, lyricsDB, trackID, Lyrics{
 		PlainLyrics:  "words",
 		SyncedLyrics: "[00:01.00]words",
-		Source:       "paxsenix",
+		Source:       "lyricsplus",
 	})
 	if err != nil {
 		t.Fatalf("store synced answer: %v", err)

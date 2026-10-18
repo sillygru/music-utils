@@ -106,11 +106,12 @@ const LeaseName = "lyricsplus"
 
 // DefaultMirrors is the verified-reachable mirror list. The other Metrolist
 // mirrors were dropped after they stopped resolving: atomix.one serves a cert
-// that does not cover the hostname, prjktla.my.id returns 530, and the Vercel
-// host returns 402 DEPLOYMENT_DISABLED.
+// that does not cover the hostname, and the Vercel host returns 402
+// DEPLOYMENT_DISABLED.
 func DefaultMirrors() []string {
 	return []string{
 		"https://lyricsplus.binimum.org",
+		"https://lyricsplus.prjkltla.my.id",
 	}
 }
 

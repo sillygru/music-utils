@@ -60,10 +60,6 @@ const (
 	defaultKugouSearchBaseURL       = "https://mobileservice.kugou.com"
 	defaultKugouLyricsBaseURL       = "https://lyrics.kugou.com"
 	defaultKugouTimeoutMS           = 10000
-	defaultPaxsenixEnabled          = true
-	defaultPaxsenixProxyBaseURL     = "https://lyrics.paxsenix.org"
-	defaultPaxsenixAppleBaseURL     = "https://beta.music.apple.com"
-	defaultPaxsenixTimeoutMS        = 10000
 	defaultLyricsPlusEnabled        = true
 	defaultLyricsPlusAPIBaseURL     = "https://lyrics-api.binimum.org"
 	defaultLyricsPlusTimeoutMS      = 10000
@@ -103,9 +99,9 @@ const (
 // dealing with an upstream that has started throttling and needs the request path
 // slowed globally. Left unset, each upstream keeps its own rate, because those
 // rates are not interchangeable: LRCLIB, BetterLyrics and Musixmatch are asked five
-// times a second while KuGou and Paxsenix are asked twice. One number for both is
-// either too aggressive for the slower pair or too timid for the faster one, so
-// the default is that no number is set and the per-provider constants stand.
+// times a second while KuGou is asked twice. One number for both is either too
+// aggressive for the slower provider or too timid for the faster ones, so the
+// default is that no number is set and the per-provider constants stand.
 func (c Config) UpstreamUserInterval(providerDefault time.Duration) time.Duration {
 	if c.UpstreamPaceMS > 0 {
 		return time.Duration(c.UpstreamPaceMS) * time.Millisecond
@@ -223,11 +219,6 @@ type Config struct {
 	KugouLyricsBaseURL        string
 	KugouUserAgent            string
 	KugouTimeoutMS            int
-	PaxsenixEnabled           bool
-	PaxsenixProxyBaseURL      string
-	PaxsenixAppleBaseURL      string
-	PaxsenixUserAgent         string
-	PaxsenixTimeoutMS         int
 	LyricsPlusEnabled         bool
 	LyricsPlusAPIBaseURL      string
 	LyricsPlusMirrors         []string
@@ -329,11 +320,6 @@ func Load() Config {
 		KugouLyricsBaseURL:        valueOrDefault("KUGOU_LYRICS_BASE_URL", defaultKugouLyricsBaseURL),
 		KugouUserAgent:            valueOrDefault("KUGOU_USER_AGENT", defaultMetadataUserAgent()),
 		KugouTimeoutMS:            intOrDefault("KUGOU_TIMEOUT_MS", defaultKugouTimeoutMS),
-		PaxsenixEnabled:           boolOrDefault("PAXSENIX_ENABLED", defaultPaxsenixEnabled),
-		PaxsenixProxyBaseURL:      valueOrDefault("PAXSENIX_PROXY_BASE_URL", defaultPaxsenixProxyBaseURL),
-		PaxsenixAppleBaseURL:      valueOrDefault("PAXSENIX_APPLE_BASE_URL", defaultPaxsenixAppleBaseURL),
-		PaxsenixUserAgent:         valueOrDefault("PAXSENIX_USER_AGENT", defaultMetadataUserAgent()),
-		PaxsenixTimeoutMS:         intOrDefault("PAXSENIX_TIMEOUT_MS", defaultPaxsenixTimeoutMS),
 		LyricsPlusEnabled:         boolOrDefault("LYRICSPLUS_ENABLED", defaultLyricsPlusEnabled),
 		LyricsPlusAPIBaseURL:      valueOrDefault("LYRICSPLUS_API_BASE_URL", defaultLyricsPlusAPIBaseURL),
 		LyricsPlusMirrors:         splitEnv("LYRICSPLUS_MIRRORS"),
@@ -449,7 +435,7 @@ func (c Config) Validate() error {
 	if c.LRCLIBTimeoutMS < 1 || c.RichLyricsTimeoutMS < 1 || c.AppleMusicTimeoutMS < 1 || c.MusixmatchTimeoutMS < 1 || c.MetadataTimeoutMS < 1 || c.CoverTimeoutMS < 1 {
 		return fmt.Errorf("upstream timeouts must be positive")
 	}
-	if c.BetterLyricsTimeoutMS < 1 || c.KugouTimeoutMS < 1 || c.PaxsenixTimeoutMS < 1 || c.LyricsPlusTimeoutMS < 1 || c.YouTubeTimeoutMS < 1 {
+	if c.BetterLyricsTimeoutMS < 1 || c.KugouTimeoutMS < 1 || c.LyricsPlusTimeoutMS < 1 || c.YouTubeTimeoutMS < 1 {
 		return fmt.Errorf("lyrics provider timeouts must be positive")
 	}
 	if c.JobIdleGapMS < 0 {
@@ -479,7 +465,6 @@ func (c Config) Validate() error {
 	for name, value := range map[string]string{
 		"BETTERLYRICS_USER_AGENT": c.BetterLyricsUserAgent,
 		"KUGOU_USER_AGENT":        c.KugouUserAgent,
-		"PAXSENIX_USER_AGENT":     c.PaxsenixUserAgent,
 		"LYRICSPLUS_USER_AGENT":   c.LyricsPlusUserAgent,
 		"YOUTUBE_USER_AGENT":      c.YouTubeUserAgent,
 	} {
@@ -490,7 +475,7 @@ func (c Config) Validate() error {
 	if strings.TrimSpace(c.RichLyricsUserAgent) == "" {
 		return fmt.Errorf("RICH_LYRICS_USER_AGENT must not be empty")
 	}
-	for name, value := range map[string]string{"LRCLIB_BASE_URL": c.LRCLIBBaseURL, "RICH_LYRICS_BASE_URL": c.RichLyricsBaseURL, "APPLE_MUSIC_CATALOG_BASE_URL": c.AppleMusicCatalogBaseURL, "APPLE_MUSIC_LYRICS_BASE_URL": c.AppleMusicLyricsBaseURL, "MUSIXMATCH_BASE_URL": c.MusixmatchBaseURL, "ITUNES_BASE_URL": c.ITunesBaseURL, "DEEZER_BASE_URL": c.DeezerBaseURL, "LASTFM_BASE_URL": c.LastfmBaseURL, "BETTERLYRICS_BASE_URL": c.BetterLyricsBaseURL, "KUGOU_SEARCH_BASE_URL": c.KugouSearchBaseURL, "KUGOU_LYRICS_BASE_URL": c.KugouLyricsBaseURL, "PAXSENIX_PROXY_BASE_URL": c.PaxsenixProxyBaseURL, "PAXSENIX_APPLE_BASE_URL": c.PaxsenixAppleBaseURL, "LYRICSPLUS_API_BASE_URL": c.LyricsPlusAPIBaseURL, "YOUTUBE_BASE_URL": c.YouTubeBaseURL} {
+	for name, value := range map[string]string{"LRCLIB_BASE_URL": c.LRCLIBBaseURL, "RICH_LYRICS_BASE_URL": c.RichLyricsBaseURL, "APPLE_MUSIC_CATALOG_BASE_URL": c.AppleMusicCatalogBaseURL, "APPLE_MUSIC_LYRICS_BASE_URL": c.AppleMusicLyricsBaseURL, "MUSIXMATCH_BASE_URL": c.MusixmatchBaseURL, "ITUNES_BASE_URL": c.ITunesBaseURL, "DEEZER_BASE_URL": c.DeezerBaseURL, "LASTFM_BASE_URL": c.LastfmBaseURL, "BETTERLYRICS_BASE_URL": c.BetterLyricsBaseURL, "KUGOU_SEARCH_BASE_URL": c.KugouSearchBaseURL, "KUGOU_LYRICS_BASE_URL": c.KugouLyricsBaseURL, "LYRICSPLUS_API_BASE_URL": c.LyricsPlusAPIBaseURL, "YOUTUBE_BASE_URL": c.YouTubeBaseURL} {
 		baseURL, err := url.Parse(strings.TrimSpace(value))
 		if err != nil || (baseURL.Scheme != "http" && baseURL.Scheme != "https") || baseURL.Host == "" {
 			return fmt.Errorf("%s must be an http or https URL", name)
@@ -548,7 +533,7 @@ func validateEnvironment() error {
 	if err := validateIntEnv("DB_CACHE_SIZE_KB"); err != nil {
 		return err
 	}
-	for _, name := range []string{"DB_MAX_OPEN_CONNS", "RATE_LIMIT_PER_SEC", "RATE_LIMIT_PER_MIN", "FALLBACK_PER_MIN", "FALLBACK_MAX_QUEUE", "FALLBACK_QUEUE_WAIT_MS", "COVER_REFRESH_AFTER_DAYS", "COVER_REFRESH_MAX_ROWS", "COVER_REFRESH_MAX_RECHECK", "LRCLIB_TIMEOUT_MS", "RICH_LYRICS_TIMEOUT_MS", "APPLE_MUSIC_TIMEOUT_MS", "MUSIXMATCH_TIMEOUT_MS", "METADATA_TIMEOUT_MS", "COVER_TIMEOUT_MS", "PREFETCH_PER_MIN", "PREFETCH_CONCURRENCY", "PREFETCH_QUEUE_SIZE", "ENRICH_PER_MIN", "ENRICH_CONCURRENCY", "ENRICH_QUEUE_SIZE", "BETTERLYRICS_TIMEOUT_MS", "KUGOU_TIMEOUT_MS", "PAXSENIX_TIMEOUT_MS", "LYRICSPLUS_TIMEOUT_MS", "YOUTUBE_TIMEOUT_MS"} {
+	for _, name := range []string{"DB_MAX_OPEN_CONNS", "RATE_LIMIT_PER_SEC", "RATE_LIMIT_PER_MIN", "FALLBACK_PER_MIN", "FALLBACK_MAX_QUEUE", "FALLBACK_QUEUE_WAIT_MS", "COVER_REFRESH_AFTER_DAYS", "COVER_REFRESH_MAX_ROWS", "COVER_REFRESH_MAX_RECHECK", "LRCLIB_TIMEOUT_MS", "RICH_LYRICS_TIMEOUT_MS", "APPLE_MUSIC_TIMEOUT_MS", "MUSIXMATCH_TIMEOUT_MS", "METADATA_TIMEOUT_MS", "COVER_TIMEOUT_MS", "PREFETCH_PER_MIN", "PREFETCH_CONCURRENCY", "PREFETCH_QUEUE_SIZE", "ENRICH_PER_MIN", "ENRICH_CONCURRENCY", "ENRICH_QUEUE_SIZE", "BETTERLYRICS_TIMEOUT_MS", "KUGOU_TIMEOUT_MS", "LYRICSPLUS_TIMEOUT_MS", "YOUTUBE_TIMEOUT_MS"} {
 		if err := validatePositiveIntEnv(name); err != nil {
 			return err
 		}
@@ -562,7 +547,7 @@ func validateEnvironment() error {
 			return fmt.Errorf("REQUEST_LOG_RETENTION_DAYS must be an integer >= -1 (-1 means keep forever)")
 		}
 	}
-	for _, name := range []string{"TRUST_PROXY", "LRCLIB_FALLBACK_ENABLED", "RICH_LYRICS_ENABLED", "APPLE_MUSIC_ENABLED", "MUSIXMATCH_ENABLED", "METADATA_FALLBACK_ENABLED", "COVER_FALLBACK_ENABLED", "COVER_REFRESH_ENABLED", "REQUEST_LOG_ENABLED", "REQUEST_LOG_UA_OPTIMIZE", "REQUEST_LOG_UA_SAVE_UNKNOWN", "REQUESTS_TODAY_ENABLED", "PREFETCH_ENABLED", "PREFETCH_LYRICS", "PREFETCH_ALBUM_COVER", "PREFETCH_ARTIST_COVER", "ENRICH_ENABLED", "BETTERLYRICS_ENABLED", "KUGOU_ENABLED", "PAXSENIX_ENABLED", "LYRICSPLUS_ENABLED", "YOUTUBE_LYRICS_ENABLED", "YOUTUBE_SUBTITLE_ENABLED"} {
+	for _, name := range []string{"TRUST_PROXY", "LRCLIB_FALLBACK_ENABLED", "RICH_LYRICS_ENABLED", "APPLE_MUSIC_ENABLED", "MUSIXMATCH_ENABLED", "METADATA_FALLBACK_ENABLED", "COVER_FALLBACK_ENABLED", "COVER_REFRESH_ENABLED", "REQUEST_LOG_ENABLED", "REQUEST_LOG_UA_OPTIMIZE", "REQUEST_LOG_UA_SAVE_UNKNOWN", "REQUESTS_TODAY_ENABLED", "PREFETCH_ENABLED", "PREFETCH_LYRICS", "PREFETCH_ALBUM_COVER", "PREFETCH_ARTIST_COVER", "ENRICH_ENABLED", "BETTERLYRICS_ENABLED", "KUGOU_ENABLED", "LYRICSPLUS_ENABLED", "YOUTUBE_LYRICS_ENABLED", "YOUTUBE_SUBTITLE_ENABLED"} {
 		if value := strings.TrimSpace(os.Getenv(name)); value != "" {
 			if _, err := strconv.ParseBool(value); err != nil {
 				return fmt.Errorf("%s must be a boolean", name)

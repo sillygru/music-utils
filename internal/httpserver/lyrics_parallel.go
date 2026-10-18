@@ -199,40 +199,6 @@ func runParallelLyricsGet(
 		}()
 	}
 
-	if providers.paxsenixEnabled && providers.paxsenix != nil && !skip["paxsenix"] {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			started := time.Now()
-			remote, err := providers.paxsenix.Get(ctx, trackName, artistName, albumName)
-			elapsed := time.Since(started)
-			if err != nil {
-				recordProviderMiss(ctx, lyricsDB, trackIDOf(existingTrack), "paxsenix", artistName, albumName)
-				return
-			}
-			row := &lrclib.RemoteResult{
-				TrackName: firstNonEmpty(remote.TrackName, trackName), ArtistName: firstNonEmpty(remote.ArtistName, artistName),
-				AlbumName: firstNonEmpty(remote.AlbumName, albumName), Duration: remote.Duration,
-				PlainLyrics: remote.PlainLyrics, SyncedLyrics: remote.SyncedLyrics,
-			}
-			if row.Duration <= 0 {
-				row.Duration = duration
-			}
-			trackRow, lyrics, ok := persistProviderLyrics(ctx, metadataDB, lyricsDB, existingTrack, row, trackName, artistName, albumName, duration, "paxsenix")
-			if !ok {
-				return
-			}
-			recordProviderFetch(ctx, lyricsDB, trackRow.ID, "paxsenix", true)
-			result := lyricsLookupResult{track: trackRow, lyrics: lyrics, upstream: elapsed}
-			if remote.WordSynced && strings.TrimSpace(remote.TTML) != "" {
-				if _, rich, richOK := persistRemoteRichLyrics(ctx, metadataDB, lyricsDB, trackRow, &richlyrics.Result{Content: remote.TTML, Format: "ttml", SyncType: "word", Source: "paxsenix"}, trackName, artistName, albumName, duration); richOK {
-					result.rich = rich
-				}
-			}
-			publish(result)
-		}()
-	}
-
 	if providers.lyricsPlusEnabled && providers.lyricsPlus != nil && !skip["lyricsplus"] {
 		wg.Add(1)
 		go func() {

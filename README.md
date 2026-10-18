@@ -55,7 +55,7 @@ URL dumps (see [Seed dumps](#seed-dumps)) contain only factual data and links.
 | `GET /api/cover/search` | Free-text cover search across artists, albums, and songs, plus typed per-type search. |
 | `GET /api/cover/artist` | Artist cover URL; resolves Last.fm → iTunes → Deezer on a miss and caches. |
 | `GET /api/cover/album` | Album cover URL; resolves Last.fm → iTunes → Deezer on a miss and caches. |
-| `GET /api/lyrics/get` | Exact lyrics lookup; local-first with parallel multi-provider fallback (LRCLIB, BetterLyrics, KuGou, Paxsenix, LyricsPlus, YouTube via optional `video_id`). |
+| `GET /api/lyrics/get` | Exact lyrics lookup; local-first with parallel multi-provider fallback (LRCLIB, BetterLyrics, KuGou, LyricsPlus, YouTube via optional `video_id`). |
 | `GET /api/lyrics/search` | Multi-result lyrics search across the local catalog and the same providers (videoId hint for YouTube). |
 
 The previous `/api/get` and `/api/search` paths are intentionally removed.
@@ -79,7 +79,7 @@ Full request and response reference is in [`API.md`](API.md).
 
 ## Local-first caching
 
-Metadata and lyrics are stored in independent SQLite files. Metadata and lyrics lookups check their respective local database before making an upstream request. Lyrics misses fan out in parallel to every enabled provider — LRCLIB, BetterLyrics (TTML), KuGou, Paxsenix (Apple Music catalog + proxy), LyricsPlus (Binimum + mirror), plus YouTube (official shelf + transcript) when a `video_id` hint is supplied — and share the 3s response window. Direct Apple Music TTML and official Musixmatch also run in parallel when enabled; the former aggregation service is no longer used.
+Metadata and lyrics are stored in independent SQLite files. Metadata and lyrics lookups check their respective local database before making an upstream request. Lyrics misses fan out in parallel to every enabled provider — LRCLIB, BetterLyrics (TTML), KuGou, LyricsPlus (Binimum + mirrors), plus YouTube (official shelf + transcript) when a `video_id` hint is supplied — and share the 3s response window. Direct Apple Music TTML and official Musixmatch also run in parallel when enabled; the former aggregation service is no longer used.
 
 Before local or upstream lookup, music names are cleaned consistently across metadata, lyrics, and cover endpoints: known media extensions and downloader/source labels (for example `Official Music Video`, `AMV`, `Visualizer`, `Lyrics`, `Nightcore`, `Hardstyle`, `Sped Up`, and `Slowed`) are removed, and `Artist - Song`/`Artist ｜ Song` filenames can supply a missing artist. Explicit `artist_name` values remain authoritative, and provider-returned canonical names are preserved in responses.
 Successful provider responses are upserted transactionally and subsequent
@@ -138,14 +138,14 @@ cold-lookup latency and has been removed.
 
 - **FTS5 search** — title, artist, album, and genre search over SQLite.
 - **Metadata fallback** — iTunes + Deezer provider chain with local caching.
-- **Lyrics providers** — LRCLIB, BetterLyrics, KuGou, Paxsenix, LyricsPlus, and YouTube (official + subtitle) plus optional direct Apple Music TTML and official Musixmatch, all fanned out in parallel and cached locally (videoId providers only when `video_id` is supplied; 3s response cap, background persistence).
+- **Lyrics providers** — LRCLIB, BetterLyrics, KuGou, LyricsPlus, and YouTube (official + subtitle) plus optional direct Apple Music TTML and official Musixmatch, all fanned out in parallel and cached locally (videoId providers only when `video_id` is supplied; 3s response cap, background persistence).
 - **Opt-in rich lyrics** — Unison-compatible word/syllable payloads are cached separately and returned alone with `include_rich_sync=true`; unavailable rich lyrics fall back to plain/LRC lyrics.
 - **Rate limiting** — per-client-IP limits with `Retry-After` headers. A short-lived
   response replay cache sits in front of the limiter, so a request the server
   already answered is served from memory and consumes neither rate-limit budget
   nor provider budget. Rejections (`429`, `503`) are never cached, so a momentary
   upstream slowdown does not pin a URL to an error for the rest of the window.
-- **Upstream pacing** — every provider (LRCLIB, BetterLyrics, KuGou, Paxsenix, LyricsPlus, YouTube, Apple Music, Musixmatch, iTunes, Deezer, Last.fm) is
+- **Upstream pacing** — every provider (LRCLIB, BetterLyrics, KuGou, LyricsPlus, YouTube, Apple Music, Musixmatch, iTunes, Deezer, Last.fm) is
   paced process-wide to a fixed interval, so no client traffic can exceed a
   provider's rate limit or get the server's IP blocked. The pace is also shared
   across processes through the database, so a batch job draws on the same budget
@@ -257,14 +257,9 @@ cold-lookup latency and has been removed.
 | `KUGOU_LYRICS_BASE_URL` | `https://lyrics.kugou.com` | KuGou lyrics host. |
 | `KUGOU_USER_AGENT` | `music-utils/v0.14.0 (+https://gru0.dev)` | KuGou User-Agent. |
 | `KUGOU_TIMEOUT_MS` | `10000` | KuGou timeout. |
-| `PAXSENIX_ENABLED` | `true` | Paxsenix Apple Music catalog + proxy. |
-| `PAXSENIX_PROXY_BASE_URL` | `https://lyrics.paxsenix.org` | Paxsenix proxy base URL. |
-| `PAXSENIX_APPLE_BASE_URL` | `https://beta.music.apple.com` | Apple site used for bearer-token scraping. |
-| `PAXSENIX_USER_AGENT` | `music-utils/v0.14.0 (+https://gru0.dev)` | Paxsenix User-Agent. |
-| `PAXSENIX_TIMEOUT_MS` | `10000` | Paxsenix timeout. |
-| `LYRICSPLUS_ENABLED` | `true` | LyricsPlus Binimum + mirror. |
+| `LYRICSPLUS_ENABLED` | `true` | LyricsPlus Binimum + mirrors. |
 | `LYRICSPLUS_API_BASE_URL` | `https://lyrics-api.binimum.org` | LyricsPlus Binimum index URL. |
-| `LYRICSPLUS_MIRRORS` | *(empty)* | Comma-separated LyricsPlus mirror hosts for `/v2/lyrics/get`; empty uses defaults. |
+| `LYRICSPLUS_MIRRORS` | *(empty)* | Comma-separated LyricsPlus mirror hosts for `/v2/lyrics/get`; empty uses defaults (`lyricsplus.binimum.org`, `lyricsplus.prjkltla.my.id`). |
 | `LYRICSPLUS_USER_AGENT` | `music-utils/v0.14.0 (+https://gru0.dev)` | LyricsPlus User-Agent. |
 | `LYRICSPLUS_TIMEOUT_MS` | `10000` | LyricsPlus timeout. |
 | `YOUTUBE_LYRICS_ENABLED` | `true` | YouTube official lyrics shelf (InnerTube, needs `video_id`). |
@@ -449,8 +444,8 @@ Each provider is limited to **1 request per 5 seconds**
 (`-concurrency`, default 4). A song is not finished until every provider has
 answered it.
 
-The order matters as much as the rate. Asking all six providers about one song at
-once would put six requests into the air simultaneously, but they are already
+The order matters as much as the rate. Asking all five providers about one song at
+once would put five requests into the air simultaneously, but they are already
 limited to one per interval each, so the extra concurrency cannot become extra
 throughput — it can only become a queue in front of each provider. So the run asks
 **one provider at a time per song** and spreads the songs across providers instead:
@@ -495,7 +490,7 @@ the server is idle.
 
 The two jobs are held to different rates from each other as well, because they spend
 their budget differently. The lyrics backfill asks every configured provider about
-every song, so one song costs five or six requests and a library pass costs that
+every song, so one song costs up to five requests and a library pass costs that
 times every track in it; it is served at `UPSTREAM_LYRICS_JOB_PACE_MS` (default
 5000, one request every five seconds). The metadata backfill asks iTunes and Deezer
 about one track at a time, so it stays at `UPSTREAM_JOB_PACE_MS` (default 2000, one
@@ -553,10 +548,9 @@ internal/cover/          Last.fm + iTunes + Deezer album/artist cover providers 
 internal/db/             SQLite connections, independent schemas, migration, and queries
 internal/httpserver/     HTTP routes, handlers, middleware, rate limiting, cover refresh job
 internal/lrclib/         LRCLIB upstream client (5-strategy search + duration ranking)
-internal/ttml/             Shared TTML → LRC parser (BetterLyrics/Paxsenix/LyricsPlus/Apple)
+internal/ttml/             Shared TTML → LRC parser (BetterLyrics/LyricsPlus/Apple)
 internal/betterlyrics/     BetterLyrics TTML client
 internal/kugou/            KuGou 3-step lyrics client
-internal/paxsenix/         Paxsenix Apple-catalog + proxy client
 internal/lyricsplus/       LyricsPlus Binimum + mirrors client
 internal/innertube/        InnerTube YouTube official + transcript client
 internal/applemusic/      Apple Music catalog and TTML lyrics client

@@ -8,7 +8,7 @@ package ttml
 // yields seconds, the rich-sync payloads in lyrics_sync_variants are stored in
 // seconds, /api/lyrics/get emits seconds in both syncedLyrics and richSync
 // content, and the web client reads them as seconds. Providers that speak
-// another unit (LyricsPlus mirrors, Paxsenix's raw millisecond fields) must
+// another unit (the LyricsPlus mirrors' raw millisecond fields) must
 // declare it and convert at the boundary with ToSeconds.
 type TimeUnit string
 

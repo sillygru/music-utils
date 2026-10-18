@@ -382,8 +382,8 @@ internal error.
 
 Exact lyrics lookup. Serves cached lyrics when available; on a miss it
 consults every enabled lyrics provider in parallel — LRCLIB, BetterLyrics
-(TTML), KuGou, Paxsenix (Apple Music catalog + proxy), LyricsPlus
-(Binimum + mirror), plus YouTube (official shelf + transcript)
+(TTML), KuGou, LyricsPlus (Binimum + mirrors), plus YouTube (official shelf
++ transcript)
 when a `video_id` hint is supplied, plus Apple Music TTML and/or official
 Musixmatch when enabled — races them within a 3s response window, and caches
 every result. Late providers that finish after the window still persist for
@@ -469,7 +469,7 @@ found (memoized for 24 hours) · `429` rate limited · `503` upstream busy ·
 ## `GET /api/lyrics/search`
 
 Searches the local catalog and merges it with every enabled lyrics provider —
-LRCLIB plus BetterLyrics, KuGou, Paxsenix, and LyricsPlus on structured hints,
+LRCLIB plus BetterLyrics, KuGou, and LyricsPlus on structured hints,
 and YouTube when a `video_id` hint is supplied — plus any cached local
 rows. Each result carries the compact fields `id`, `name`, `trackName`,
 `artistName`, `albumName`, `duration`, `instrumental`, `plainLyrics`, and
