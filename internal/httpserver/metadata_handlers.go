@@ -36,7 +36,16 @@ type metadataResponse struct {
 	CoverURLSource            string  `json:"coverUrlSource,omitempty"`
 }
 
-func getMetadataHandler(database *sql.DB, resolver *metadata.Resolver, fallbacks *fallbackGuard, fallbackEnabled bool) http.HandlerFunc {
+// trackNotFoundMessage is what a client sees when nothing could resolve a
+// track. It says to come back because the server backfills on its own: a miss
+// here is often just a moment when no provider had the answer, and the retry
+// that fixes it runs without anyone asking.
+const trackNotFoundMessage = "Track not found, check again in a few minutes"
+
+// getMetadataHandler serves the exact metadata lookup. autofill may be nil when
+// the automatic backfill is disabled; the handler then simply never queues a
+// miss.
+func getMetadataHandler(database *sql.DB, resolver *metadata.Resolver, fallbacks *fallbackGuard, fallbackEnabled bool, autofill *metadataAutofill) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
 		candidates := names.Candidates(query.Get("track_name"), query.Get("artist_name"), query.Get("album_name"))
@@ -52,6 +61,18 @@ func getMetadataHandler(database *sql.DB, resolver *metadata.Resolver, fallbacks
 			setOutcome(r, "bad_request")
 			writeJSON(w, http.StatusBadRequest, apiError{Code: http.StatusBadRequest, Message: "duration must be a non-negative number"})
 			return
+		}
+		// A request that leaves with nothing usable is the clearest signal that
+		// the automatic backfill has something worth doing, so the track is
+		// queued ahead of the routine sweep instead of waiting for it to arrive
+		// at the end of the library.
+		queueBackfill := func(trackID int64) {
+			autofill.enqueue(trackID, metadata.Input{
+				TrackName:  query.Get("track_name"),
+				ArtistName: query.Get("artist_name"),
+				AlbumName:  query.Get("album_name"),
+				Duration:   duration,
+			})
 		}
 		cacheStart := time.Now()
 		var local *db.Track
@@ -75,12 +96,15 @@ func getMetadataHandler(database *sql.DB, resolver *metadata.Resolver, fallbacks
 		}
 		if !fallbackEnabled || resolver == nil {
 			if local != nil {
+				// The row exists but no provider has settled it yet, which is
+				// exactly what the backfill is for.
+				queueBackfill(local.ID)
 				setOutcome(r, "local_partial_hit")
 				writeJSON(w, http.StatusOK, toMetadataResponse(local))
 				return
 			}
 			setOutcome(r, "miss")
-			writeJSON(w, http.StatusNotFound, apiError{Code: http.StatusNotFound, Message: "Track not found"})
+			writeJSON(w, http.StatusNotFound, apiError{Code: http.StatusNotFound, Message: trackNotFoundMessage})
 			return
 		}
 
@@ -98,12 +122,21 @@ func getMetadataHandler(database *sql.DB, resolver *metadata.Resolver, fallbacks
 				setRequestIssue(r, slog.LevelWarn, err.Error())
 			}
 			if local != nil {
+				queueBackfill(local.ID)
 				setOutcome(r, "local_partial_hit")
 				writeJSON(w, http.StatusOK, toMetadataResponse(local))
 				return
 			}
+			// A definitive miss from every provider is not worth retrying, but
+			// an inconclusive one is: the track may well exist and the backfill
+			// can settle it once the upstream answers. Nothing is queued when the
+			// library holds no row for it and no provider knows it, or a client
+			// asking for a song that does not exist would spend budget forever.
+			if errors.Is(err, metadata.ErrInconclusive) {
+				queueBackfill(0)
+			}
 			setOutcome(r, "miss")
-			writeJSON(w, http.StatusNotFound, apiError{Code: http.StatusNotFound, Message: "Track not found"})
+			writeJSON(w, http.StatusNotFound, apiError{Code: http.StatusNotFound, Message: trackNotFoundMessage})
 			return
 		}
 		if local != nil && local.Duration > 0 {

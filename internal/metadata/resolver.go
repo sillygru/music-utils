@@ -96,9 +96,25 @@ func (r *Resolver) Search(ctx context.Context, query string, limit int) ([]*db.T
 // RateLimitError (so callers that can pace themselves, such as the jobs
 // backfill, can tell throttling apart from a genuine miss).
 func (r *Resolver) Lookup(ctx context.Context, input Input) (*db.Track, error) {
+	return r.lookup(ctx, input, false)
+}
+
+// LookupFresh resolves a track while ignoring any memoized answer for it.
+//
+// The automatic backfill retries tracks a live request has already asked about,
+// and a miss memoized for the negative-cache TTL would answer that retry
+// without ever reaching a provider, which is the one thing the retry exists to
+// do. A fresh lookup still joins an identical lookup already in flight and
+// still stores whatever it finds, so it costs at most what the first attempt
+// did.
+func (r *Resolver) LookupFresh(ctx context.Context, input Input) (*db.Track, error) {
+	return r.lookup(ctx, input, true)
+}
+
+func (r *Resolver) lookup(ctx context.Context, input Input, fresh bool) (*db.Track, error) {
 	var inconclusive error
 	for _, candidate := range inputCandidates(input) {
-		track, err := r.lookupOne(ctx, candidate)
+		track, err := r.lookupOne(ctx, candidate, fresh)
 		if err == nil {
 			return track, nil
 		}
@@ -116,11 +132,11 @@ func (r *Resolver) Lookup(ctx context.Context, input Input) (*db.Track, error) {
 	return nil, ErrNotFound
 }
 
-func (r *Resolver) lookupOne(ctx context.Context, input Input) (*db.Track, error) {
+func (r *Resolver) lookupOne(ctx context.Context, input Input, fresh bool) (*db.Track, error) {
 	input = normalizeInput(input)
 	key := cacheKey(input)
 	r.mu.Lock()
-	if entry, ok := r.cache[key]; ok && time.Now().Before(entry.expiresAt) {
+	if entry, ok := r.cache[key]; ok && !fresh && time.Now().Before(entry.expiresAt) {
 		r.mu.Unlock()
 		if entry.notFound {
 			return nil, ErrNotFound

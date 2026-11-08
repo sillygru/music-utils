@@ -213,6 +213,10 @@ func NewWithLogger(cfg config.Config, metadataDB, lyricsDB, coverDB *sql.DB, log
 		}
 	}
 	metadataResolver := newMetadataResolver(cfg, logger, itunesPace, deezerPace)
+	// The automatic backfill keeps the metadata cache complete on its own. It
+	// shares the resolver (and so the shared upstream pacing) with the request
+	// path, and stands aside for a minute whenever real traffic arrives.
+	autofill := newMetadataAutofill(cfg, metadataDB, metadataResolver, logger)
 	coverResolver := newCoverResolver(cfg, logger, itunesPace)
 	if coverDB == nil {
 		var err error
@@ -252,7 +256,7 @@ func NewWithLogger(cfg config.Config, metadataDB, lyricsDB, coverDB *sql.DB, log
 	}
 	mux.HandleFunc("GET /api/lyrics/get", getLyricsHandler(metadataDB, lyricsDB, providers, lyricsMisses, fallbacks))
 	mux.HandleFunc("GET /api/lyrics/search", searchLyricsHandlerParallel(metadataDB, lyricsDB, providers, fallbacks))
-	mux.HandleFunc("GET /api/metadata/get", getMetadataHandler(metadataDB, metadataResolver, fallbacks, cfg.MetadataFallbackEnabled))
+	mux.HandleFunc("GET /api/metadata/get", getMetadataHandler(metadataDB, metadataResolver, fallbacks, cfg.MetadataFallbackEnabled, autofill))
 	mux.HandleFunc("GET /api/metadata/search", searchMetadataHandlerWithUpstream(metadataDB, metadataResolver, fallbacks, cfg.MetadataFallbackEnabled))
 	mux.HandleFunc("GET /api/cover/get", getCoverTopHandler(metadataDB, coverDB, coverResolver, fallbacks, cfg.CoverFallbackEnabled))
 	mux.HandleFunc("GET /api/cover/artist", getEntityCoverSearchHandler(coverDB, coverResolver, fallbacks, db.CoverArtist, cfg.CoverFallbackEnabled))
@@ -272,7 +276,10 @@ func NewWithLogger(cfg config.Config, metadataDB, lyricsDB, coverDB *sql.DB, log
 	// the answers to. The limiter still guards every request that actually
 	// reaches a handler. CORS wraps both so preflights are answered before
 	// either can consume anything.
-	application := recoverMiddleware(corsMiddleware(replayCache.middleware(limiter.Handler(mux))), logger)
+	// Activity tracking sits outside the replay cache so a replayed answer still
+	// counts as a client asking, and outside the limiter so a rejected request
+	// still pauses the sweep.
+	application := recoverMiddleware(corsMiddleware(autofill.trackActivity(replayCache.middleware(limiter.Handler(mux)))), logger)
 	server := &http.Server{
 		Addr:              ":" + normalizedPort(cfg.Port),
 		Handler:           requestLogger(application, logger, requestLogs),
@@ -291,6 +298,7 @@ func NewWithLogger(cfg config.Config, metadataDB, lyricsDB, coverDB *sql.DB, log
 	server.RegisterOnShutdown(richLyricsMigrationStop)
 	server.RegisterOnShutdown(fallbacks.Stop)
 	server.RegisterOnShutdown(coverRefresher.Stop)
+	server.RegisterOnShutdown(autofill.Stop)
 	// A shared pacer that has given up on its lease is pacing privately, which
 	// quietly doubles the real request rate to the upstream. Nothing else
 	// surfaces that, so it is logged on a slow cadence rather than per request.

@@ -143,6 +143,11 @@ available; on a miss it resolves through the upstream providers (iTunes, then
 Deezer), stores the result, and returns it. A cover URL is included when a
 provider returns one.
 
+A miss is queued for the server's automatic metadata backfill, which retries it
+immediately while the track is still a recent request. A `404` is therefore not
+permanent: retry before treating a track as unknown, which is what its message
+says.
+
 Query parameters:
 
 - `track_name` — required.

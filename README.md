@@ -332,8 +332,23 @@ go run ./cmd/server stats
 ## Batch jobs
 
 Content that entered the library through a lookup is only ever as complete as that
-one lookup. Two batch jobs fill the gaps, and both are safe to run against the same
-databases the live server is using.
+one lookup. The server closes those gaps on its own, and the two batch jobs below
+remain for one-off full passes, refreshes, and work on a stopped instance.
+
+### Automatic metadata backfill
+
+The running server fills in metadata for unresolved tracks by itself, so nothing
+has to run on a schedule. It waits for the instance to be quiet for a minute
+before it starts, stands aside again as soon as a request arrives, and resumes
+after another quiet minute. With no traffic at all it simply walks the pending
+set instead of waiting.
+
+A track a client actually asked for outranks everything else: a lookup that came
+back empty is queued immediately, even while the instance is busy, and retried
+while it stays a recent request (ten minutes). That is why a track can be
+missing one minute and cached the next — and why the API's `404` says to check
+back. Only a definitive answer is written; a throttle or a provider failure
+leaves the track for a later pass.
 
 ```sh
 # List the available jobs
